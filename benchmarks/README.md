@@ -395,10 +395,12 @@ the same shape is subtracted and both values are kept.
   least one second and five runs have elapsed. The reported value is the median
   of three processes' medians; the minimum is kept for reference.
 - Calls over one second run once per process, three processes per case; calls
-  over a minute run once.
-- Single thread everywhere: `taskset` to one isolated core,
-  `OMP_NUM_THREADS=1`, FLINT's thread count set to one, msolve `-t 1`, and the
-  equivalent settings elsewhere.
+  over a minute run once. (The pilot runs calls over one second once, see
+  [the pilot](#gröbner-pilot).) Tools timed as a whole process (msolve) run
+  short cases in five processes instead of repeating in-process.
+- Single thread everywhere: every run is pinned to one CPU with
+  `sched_setaffinity`, msolve gets `-t 1`, FLINT keeps its default of one
+  thread, and the equivalent settings apply elsewhere.
 
 ### Memory
 
@@ -406,10 +408,12 @@ The primary memory figure is the computation's *incremental peak*: the highest
 resident set size during the call minus the resident size just before it.
 On Linux, in-process drivers (Mojo, Python, C) record `VmRSS`, write `5` to
 `/proc/self/clear_refs` to reset the high-water mark, run the call, and read
-`VmHWM`. External tools report the whole-process peak from `wait4`, minus the
-baseline run that loads the input and skips the call. Both the incremental
-and the total peak are stored; total peak includes interpreter and runtime
-overhead, which users also pay.
+`VmHWM`. Singular scripts do the same through `system("pid")` and a shell
+command; that command costs Singular about 1.6 MiB, so Singular figures below
+2 MiB are at the resolution floor. External tools report the whole-process peak
+from `wait4`, minus a baseline run of a trivial system with the same variables
+and field. Both the incremental and the total peak are stored; total peak
+includes interpreter and runtime overhead, which users also pay.
 
 Systems that reserve memory up front need generous settings so that a
 configured ceiling is not mistaken for the algorithm's need: PARI `parisizemax`,
@@ -418,18 +422,31 @@ memory limit.
 
 ### Limits and outcomes
 
-The default limits are 600 seconds and 16 GiB per run, with a 3600-second tier
-for hard cases. Memory is capped with a cgroup (`systemd-run --scope -p
-MemoryMax=…`) rather than `RLIMIT_AS`, because garbage-collected runtimes
-reserve large virtual ranges. Each run ends with one outcome: `ok`, `timeout`,
-`out-of-memory`, `error`, `unsupported`, or `wrong`.
+The default limits are 600 seconds and 12 GiB per run. Memory is capped with a
+child memory cgroup (v1 `memory.limit_in_bytes` or v2 `memory.max`, created per
+run) rather than `RLIMIT_AS`, because garbage-collected runtimes reserve large
+virtual ranges. Each run ends with one outcome: `ok`, `timeout`,
+`out-of-memory`, `error`, `unsupported`, `skipped`, or `wrong`.
+
+When a tool times out or runs out of memory on a ladder, its larger instances
+on that ladder are recorded as `skipped`. A first pass can use a shorter limit;
+rerunning with a longer `--timeout` retries only the instances that timed out
+under the shorter one and continues their ladders. The results file is
+append-only, and the last record for a case and tool wins.
 
 ### Host
 
-The primary host is a Linux x86-64 machine with the performance governor,
-turbo boost disabled, and no other load. A second run on Apple silicon covers
-Poly Mojo's other supported platform; there, memory comes from `wait4` only.
-Each result set records `lscpu`, memory size, kernel, and all versions.
+Published results come from the benchmark host this suite was built on: an
+Intel Xeon processor at 2.1 GHz with 4 vCPUs under KVM, 15 GiB of RAM, Ubuntu
+24.04, and Linux 6.18. The process group running the harness may use about
+13.4 GiB, which is why the memory cap is 12 GiB rather than the 16 GiB first
+planned. A virtual machine does not expose the frequency governor or turbo
+settings, and other tenants can add noise. The harness therefore pins each run
+to one vCPU, keeps the other vCPUs idle during measurement, records the median
+of repeated calls, and keeps the minimum and the CPU time beside it. Each
+result set records `lscpu`, memory size, kernel, and all versions. A second
+host, such as Apple silicon, can be added later; there, memory comes from
+`wait4` only.
 
 ## Correctness
 
@@ -468,36 +485,111 @@ claim that one host establishes a general speed advantage.
 
 ```text
 benchmarks/
-  README.md                 this design; later, how to run the suite
-  cases/<family>/*.json     case definitions, one file per case
-  generators/               deterministic generators for parametric families
-  convert/                  writers for each system's input syntax
+  README.md                 this design and how to run it
+  pixi.toml, pixi.lock      the competitors and the harness, pinned
+  harness/
+    generate.py             deterministic case generators (cases/ is regenerated, not committed)
+    polys.py                exact polynomials, record and infix text, canonical answers
+    tools.py                one adapter per tool and mode; Poly Mojo driver builds
+    measure.py              CPU pinning, cgroup memory cap, time limit, wait4 usage
+    run.py                  ladders, repetitions, resume, raw records
+    report.py               agreement, tables, ratios, plots
+    build_msolve.py         msolve from its tagged source
+    test_*.py               generator and format checks
   drivers/
-    poly_mojo/              one Mojo program per family, built with `mojo build`
-    python/                 SymPy, python-flint, mpmath, NumPy drivers
-    native/                 C and C++ drivers for FLINT, NTL
-    scripts/                Singular, GP, Macaulay2, Giac, Maxima, REDUCE templates
-  run.py                    isolation, limits, timing, memory, outcomes
-  check.py                  canonical answers and cross-library agreement
-  report.py                 tables, ratios, plots, documentation page
-  results/<host>/<date>/    raw JSON records and the environment description
+    poly_mojo/              Mojo drivers, built per variable count with `mojo build -D`
+    python/                 SymPy driver
+  results/<host>/<date>-<family>/  raw records, environment, report, and plots
 ```
 
-A case file holds an identifier, family, coefficient domain (with the modulus
-or the defining polynomial and isolating interval for algebraic coefficients),
-variable names, monomial order or variable order, the polynomials as exponent
-tuples with exact coefficients, generator parameters and seed, and a tier.
-The converters write each system's syntax from it; Poly Mojo receives the
-canonical versioned polynomial text that `sparse.loads` and `dense.loads` read,
-outside the timed region.
+A case file holds an identifier, family, ladder and size, field (`null` for QQ
+or a prime), monomial order, variable names, and the polynomials as exponent
+tuples with exact coefficients. The generator rewrites the case files on every
+run, and each record stores the SHA-256 of its case. Poly Mojo receives the
+canonical versioned polynomial text that `sparse.loads` reads; Singular gets
+an infix script; msolve gets its input format with denominators cleared. All
+input conversion happens outside the timed region.
 
-SymPy, mpmath, gmpy2, PARI, Singular, Giac, Maxima, NTL, libflint, and Z3 are
-available from conda-forge and belong in a `bench` pixi environment beside the
-existing Mojo toolchain. python-flint 0.9.0 (which bundles FLINT 3.6.0) and
-cvc5 come from PyPI through the same environment; the C driver links the same
-FLINT version. Macaulay2, msolve, Tarski with QEPCAD B, REDUCE, SMT-RAT,
-Yices 2, and MPSolve are not on conda-forge and go into a pinned container
-image built from tagged sources.
+Poly Mojo itself is built and compiled with the repository's own workspace, so
+the drivers use the toolchain the library is tested with. Mojo needs the
+variable count at compile time, so the harness builds one driver binary per
+variable count and field, caches it by the hash of the driver source and the
+library build, and compiles everything before any measurement starts. A build
+takes two to six minutes.
+
+The `benchmarks` pixi workspace pins SymPy, gmpy2, Singular, and the msolve
+build requirements from conda-forge, and python-flint 0.9.0 (bundling FLINT
+3.6.0) from PyPI. Later competitors available on conda-forge (PARI, Giac,
+Maxima, NTL, Z3) join the same workspace; cvc5 comes from PyPI. msolve is built
+from its v0.11.0 tag by `harness/build_msolve.py`. Macaulay2, Tarski with
+QEPCAD B, REDUCE, SMT-RAT, Yices 2, and MPSolve need the same treatment or a
+pinned container image.
+
+## Running the suite
+
+```sh
+cd benchmarks
+pixi run poly-build      # build Poly Mojo with the repository workspace
+pixi run msolve-build    # build msolve v0.11.0 into .cache/opt
+pixi run test            # check the generators against SymbolicData
+pixi run bench -- --family groebner --timeout 120 --single-above 1
+pixi run bench -- --family groebner --timeout 600 --single-above 1   # retry the timeouts
+pixi run bench -- --family streaming --processes 1
+pixi run report          # or: pixi run report -- results/<host>/<date>
+```
+
+`--tools` and `--cases` (a regular expression on case identifiers) select a
+subset. Each family writes to `results/<host>/<date>-<family>/records.jsonl`
+unless `--results` names another file; the report chooses its layout from the
+family.
+
+## Gröbner pilot
+
+The pilot runs the Gröbner family end to end against SymPy, Singular, and
+msolve. Each ladder starts with instances every tool solves in milliseconds
+and grows until only F4-class engines finish, so the scaling plots show where
+each tool stops, not just who wins on small inputs.
+
+| Ladder | Sizes | Variables | Fields and orders |
+|---|---|---|---|
+| katsura-n | 3 … 12 | n + 1 | QQ and GF(65521), grevlex; lex for 3 … 6 |
+| cyclic-n | 4 … 9 | n | QQ and GF(65521), grevlex; lex for 4 … 6 |
+| eco-n | 5 … 13 | n | QQ and GF(65521), grevlex |
+| noon-n | 3 … 9 | n | QQ and GF(65521), grevlex |
+| reimer-n | 3 … 6 | n | QQ and GF(65521), grevlex |
+| random dense quadratics | 3 … 10 (lex 2 … 5) | n | QQ and GF(65521), grevlex and lex |
+
+The pilot keeps calls over one second to a single process
+(`--single-above 1`) and runs a first pass with a 120-second limit, then a
+second pass at the full 600 seconds that retries only the instances that timed
+out. SymPy's flint ground types run on the QQ grevlex ladders, where they change
+the coefficient arithmetic; over GF(p), both variants share the same code path.
+Results and the draft report are in [`results/`](results/).
+
+## Streaming study
+
+Streaming matters when the retained output, not the computation's working
+set, dominates memory. The study compares, for the same verified claim, a
+materialized route that keeps the whole result and then checks it with a
+streamed route that feeds an incremental checker:
+
+| Workload | Materialized route | Streamed route | Sizes |
+|---|---|---|---|
+| CAD of *k* random lines in the plane (O(*k*³) cells, rational samples) | `cad.decompose`, then `cad.check` | `cad.checker` and `cad.decompose_to` | *k* = 4 … 64, up to about 500,000 cells |
+| CAD of *k* random circles (algebraic samples) | same | same | *k* = 2 … 16 |
+| CAD of *k* random planes (three-level tower) | same | same | *k* = 2 … 8 |
+| Real roots of Wilkinson polynomials, 64-bit accuracy | `real_root_cover`, then `roots.check` | `real_root_checker` and `real_root_cover_to` | degree 50 … 1600 |
+| Real roots of Chebyshev T_n, 64-bit accuracy | same | same | degree 100 … 3200 |
+| Write (1 + x + y + z + t)^n as text | `sparse.dumps` to a string, then a file | `sparse.dump` into a file sink | n = 10 … 80, up to about 1.9 million terms |
+| Read the same polynomial back | read the file into a string, then `sparse.loads` | `sparse.load` from a file source | same |
+
+A third CAD mode, `cad.decompose` without the check, shows what an unchecked
+retained decomposition costs. Each mode runs in its own process, and the
+recorded figure is the incremental peak of the measured work. The ladders run
+past the point where the materialized route exceeds the 12 GiB cap, so the
+results show both the memory ratio while both routes finish and the size at
+which only the streamed route still does. Counts of cells, roots, and terms
+must agree between modes.
 
 ## Case sources
 
@@ -516,9 +608,9 @@ image built from tagged sources.
 
 ## Rollout
 
-1. **Pilot:** the harness, case format, and correctness check for Gröbner
-   bases against SymPy, Singular, and msolve, end to end through a draft
-   report.
+1. **Pilot (in progress):** the harness, case format, and correctness check
+   for Gröbner bases against SymPy, Singular, and msolve, end to end through a
+   draft report, plus the streaming study.
 2. **First public release:** Gröbner bases, CAD and satisfiability,
    univariate and multivariate factorization, real roots, and arithmetic,
    against SymPy, FLINT, PARI, Singular, msolve, Tarski with QEPCAD B,
@@ -527,4 +619,4 @@ image built from tagged sources.
    and algebraic numbers, adding Macaulay2, Giac, Maxima, NTL, Redlog, Yices 2,
    and MPSolve.
 4. **Third release:** series, interpolation, rational functions, enclosure
-   evaluation, and the internal streaming and certification studies.
+   evaluation, and certification studies for the other families.

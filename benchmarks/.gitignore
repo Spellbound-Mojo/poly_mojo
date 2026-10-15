@@ -1,0 +1,6 @@
+.pixi/*
+!.pixi/config.toml
+.cache/
+__pycache__/
+# Case files are regenerated deterministically by `pixi run generate`.
+cases/
