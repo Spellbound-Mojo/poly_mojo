@@ -61,18 +61,18 @@ matrix compares the engine once rather than through each front end.
 | Library | Version found (Oct 2026) | Language | License | Role | Driver |
 |---|---|---|---|---|---|
 | [SymPy](https://www.sympy.org) | 1.14.0 | Python | BSD-3-Clause | Peer | Python, `sympy.polys` objects |
-| [python-flint](https://github.com/flintlib/python-flint) / [FLINT](https://flintlib.org) | 0.8.0 (conda) / FLINT 3.5.0 | C, Python bindings | MIT / LGPL-3.0+ | Reference | Python; a small C driver for functions the bindings do not expose |
-| [PARI/GP](https://pari.math.u-bordeaux.fr) | 2.17.3 | C | GPL-2.0+ | Reference | `gp` script |
+| [python-flint](https://github.com/flintlib/python-flint) / [FLINT](https://flintlib.org) | 0.9.0 (PyPI), bundling FLINT 3.6.0 | C, Python bindings | MIT / LGPL-3.0+ | Reference | Python; a C driver for what the bindings do not expose (`qqbar`, real-root isolation, exact interpolation, `fmpz_poly_q`) |
+| [PARI/GP](https://pari.math.u-bordeaux.fr) | 2.17.3 (conda-forge; 2.19.0 upstream) | C | GPL-2.0+ | Reference | `gp` script |
 | [NTL](https://libntl.org) | 11.6.0 | C++ | LGPL-2.1+ | Reference | C++ driver |
 | [Singular](https://www.singular.uni-kl.de) | 4.4.1 | C/C++ | GPL-2.0+ | Reference | Singular script |
 | [Macaulay2](https://macaulay2.com) | pin at first run | C++, M2 | GPL | Reference | M2 script |
-| [Giac](https://www-fourier.ujf-grenoble.fr/~parisse/giac.html) | 2.0.0 | C++ | GPL-3.0+ | Reference | `giac` script |
+| [Giac](https://www-fourier.ujf-grenoble.fr/~parisse/giac.html) | 2.0.0 (conda-forge; 2.1.0 upstream) | C++ | GPL-3.0+ | Reference | `giac` script |
 | [Maxima](https://maxima.sourceforge.io) | 5.49.0 | Common Lisp | GPL-2.0+ | Peer | Maxima batch file |
-| [msolve](https://msolve.lip6.fr) | pin at first run | C | GPL-2.0+ | Reference | command line |
-| [QEPCAD B](https://www.usna.edu/Users/cs/wcbrown/qepcad/B/QEPCAD.html), [Tarski](https://github.com/chriswestbrown/tarski) | pin at first run | C++ | see note | Specialist | batch input |
+| [msolve](https://github.com/algebraic-solving/msolve) | 0.11.0 | C | GPL-2.0+ | Reference | command line |
+| [Tarski](https://github.com/chriswestbrown/tarski), with QEPCAD B | 1.42, bundling QEPCAD B 1.80 | C++ | ISC-style | Specialist | batch input (`tarski`, `qepcad`) |
 | [Redlog](https://www.redlog.eu) (REDUCE) | pin at first run | Lisp | BSD | Specialist | REDUCE script |
-| [Z3](https://github.com/Z3Prover/z3), [cvc5](https://cvc5.github.io), [SMT-RAT](https://github.com/ths-rwth/smtrat), [Yices 2](https://yices.csl.sri.com) | pin at first run | C/C++ | MIT, BSD, MIT, GPL-3.0 | Specialist | SMT-LIB 2 files |
-| [MPSolve](https://numpi.dm.unipi.it/software/mpsolve) | pin at first run | C | GPL-3.0 | Specialist | command line |
+| [Z3](https://github.com/Z3Prover/z3), [cvc5](https://cvc5.github.io), [SMT-RAT](https://github.com/ths-rwth/smtrat), [Yices 2](https://yices.csl.sri.com) | pin at first run; cvc5 1.4.2, Yices 2.7.0 | C/C++ | MIT, BSD-3, MIT, GPL-3.0 | Specialist | SMT-LIB 2 files |
+| [MPSolve](https://numpi.dm.unipi.it/software/mpsolve) | 3.2.x | C | GPL-3.0 | Specialist | command line |
 | [mpmath](https://mpmath.org), NumPy | 1.4.1, pin | Python | BSD | Context | Python |
 
 Roles say how to read a comparison:
@@ -117,21 +117,21 @@ feature or another column already measures the same engine.
 | Univariate factorization | ZZ, QQ | ● | ● | ● | ● | ● | | ● | ● | | |
 | Univariate factorization | GF(p) | ● | ● | ● | ● | ● | | ● | ● | | |
 | Factorization over extensions | QQi, AA, QQbar | ● | ◐ | ● | | ● | | ◐ | ● | | |
-| Multivariate factorization | QQ, GF(p) | ● | ● | | | ● | | ● | ● | | |
-| Gröbner basis, grevlex | GF(p) | ● | | | | ● | ● | ● | ◐ | ● | CoCoA 5 (optional) |
+| Multivariate factorization | QQ, GF(p) | ● | ● | ● | | ● | | ● | ● | | |
+| Gröbner basis, grevlex | GF(p) | ● | | | | ● | ● | ● | | ● | CoCoA 5 (optional) |
 | Gröbner basis, grevlex | QQ | ● | ◐ | | | ● | ● | ● | ● | ● | CoCoA 5 (optional) |
-| Gröbner basis, lex and elimination | QQ, GF(p) | ● | | | | ● | ● | ● | ● | ◐ | |
+| Gröbner basis, lex and elimination | QQ, GF(p) | ● | | | | ● | ● | ● | ◐ | ◐ | |
 | Gröbner basis over extensions | QQi, AA | ● | | | | ● | ● | | | | |
 | Ideal membership with cofactors | QQ, GF(p) | ◐ | | | | ● | ● | ◐ | ◐ | | |
-| Real root isolation and refinement | ZZ, QQ | ● | ◐ | ◐ | | | ● | ● | ◐ | ● | |
-| Exact complex roots with multiplicities | ZZ, QQ, QQi | ● | ● | | | | | | | | |
+| Real root isolation and refinement | ZZ, QQ | ● | ● | ◐ | | | ● | ● | ◐ | ● | CoCoA 5 (optional) |
+| Exact complex roots with multiplicities | ZZ, QQ | ● | ● | | | | | | | | |
 | Validated numerical complex roots | ZZ, QQ, balls | ◐ | ● | ◐ | | | | | | | MPSolve; mpmath, NumPy as context |
 | Real and complex algebraic number arithmetic | AA, QQbar | ● | ● | ◐ | | ◐ | ◐ | | | | |
-| Full cylindrical algebraic decomposition | ZZ, QQ | | | | | | ◐ | | | | QEPCAD B, Tarski, Redlog |
+| Full cylindrical algebraic decomposition | ZZ, QQ | | | | | | | | | | QEPCAD B, Tarski, Redlog |
 | Satisfiability of sign conditions | ZZ, QQ | | | | | | | | | | Z3, cvc5, SMT-RAT, Yices 2; QEPCAD B, Tarski, Redlog via ∃ |
 | Formal power series | QQ, GF(p) | ● | ● | ● | | | | ◐ | ◐ | | |
 | Interpolation and multipoint evaluation | QQ, GF(p) | ● | ● | ● | ● | | | | | | |
-| Rational functions and partial fractions | QQ, QQi | ● | ◐ | | | | | ● | ● | | |
+| Rational functions and partial fractions | QQ | ● | ◐ | | | | | ● | ● | | |
 | Enclosure (ball) evaluation | QQ, balls | | ● | | | | | | | | mpmath as context |
 
 Two kinds of measurement have no competitor and run as internal studies:
@@ -158,7 +158,7 @@ cofactors.
 
 | Case | Parameters | Source |
 |---|---|---|
-| cyclic-n | n = 5, 6, 7 | SymbolicData; msolve examples |
+| cyclic-n | n = 5, 6, 7 | SymbolicData |
 | katsura-n | n = 5 … 9 | SymbolicData |
 | eco-n, noon-n, reimer-n | eco 6 … 9, noon 4 … 7, reimer 4, 5 | SymbolicData |
 | Dense random quadratics | k equations in k variables, k = 4 … 7 | generated |
@@ -167,19 +167,34 @@ cofactors.
 | Gaussian and algebraic coefficients | katsura-n with coefficients in QQi or QQ(√2), n = 4 … 6 | generated |
 | Membership | 1000 reductions of ideal members and nonmembers against a prepared basis | generated |
 
-Fields: QQ, and GF(65521), a prime every compared tool accepts. Competitors:
-SymPy `groebner(..., order=..., method="buchberger")` and `method="f5b"`
-(`modulus=p` for GF(p)); Singular `std` and the best of `slimgb`/`modStd`;
-Macaulay2 `gb` and its F4 strategy; msolve; Giac `gbasis`; Maxima
-`poly_reduced_grobner`; optionally CoCoA 5 `ReducedGBasis`. Membership with
-cofactors compares with Singular `lift` and Macaulay2 `//`. SymPy, Giac, and
-Maxima only return normal forms, hence ◐.
+Fields: QQ, and GF(65521), a prime every compared tool accepts (msolve
+requires a characteristic below 2³¹). Competitors:
+
+- SymPy `groebner(..., order=..., method="buchberger")` and `method="f5b"`,
+  with `modulus=p` for GF(p) and `domain=QQ_I` or `extension=` for extensions.
+  SymPy's default order is lex, so the driver always passes `order`.
+- Singular `std`, and the best of `slimgb` and `modStd`.
+- Macaulay2 `gb`, plus `groebnerBasis(..., Strategy => "F4")` over GF(p) only,
+  where that strategy is available (it is marked experimental).
+- msolve `-g 2` for the reduced grevlex basis; over QQ it lifts modular
+  bases. Its only other order is a two-block elimination order (`-e`), hence
+  ◐ for lex.
+- Giac `gbasis` (F4 modulo p, multimodular over QQ).
+- Maxima's `grobner` package, `poly_reduced_grobner`, over QQ only (◐ for the
+  lex row, which also covers GF(p)).
+- FLINT `fmpz_mpoly_vec.buchberger_naive`, over ZZ only and without pair
+  criteria (◐); its basis is made monic over QQ before comparison.
+- Optionally CoCoA 5 `ReducedGBasis`.
+
+Membership with cofactors compares with Singular `lift` and Macaulay2 `//`.
+SymPy, Giac, and Maxima only return normal forms against the basis, hence ◐.
 
 Check: the reduced, monic basis in canonical order, compared by digest. A tool
 that returns a non-reduced basis is interreduced by the harness, untimed.
 Report the algorithm class next to each time: Buchberger with pair criteria
-(Poly Mojo, SymPy `buchberger`, Singular `std`, Maxima) or F4/F5-style
-linear algebra (msolve, Giac, Macaulay2 F4, SymPy `f5b`).
+(Poly Mojo, SymPy `buchberger`, Singular `std` and `slimgb`, Macaulay2 `gb`,
+Maxima), signature-based (SymPy `f5b`), multimodular (Singular `modStd`), or
+F4-style linear algebra (msolve, Giac, Macaulay2 F4).
 
 ### Cylindrical algebraic decomposition and real constraints
 
@@ -196,12 +211,17 @@ Poly Mojo: `cad.decompose` (Lazard default, and `lazard=False` for McCallum),
 | Conjunctions | SMT-LIB QF_NRA instances with at most 6 variables that are pure conjunctions of sign conditions | SMT-LIB benchmark library |
 | Paired SAT/UNSAT | the same constraint set with a satisfiable and an unsatisfiable variant | generated |
 
-Competitors for full decomposition: QEPCAD B with `full-cad`, Tarski, Redlog
-`rlcad`, and the Macaulay2 CAD package (◐ where it builds open cells only).
+Competitors for full decomposition: QEPCAD B with `full-cad`, Tarski, and
+Redlog `rlcad`. SymPy has no multivariate CAD. The Macaulay2
+CylindricalAlgebraicDecomposition package builds open CADs with the Lazard
+projection, but it is not distributed with Macaulay2; add it as an open-cell
+comparison only if a tagged release can be pinned.
+
 Competitors for satisfiability: Z3 (nlsat), cvc5 (cylindrical algebraic
-coverings), SMT-RAT, Yices 2 (MCSAT with libpoly), and the CAD tools through
-existential quantifier elimination. `cad.solve` accepts a conjunction, so
-SMT-LIB instances with Boolean structure stay out of the suite.
+coverings, which require a LibPoly build), SMT-RAT (coverings and CAD
+back ends), Yices 2 (MCSAT with libpoly, built with `--enable-mcsat`), and the
+CAD tools through existential quantifier elimination. `cad.solve` accepts a
+conjunction, so SMT-LIB instances with Boolean structure stay out of the suite.
 
 Check: satisfiable or unsatisfiable must agree; a satisfying point is
 substituted exactly and its signs checked independently. For full CAD, every
@@ -219,16 +239,18 @@ Poly Mojo: `dense.factor`; certified mode adds the product check.
 | Swinnerton-Dyer polynomials | S4 … S7 (degree 16 … 128) | `sympy.polys.specialpolys` |
 | Cyclotomic products | x^N − 1 for N = 360, 2520, 5040 | generated |
 | Products of random irreducibles | k ∈ {2, 8} factors of degree 10 … 100, 16- and 256-bit coefficients | generated |
-| Hard recombination | van Hoeij's and Zimmermann's test polynomials | published test sets |
+| Hard recombination | van Hoeij's test polynomials | published test set |
 | Repeated factors | f³g² with random f, g | generated |
 | Finite fields | random degree 100 … 2000 over p = 3, 65521, and a 61-bit prime | generated |
 | Extensions | x^n ± 2 and cyclotomic polynomials over QQi, QQ(√2), and QQbar | generated |
 
 Competitors: FLINT (`fmpz_poly.factor`, `nmod_poly.factor`), NTL, PARI
 (`factor`, `factormod`, `nffactor`), Singular `factorize` (extensions through a
-`minpoly`), Giac `factor`/`cfactor`, Maxima `factor`/`gfactor`, SymPy
-`factor_list` with `modulus=`, `gaussian=True`, or `extension=`. Over QQbar,
-FLINT's `qqbar` roots give the linear factors, hence ◐.
+`minpoly`), Giac `factor`, Maxima `factor` (with a minimal polynomial for
+extensions) and `gfactor`, SymPy `factor_list` with `modulus=`,
+`gaussian=True`, or `extension=`. For extensions, FLINT is compared over QQbar
+only, where its `qqbar` roots give the linear factors, and Giac over QQi only,
+with `cfactor`; hence ◐.
 
 Check: the product identity and the factor multiset after normalization
 (primitive with positive leading coefficient over ZZ, monic over fields).
@@ -240,14 +262,16 @@ Poly Mojo: `sparse.factor`, `sparse.gcd`, `sparse.resultant`.
 | Case | Parameters | Source |
 |---|---|---|
 | Fateman–Liao gcd families | `fateman_poly_F_1`, `F_2`, `F_3`, n = 2 … 8 | `sympy.polys.specialpolys` |
-| Wang's examples | the Wang (1978) test polynomials | SymPy factorization tests |
+| Wang-algorithm test polynomials | `w_polys` and `f_polys`, the inputs of SymPy's `dmp_zz_wang` tests | `sympy.polys.specialpolys` |
 | Dense products | (1 + x + y + z)^k · (2 + x + y + z)^k, k = 5 … 15 | generated |
 | Sparse random products | 3 … 8 variables, 10 … 100 terms per factor | generated |
 | Resultants | eliminate one variable from random pairs in 2–3 variables, degree ≤ 10 | generated, CAD projection sizes |
 
-Competitors: FLINT (`fmpz_mpoly` / `fmpq_mpoly` `factor`, `gcd`, `resultant`),
-Singular, Macaulay2, Giac, Maxima, SymPy. PARI computes multivariate gcds and
-resultants in its recursive representation, hence ◐.
+Competitors: FLINT (`fmpz_mpoly`, `fmpq_mpoly`, and `nmod_mpoly` `factor`,
+`gcd`, `resultant`, `discriminant`), Singular, Macaulay2, Giac, Maxima, SymPy,
+and PARI `factor`, which factors multivariate polynomials recursively. PARI
+gcds and resultants work in that recursive representation and choose the
+main variable implicitly, hence ◐ for gcds.
 
 ### Arithmetic
 
@@ -277,18 +301,20 @@ prepared `dense.sturm_sequence`.
 
 | Case | Parameters | Source |
 |---|---|---|
-| Mignotte | x^n − 2(ax − 1)², n = 10 … 400, a = 100 | classic |
-| Wilkinson | ∏(x − i) for i = 1 … n, n = 20 … 640 | classic |
+| Mignotte | x^n − 2(ax − 1)², n = 10 … 400, a = 100 | classic; MPSolve test set |
+| Wilkinson | ∏(x − i) for i = 1 … n, n = 20 … 640 | classic; MPSolve test set |
 | Chebyshev | T_n, n = 100 … 1000 | generated |
 | Random dense | ±1 and 64-, 1024-bit coefficients, n = 100 … 2000 | generated |
-| Squarefree-free | products with repeated factors | generated |
+| Repeated roots | products with repeated factors | generated |
 | Refinement | refine every root to 2⁻⁵³ and 2⁻¹⁰⁰⁰ | all of the above |
 
-Competitors: SymPy `Poly.intervals` and `real_roots`, msolve (univariate
-input), Giac `realroot`, Macaulay2 `RealRoots`, FLINT
-`arb_fmpz_poly_complex_roots` filtered to real roots (◐: complex search),
-PARI `polrootsreal` (◐: approximations, not intervals), Maxima `realroots`
-(◐: rational approximations).
+Competitors: SymPy `Poly.intervals` and `real_roots` (continued fractions),
+FLINT 3.6 `fmpz_poly_isolate_real_roots` and `arb_fmpz_poly_real_roots` with
+`arb_fmpz_poly_refine_root_arb` (C driver; python-flint's `real_roots` raises
+`NotImplementedError`), msolve (univariate input), Giac `realroot`, Macaulay2
+`RealRoots`, optionally CoCoA 5 `RealRoots` and `RealRootRefine`. PARI
+`polrootsreal` (◐) and Maxima `realroots` (◐) return guaranteed or rational
+approximations rather than isolating intervals.
 
 Check: the number of distinct real roots, and each interval containing exactly
 one root of a high-precision FLINT/Arb reference.
@@ -300,17 +326,22 @@ Poly Mojo: `dense.complex_roots` (exact values with multiplicities),
 `algebraic.Real` and `algebraic.Complex`.
 
 Cases: the real-root families above, Mandelbrot polynomials of degree
-2^k − 1 (k = 6 … 10) from the MPSolve test set, and powers f^k for multiplicity
-handling. Algebraic numbers: minimal polynomials of √2 + √3 + … + √p_k for
-k = 2 … 5, sums and products of roots of random quintics, and signs of
-polynomials at algebraic points chosen to cause heavy cancellation.
+2^k − 1 (k = 6 … 10) and other polynomials from MPSolve's test set, and powers
+f^k for multiplicity handling. Algebraic numbers: minimal polynomials of
+√2 + √3 + … + √p_k for k = 2 … 5, sums and products of roots of random
+quintics, and signs of polynomials at algebraic points chosen to cause heavy
+cancellation.
 
 Competitors: exact roots with SymPy `Poly.all_roots` and FLINT
-`qqbar_roots_fmpz_poly`; validated covers with FLINT
-`arb_fmpz_poly_complex_roots` and MPSolve; PARI `polroots` (◐); mpmath
-`polyroots` and NumPy `roots` as context. Algebraic arithmetic with FLINT
-`qqbar`, SymPy `minimal_polynomial` and algebraic fields, and PARI number
-fields (◐).
+`qqbar_roots_fmpz_poly` (C driver); validated covers with python-flint
+`fmpz_poly.complex_roots` (disjoint Arb enclosures with multiplicities) and
+MPSolve (`-G i` for isolation, with guaranteed inclusion radii); SymPy
+`CRootOf` isolating rectangles refined with `eval_rational` (◐: exact
+rectangles rather than balls); PARI `polroots` (◐: guaranteed relative
+accuracy, but no enclosure); mpmath `polyroots` and NumPy `roots` as context.
+Algebraic arithmetic with FLINT
+`qqbar` (C driver), SymPy `minimal_polynomial` and algebraic fields, and PARI
+number fields (◐).
 
 Check: counts with multiplicity, disjoint enclosures, and each enclosure
 containing a reference root.
@@ -318,14 +349,18 @@ containing a reference root.
 ### Series, interpolation, rational functions, and evaluation
 
 - **Formal series:** reciprocal, exponential, and composition truncated at
-  order 10², 10³, 10⁴ over QQ and GF(p). FLINT `*_inv_series`, `*_exp_series`,
-  `*_compose_series`; PARI series with `O(x^n)`; SymPy `ring_series`; Giac and
-  Maxima `taylor` (◐: expression-level series).
+  order 10², 10³, 10⁴ over QQ and GF(p). FLINT through python-flint's
+  `fmpq_series` and `nmod_series`, or the C `*_inv_series`, `*_exp_series`,
+  and `*_compose_series` functions; PARI series with `O(x^n)`; SymPy
+  `ring_series` (`rs_series_inversion`, `rs_exp`, `rs_subs`); Giac and Maxima
+  `taylor` (◐: expression-level series).
 - **Interpolation and multipoint evaluation:** 10² … 10⁴ points over QQ and
-  GF(p). FLINT, PARI `polinterpolate`, NTL, SymPy `interpolate`.
+  GF(p). FLINT (`fmpz_mod_poly.multipoint_evaluate` in python-flint, exact
+  interpolation in the C driver), PARI `polinterpolate`, NTL, SymPy
+  `interpolate`.
 - **Rational functions:** normalization of large quotients and partial
   fractions of 1/((x − 1)^k · ∏(x² + i)). SymPy `cancel`/`apart`, Giac and
-  Maxima `partfrac`; FLINT `fmpz_poly_q` for normalization only (◐).
+  Maxima `partfrac`; FLINT `fmpz_poly_q` (C driver) for normalization only (◐).
 - **Enclosure evaluation:** degree 10³ … 10⁵ at many points at 64, 256, and
   1024 bits, including points near roots. FLINT `arb_poly`/`acb_poly`
   evaluation; mpmath `polyval` as context.
@@ -339,9 +374,12 @@ reads the case, builds the library's objects, and only then starts the timer
 around the single call under test. It writes one JSON record with the outcome,
 times, memory, and the canonical answer. Python drivers construct `sympy.polys`
 and python-flint objects directly, so expression parsing stays out of the
-timed region; SymPy runs with an explicit `SYMPY_GROUND_TYPES` (gmpy2) and
-clears its cache between repetitions. Poly Mojo drivers are compiled once with
-`mojo build`, and the build time is recorded separately.
+timed region. SymPy clears its cache between repetitions and always runs with
+an explicit `SYMPY_GROUND_TYPES`: SymPy 1.14 switches to `flint` ground types
+automatically when python-flint is installed, which hands some univariate work
+to FLINT. The SymPy column uses `gmpy`; a `flint` run is reported as a separate
+variant, since it is what many users get by default. Poly Mojo drivers are
+compiled once with `mojo build`, and the build time is recorded separately.
 
 CAS scripts use each system's own clock (`rtimer` in Singular, `getabstime` in
 GP, `elapsedTime` in Macaulay2, `time` in Giac, `elapsed_real_time` in Maxima).
@@ -453,11 +491,28 @@ The converters write each system's syntax from it; Poly Mojo receives the
 canonical versioned polynomial text that `sparse.loads` and `dense.loads` read,
 outside the timed region.
 
-SymPy, python-flint, mpmath, PARI, Singular, Giac, Maxima, NTL, and Z3 are
+SymPy, mpmath, gmpy2, PARI, Singular, Giac, Maxima, NTL, libflint, and Z3 are
 available from conda-forge and belong in a `bench` pixi environment beside the
-existing Mojo toolchain; cvc5 is on PyPI. Macaulay2, msolve, QEPCAD B, Tarski,
-REDUCE, SMT-RAT, Yices 2, and MPSolve are not on conda-forge and go into a
-pinned container image built from tagged sources.
+existing Mojo toolchain. python-flint 0.9.0 (which bundles FLINT 3.6.0) and
+cvc5 come from PyPI through the same environment; the C driver links the same
+FLINT version. Macaulay2, msolve, Tarski with QEPCAD B, REDUCE, SMT-RAT,
+Yices 2, and MPSolve are not on conda-forge and go into a pinned container
+image built from tagged sources.
+
+## Case sources
+
+- [SymbolicData](https://github.com/symbolicdata/data) (`XMLResources/IntPS`):
+  cyclic, katsura, eco, noon, and reimer systems.
+- [A Repository for CAD Examples](https://researchdata.bath.ac.uk/69/)
+  (Wilson, Bradford, Davenport): problems with QEPCAD input files.
+- [SMT-LIB](https://smt-lib.org) 2025 non-incremental release, `QF_NRA`.
+- [MPSolve](https://github.com/robol/MPSolve) `src/tests/unisolve`: about 180
+  univariate test polynomials, including Mandelbrot, Chebyshev, Wilkinson, and
+  Mignotte-type families.
+- `sympy.polys.specialpolys`: `swinnerton_dyer_poly`, `cyclotomic_poly`,
+  `fateman_poly_F_1` … `F_3`, `w_polys`, `f_polys`, and `random_poly`.
+- Fateman's and Monagan–Pearce's multiplication problems, as defined in their
+  papers; there is no maintained dataset, so the generator writes them.
 
 ## Rollout
 
@@ -466,10 +521,10 @@ pinned container image built from tagged sources.
    report.
 2. **First public release:** Gröbner bases, CAD and satisfiability,
    univariate and multivariate factorization, real roots, and arithmetic,
-   against SymPy, FLINT, PARI, Singular, msolve, QEPCAD B or Tarski, Z3, and
-   cvc5.
+   against SymPy, FLINT, PARI, Singular, msolve, Tarski with QEPCAD B,
+   SMT-RAT, Z3, and cvc5.
 3. **Second release:** gcds and resultants, extension fields, complex roots,
-   and algebraic numbers, adding Macaulay2, Giac, Maxima, NTL, Redlog, SMT-RAT,
-   Yices 2, and MPSolve.
+   and algebraic numbers, adding Macaulay2, Giac, Maxima, NTL, Redlog, Yices 2,
+   and MPSolve.
 4. **Third release:** series, interpolation, rational functions, enclosure
    evaluation, and the internal streaming and certification studies.
