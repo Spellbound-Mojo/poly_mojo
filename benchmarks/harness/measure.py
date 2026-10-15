@@ -98,7 +98,13 @@ class Process:
 
 
 def run(cmd, *, cwd, env, timeout_s, memory_bytes, cpu, stdout, stderr):
-    """Run `cmd`, pinned to `cpu`, and return its resource use."""
+    """Run `cmd`, pinned to `cpu`, and return its resource use.
+
+    `maxrss_kb` is wait4's ru_maxrss. Linux carries the forked parent's
+    high-water mark across exec into it, so for a child of this (large) Python
+    process it overstates small peaks; use `cgroup_peak_kb`, which counts only
+    memory charged after the child joined its fresh cgroup.
+    """
     group = Cgroup.create(memory_bytes) if memory_bytes else None
 
     def child_setup():

@@ -134,7 +134,9 @@ def run_case(tool, case, settings, baseline):
         'time_min_s': min(mins),
         'reps': reps,
         'processes': len(medians),
-        'peak_total_kib': process.maxrss_kb,
+        # ru_maxrss from wait4 inherits the forked harness's high-water mark, so
+        # total peaks come from the driver's own VmHWM or from the run's cgroup.
+        'peak_total_kib': result['peak_kb'] if tool.in_process else process.cgroup_peak_kb,
         'cgroup_peak_kib': process.cgroup_peak_kb,
         'process': process.as_dict(),
     }
@@ -148,7 +150,7 @@ def run_case(tool, case, settings, baseline):
     if tool.in_process:
         record['peak_incremental_kib'] = result['peak_kb'] - result['rss_before_kb']
     else:
-        record['peak_incremental_kib'] = max(process.maxrss_kb - baseline['maxrss_kb'], 0)
+        record['peak_incremental_kib'] = max(process.cgroup_peak_kb - baseline['cgroup_peak_kb'], 0)
         record['baseline'] = baseline
     if 'check_ns' in result and result.get('check_ns'):
         record['check_s'] = result['check_ns'] / 1e9
@@ -176,8 +178,10 @@ def baseline_for(tool, case, settings, cache):
                             cpu=settings['cpu'], stdout=work / 'stdout.txt', stderr=work / 'stderr.txt')
             samples.append(p)
             shutil.rmtree(work, ignore_errors=True)
+        if any(p.cgroup_peak_kb is None for p in samples):
+            raise SystemExit('Measuring a whole-process tool needs a writable memory cgroup.')
         cache[key] = {'wall_s': statistics.median(p.wall_s for p in samples),
-                      'maxrss_kb': int(statistics.median(p.maxrss_kb for p in samples))}
+                      'cgroup_peak_kb': int(statistics.median(p.cgroup_peak_kb for p in samples))}
     return cache[key]
 
 

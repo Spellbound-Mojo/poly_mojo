@@ -132,7 +132,7 @@ def ratios(records, tools, floor_key, floor):
 
 def summary_table(records, tools, key, floor, title):
     groups, solved, totals = ratios(records, tools, key, floor)
-    competitors = [t for t in tools if t != BASE]
+    competitors = [t for t in tools if t not in (BASE, 'polymojo-certified')]
     lines = [f'**{title}** (geometric mean of competitor ÷ Poly Mojo; above 1 means Poly Mojo used less; *n* = cases compared)', '',
              '| Field, order | ' + ' | '.join(LABEL[t] for t in competitors) + ' |',
              '|---|' + '---|' * len(competitors)]
