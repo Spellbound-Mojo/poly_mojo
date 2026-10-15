@@ -32,7 +32,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
 OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 """
-from .coefficients import CoefficientField
+from .coefficients import CoefficientField, QQ
 from ._product_stream import _subtract_column
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _sum
 from .monomial import Monomial, MonomialOrder
@@ -40,6 +40,7 @@ from .sparse import SparsePoly, Term
 from .division import _divide_prepared, _ReducerData, divide_by_list
 from .certificates import ListDivision, MembershipCertificate
 from ._sparse_ops import _subtract_multiples
+from ._packed_groebner import _packed_groebner, _packed_groebner_rational, _packed_supported
 
 
 @fieldwise_init
@@ -243,6 +244,19 @@ def groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: Monomi
     if order.kind == MonomialOrder.KERNEL:
         raise PolyError(PolyErrorKind.DOMAIN, "Groebner bases require a monomial order")
     order.validate(Monomial(), budget)
+    if not track_cofactors and _packed_supported(order):
+        # Same algorithm and result, on packed exponent vectors.
+        for i in range(len(generators)):
+            budget.charge(1)
+            generators[i].check_invariants(budget)
+            if generators[i].ring != generators[0].ring:
+                raise PolyError(PolyErrorKind.DOMAIN, "Groebner generators in different fields")
+        comptime if C == QQ:
+            # Over QQ the packed engine runs fraction-free on integer coefficients.
+            var rational = _packed_groebner_rational(rebind[List[SparsePoly[QQ]]](generators), order, budget)
+            return GroebnerBasis[C](order.copy(), rebind_var[List[SparsePoly[C]]](rational^), Optional[List[List[SparsePoly[C]]]](None))
+        else:
+            return GroebnerBasis[C](order.copy(), _packed_groebner(generators, order, budget), Optional[List[List[SparsePoly[C]]]](None))
     var arena = List[SparsePoly[C]]()
     var rows = List[List[SparsePoly[C]]]()
     var data = _ReducerData[C]()

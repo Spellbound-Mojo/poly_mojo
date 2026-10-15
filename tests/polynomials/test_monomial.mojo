@@ -12,6 +12,12 @@ def generated(mut rng: SplitMix64, mut work: Budget) raises -> Monomial:
             pairs.append((Int64(i), e))
     return Monomial(pairs^, work)
 
+def dense_divides(a: Monomial, b: Monomial, mut work: Budget) raises -> Bool:
+    for i in range(4):
+        if a.exponent(Int64(i), work) > b.exponent(Int64(i), work):
+            return False
+    return True
+
 def main() raises:
     var c = Checker("monomials")
     var work = Budget()
@@ -53,6 +59,18 @@ def main() raises:
             c.check(a.divides(common, work) and b.divides(common, work), "lcm multiple")
             c.check(common.divides(product, work), "lcm divides product")
             c.check(product.degree(work) == a.degree(work) + b.degree(work), "total degree")
+    # Orders over variables 0..n-1 compare in one merge pass. An unused extra
+    # variable keeps the same priorities but forces the per-variable path.
+    for kind in range(1, 4):
+        var direct = MonomialOrder(UInt8(kind), [0, 1, 2, 3], work)
+        var general = MonomialOrder(UInt8(kind), [0, 1, 2, 3, 9], work)
+        for _ in range(300):
+            var a = generated(rng, work)
+            var b = generated(rng, work)
+            c.check(direct.compare(a, b, work) == general.compare(a, b, work), "merge comparison matches per-variable comparison")
+            c.check(a.divides(b, work) == dense_divides(a, b, work), "divisibility matches exponentwise comparison")
+            if a.divides(b, work):
+                c.check(b.div(a, work).mul(a, work) == b, "exact quotient")
     var x = Monomial([(Int64(0), UInt32(1))], work)
     var y = Monomial([(Int64(1), UInt32(1))], work)
     var kernel = MonomialOrder()

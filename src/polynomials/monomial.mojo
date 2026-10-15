@@ -179,10 +179,17 @@ struct Monomial(Copyable, Movable, Equatable, Hashable, Writable):
         Raises:
             PolyError: LIMIT on exhaustion.
         """
-        for pair in self.pairs:
-            budget.charge(1)
-            if pair[1] > other.exponent(pair[0], budget):
+        # One merge pass over both increasing pair lists, charged as one visit per pair.
+        budget.charge(UInt64(_sum(len(self.pairs), len(other.pairs))))
+        var j = 0
+        var n = len(other.pairs)
+        for i in range(len(self.pairs)):
+            ref pair = self.pairs.unsafe_get(i)
+            while j < n and other.pairs.unsafe_get(j)[0] < pair[0]:
+                j += 1
+            if j == n or other.pairs.unsafe_get(j)[0] != pair[0] or other.pairs.unsafe_get(j)[1] < pair[1]:
                 return False
+            j += 1
         return True
 
     def div(self, other: Self, mut budget: Budget) raises PolyError -> Self:
@@ -200,10 +207,17 @@ struct Monomial(Copyable, Movable, Equatable, Hashable, Writable):
         """
         if not other.divides(self, budget):
             raise PolyError(PolyErrorKind.DOMAIN, "monomial is not divisible")
+        _allocation[Tuple[Int64, UInt32]](len(self.pairs), budget)
         var result = Self()
-        for pair in self.pairs:
-            budget.charge(1)
-            var e = pair[1] - other.exponent(pair[0], budget)
+        result.pairs.reserve(len(self.pairs))
+        # The divisor's variables are a subset of ours, in the same increasing order.
+        var j = 0
+        for i in range(len(self.pairs)):
+            ref pair = self.pairs.unsafe_get(i)
+            var e = pair[1]
+            if j < len(other.pairs) and other.pairs.unsafe_get(j)[0] == pair[0]:
+                e -= other.pairs.unsafe_get(j)[1]
+                j += 1
             if e:
                 result.pairs.append((pair[0], e))
         return result^
@@ -304,6 +318,8 @@ struct MonomialOrder(Copyable, Movable, Equatable, Writable):
         return self._compare(a, b, budget)
 
     def _compare(self, a: Monomial, b: Monomial, mut budget: Budget) raises PolyError -> Int:
+        if self.kind != Self.KERNEL and self._covers(a) and self._covers(b):
+            return self._compare_identity(a, b, budget)
         if self.kind == Self.KERNEL:
             for i in range(min(len(a.pairs), len(b.pairs))):
                 budget.charge(1)
@@ -326,3 +342,62 @@ struct MonomialOrder(Copyable, Movable, Equatable, Writable):
                 var result = -1 if ae < be else 1
                 return -result if self.kind == Self.GREVLEX else result
         return 0
+
+    def _covers(self, m: Monomial) -> Bool:
+        """Whether the order lists variables 0..n-1 in priority order and m uses only those.
+
+        Pair indices increase, so checking the first and last pairs bounds them all.
+        """
+        var n = len(self.variables)
+        if len(m.pairs) and (m.pairs.unsafe_get(0)[0] < 0 or m.pairs.unsafe_get(len(m.pairs) - 1)[0] >= Int64(n)):
+            return False
+        for i in range(n):
+            if self.variables.unsafe_get(i) != Int64(i):
+                return False
+        return True
+
+    def _compare_identity(self, a: Monomial, b: Monomial, mut budget: Budget) raises PolyError -> Int:
+        """Compare by one merge pass when variable index order is priority order.
+
+        Equivalent to the per-variable comparison below for monomials that
+        `_covers` accepts, and charged as one visit per pair.
+        """
+        var na = len(a.pairs)
+        var nb = len(b.pairs)
+        budget.charge(UInt64(_sum(_sum(na, nb), 1)))
+        if self.kind != Self.LEX:
+            var ad = UInt64(0)
+            var bd = UInt64(0)
+            for i in range(na):
+                ad += UInt64(a.pairs.unsafe_get(i)[1])
+            for j in range(nb):
+                bd += UInt64(b.pairs.unsafe_get(j)[1])
+            if ad != bd:
+                return -1 if ad < bd else 1
+        if self.kind == Self.GREVLEX:
+            # The last differing variable decides, and the smaller exponent there is greater.
+            var i = na - 1
+            var j = nb - 1
+            while i >= 0 and j >= 0:
+                ref p = a.pairs.unsafe_get(i)
+                ref q = b.pairs.unsafe_get(j)
+                if p[0] != q[0]:
+                    return -1 if p[0] > q[0] else 1
+                if p[1] != q[1]:
+                    return -1 if p[1] > q[1] else 1
+                i -= 1
+                j -= 1
+            return 0 if i < 0 and j < 0 else (1 if i < 0 else -1)
+        # LEX and the tie-break of GRLEX: the first differing variable decides.
+        var i = 0
+        var j = 0
+        while i < na and j < nb:
+            ref p = a.pairs.unsafe_get(i)
+            ref q = b.pairs.unsafe_get(j)
+            if p[0] != q[0]:
+                return 1 if p[0] < q[0] else -1
+            if p[1] != q[1]:
+                return 1 if p[1] > q[1] else -1
+            i += 1
+            j += 1
+        return 0 if i == na and j == nb else (-1 if i == na else 1)
