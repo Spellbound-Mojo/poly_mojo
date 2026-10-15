@@ -3,7 +3,8 @@
 Untracked calls over at most sixteen variables use packed exponent vectors;
 cofactor tracking keeps the sparse engine. Both run the same algorithm, so
 their bases must agree exactly, for every order kind, variable priority list,
-and coefficient field.
+and coefficient field. Residues are multiplied by precomputed quotients,
+so primes near the 2^62 limit are checked as well as small ones.
 """
 from apn_mojo import Rational
 from polynomials import Budget, QQ, ModInt, Modulus, NoContext, SparsePoly, Term, Monomial, MonomialOrder, groebner
@@ -88,14 +89,14 @@ def agree_qq(generators: List[SparsePoly[QQ]], order: MonomialOrder, name: Strin
     verify_basis(packed, generators, c, work)
 
 
-def agree_mod(generators: List[SparsePoly[QQ]], order: MonomialOrder, name: String, mut c: Checker, mut work: Budget) raises:
-    var ctx = Modulus(65521, work)
+def agree_mod(generators: List[SparsePoly[QQ]], order: MonomialOrder, name: String, mut c: Checker, mut work: Budget, modulus: UInt64 = 65521) raises:
+    var ctx = Modulus(modulus, work)
     var modular = List[SparsePoly[ModInt]]()
     for p in generators:
         modular.append(as_mod(p, ctx, work))
     var packed = groebner(modular, order, work)
     var sparse = groebner(modular, order, work, track_cofactors=True)
-    c.check(packed.basis == sparse.basis, name + " over GF(65521)")
+    c.check(packed.basis == sparse.basis, name + " over GF(" + String(modulus) + ")")
     verify_basis(packed, modular, c, work)
 
 
@@ -118,6 +119,17 @@ def main() raises:
             var identity5 = MonomialOrder(UInt8(kind), [0, 1, 2, 3, 4], work)
             agree_mod(cyclic(5, identity5, work), identity5, "cyclic-5", c, work)
             agree_qq(cyclic(5, identity5, work), identity5, "cyclic-5", c, work)
+        # Large primes, where residue products need all 128 bits.
+        for modulus in [UInt64(4294967291), UInt64(4611686018427387847)]:
+            agree_mod(katsura(3, identity4, work), identity4, "katsura-3", c, work, modulus)
+            agree_mod(cyclic(4, shuffled4, work), shuffled4, "cyclic-4", c, work, modulus)
+        # Twelve variables use sixteen lanes; this priority list puts the used
+        # variables 0..3 in lanes 4, 9, 7, and 11, across both half vectors.
+        var wide12 = MonomialOrder(UInt8(kind), [8, 11, 4, 9, 0, 6, 10, 2, 5, 1, 7, 3], work)
+        agree_qq(katsura(3, wide12, work), wide12, "katsura-3 in sixteen lanes", c, work)
+        agree_mod(katsura(3, wide12, work), wide12, "katsura-3 in sixteen lanes", c, work)
+        agree_qq(cyclic(4, wide12, work), wide12, "cyclic-4 in sixteen lanes", c, work)
+        agree_mod(cyclic(4, wide12, work), wide12, "cyclic-4 in sixteen lanes", c, work, 4611686018427387847)
     # Variable indices need not be 0..n-1: lanes follow the priority list.
     var sparse_ids = MonomialOrder(MonomialOrder.GREVLEX, [7, 2, 5], work)
     var x = SparsePoly[QQ].variable(7, sparse_ids, NoContext(), work)

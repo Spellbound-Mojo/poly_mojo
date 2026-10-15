@@ -7,8 +7,19 @@ monomial order, whose leading monomial divides it. It changes only storage.
 Exponents sit in a fixed-width vector in the order's priority order, with the
 total degree and a support bitmask cached beside them, so comparison,
 multiplication, and divisibility take a few vector operations and no heap
-allocation. Reduction merges translated basis tails through a heap, starting
-S-polynomials from their two generators' tails instead of materializing them.
+allocation. The width is 8 lanes for up to 8 variables and 16 otherwise.
+
+The polynomial being reduced lives in geobuckets: sorted term lists whose
+capacities grow by a factor of four. A reduction step adds the translated
+reducer tail to the smallest bucket that can hold it and merges upward when a
+bucket overflows, so every term is touched a logarithmic number of times, in
+sequential merges. The leading term is the greatest of the bucket tops.
+
+Over a prime field the reducer tail is multiplied while it is merged, so a
+step allocates only the merged list. Residues are multiplied by a factor with
+a precomputed quotient (Shoup's method) instead of a division, and added
+without the field check of `ModInt`, since every coefficient shares one field.
+Work is charged per merge and per divisor search rather than per operation.
 
 Over QQ the engine is fraction-free. Basis elements are primitive integer
 polynomials with positive leading coefficients. Reducing a term with
@@ -18,118 +29,151 @@ which monomials are present, so every reduction makes the same choices as the
 rational computation, each remainder is a nonzero integer multiple of the
 rational remainder, and the final monic basis is identical. Integer
 arithmetic avoids the gcd that normalizes every rational sum and product.
-Scaling is lazy: pending cursors carry their own multipliers, and remainder
-terms record how many scalings preceded them and are corrected once at the end.
+Scaling is lazy: each bucket carries a multiplier that is applied when it is
+next merged, and remainder terms record how many scalings preceded them and
+are corrected once at the end.
 
-`groebner` uses this engine for orders over at most `_LANES` variables when
-no cofactors are tracked, and converts the basis back to sparse polynomials.
+`groebner` uses this engine for orders over at most 16 variables when no
+cofactors are tracked, and converts the basis back to sparse polynomials.
 """
-from std.math import max
+from std.math import iota, max
 from apn_mojo import Integer, Rational
-from .coefficients import CoefficientField, CoefficientRing, NoContext, QQ, ZZ, _work
+from .coefficients import CoefficientField, CoefficientRing, ModInt, NoContext, QQ, ZZ, _work
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
 from .monomial import Monomial, MonomialOrder
 from .sparse import SparsePoly, Term
 from ._coefficient_ops import _exact, _gcd_coefficient
 from ._images import _denominator, _scaled_integer
 
-comptime _LANES = 16
-comptime _Exponents = SIMD[DType.uint32, _LANES]
-comptime _POSITIONS = _Exponents(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
-comptime _BITS = _Exponents(1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768)
-comptime _FRONTIER = 64
-"""Integral reduction drains its heap into one base list at this many cursors, bounding rescaling work."""
+comptime _MAX_LANES = 16
 
 
-@fieldwise_init
-struct _Packed(ImplicitlyCopyable, Movable):
-    """Exponents in priority order, their sum, and the set of positive lanes."""
-    var exponents: _Exponents
+struct _Packed[W: Int](ImplicitlyCopyable, Movable):
+    """Exponents in priority order, their sum, and the set of positive lanes.
+
+    The exponents are stored as two half-width vectors: a full-width vector
+    would align, and so pad, the struct to the vector's width, while a plain
+    array would split vector loads across cache lines.
+    """
+    var low: SIMD[DType.uint32, Self.W // 2]
+    var high: SIMD[DType.uint32, Self.W // 2]
     var degree: UInt64
     var support: UInt32
 
+    @always_inline
+    def __init__(out self, exponents: SIMD[DType.uint32, Self.W], degree: UInt64, support: UInt32):
+        var halves = exponents.split()
+        self.low = rebind[SIMD[DType.uint32, Self.W // 2]](halves[0])
+        self.high = rebind[SIMD[DType.uint32, Self.W // 2]](halves[1])
+        self.degree = degree
+        self.support = support
+
+    @always_inline
+    def exponents(self) -> SIMD[DType.uint32, Self.W]:
+        return rebind[SIMD[DType.uint32, Self.W]](self.low.join(self.high))
+
 
 @always_inline
-def _packed(exponents: _Exponents) -> _Packed:
-    var support = UInt32(exponents.ne(_Exponents(0)).select(_BITS, _Exponents(0)).reduce_or())
-    return _Packed(exponents, exponents.cast[DType.uint64]().reduce_add(), support)
+def _packed[W: Int](exponents: SIMD[DType.uint32, W]) -> _Packed[W]:
+    comptime bits = SIMD[DType.uint32, W](1) << iota[DType.uint32, W]()
+    var support = UInt32(exponents.ne(SIMD[DType.uint32, W](0)).select(bits, SIMD[DType.uint32, W](0)).reduce_or())
+    return _Packed[W](exponents, exponents.cast[DType.uint64]().reduce_add(), support)
 
 
 @always_inline
-def _mul(a: _Packed, b: _Packed) raises PolyError -> _Packed:
-    var exponents = a.exponents + b.exponents
-    if exponents.lt(a.exponents).reduce_or():
+def _mul[W: Int](a: _Packed[W], b: _Packed[W]) raises PolyError -> _Packed[W]:
+    var left = a.exponents()
+    var exponents = left + b.exponents()
+    if exponents.lt(left).reduce_or():
         raise PolyError(PolyErrorKind.CAPACITY, "monomial exponent overflow")
-    return _Packed(exponents, a.degree + b.degree, a.support | b.support)
+    return _Packed[W](exponents, a.degree + b.degree, a.support | b.support)
 
 
 @always_inline
-def _div(a: _Packed, b: _Packed) -> _Packed:
+def _div[W: Int](a: _Packed[W], b: _Packed[W]) -> _Packed[W]:
     """The quotient a / b; b must divide a."""
-    return _packed(a.exponents - b.exponents)
+    return _packed(a.exponents() - b.exponents())
 
 
 @always_inline
-def _lcm(a: _Packed, b: _Packed) -> _Packed:
-    return _packed(max(a.exponents, b.exponents))
+def _lcm[W: Int](a: _Packed[W], b: _Packed[W]) -> _Packed[W]:
+    return _packed(max(a.exponents(), b.exponents()))
 
 
 @always_inline
-def _divides(a: _Packed, b: _Packed) -> Bool:
-    return (a.support & ~b.support) == 0 and a.exponents.le(b.exponents).reduce_and()
+def _divides[W: Int](a: _Packed[W], b: _Packed[W]) -> Bool:
+    return (a.support & ~b.support) == 0 and a.exponents().le(b.exponents()).reduce_and()
 
 
 @always_inline
-def _equal(a: _Packed, b: _Packed) -> Bool:
-    return not a.exponents.ne(b.exponents).reduce_or()
+def _equal[W: Int](a: _Packed[W], b: _Packed[W]) -> Bool:
+    return not a.exponents().ne(b.exponents()).reduce_or()
 
 
 @always_inline
-def _compare(kind: UInt8, a: _Packed, b: _Packed) -> Int:
+def _compare[W: Int](kind: UInt8, a: _Packed[W], b: _Packed[W]) -> Int:
     """Compare under LEX, GRLEX, or GREVLEX; lanes are in priority order."""
+    comptime positions = iota[DType.uint32, W]() + 1
     if kind != MonomialOrder.LEX and a.degree != b.degree:
         return -1 if a.degree < b.degree else 1
-    var differ = a.exponents.ne(b.exponents)
+    var differ = a.exponents().ne(b.exponents())
     if not differ.reduce_or():
         return 0
     if kind == MonomialOrder.GREVLEX:
         # The last differing lane decides, and the smaller exponent there is greater.
-        var last = Int(differ.select(_POSITIONS, _Exponents(0)).reduce_max()) - 1
-        return 1 if a.exponents[last] < b.exponents[last] else -1
-    var first = Int(differ.select(_POSITIONS, _Exponents(_LANES + 1)).reduce_min()) - 1
-    return 1 if a.exponents[first] > b.exponents[first] else -1
+        var last = Int(differ.select(positions, SIMD[DType.uint32, W](0)).reduce_max()) - 1
+        return 1 if a.exponents()[last] < b.exponents()[last] else -1
+    var first = Int(differ.select(positions, SIMD[DType.uint32, W](W + 1)).reduce_min()) - 1
+    return 1 if a.exponents()[first] > b.exponents()[first] else -1
 
 
-def _zero_monomial() -> _Packed:
-    return _Packed(_Exponents(0), 0, 0)
+@always_inline
+def _add[C: CoefficientRing](a: C, b: C, mut budget: Budget) raises PolyError -> C:
+    """The sum a + b; the caller has charged for it.
+
+    All coefficients in the engine share one ring, so residues are added
+    directly, without the field check and charge of `ModInt.add`.
+    """
+    comptime if C == ModInt:
+        ref x = rebind[ModInt](a)
+        var sum = x.value + rebind[ModInt](b).value  # < 2p < 2^63; cannot overflow.
+        return rebind_var[C](x._with_residue(sum - x.modulus if sum >= x.modulus else sum))
+    else:
+        return a.add(b, budget)
 
 
 @fieldwise_init
-struct _Term[C: CoefficientRing](Copyable, Movable):
-    var monomial: _Packed
+struct _Shoup(ImplicitlyCopyable, Movable):
+    """A residue factor w with floor(w * 2^64 / p), for multiplying by w without division.
+
+    For a, w < p < 2^63, q = floor(a * quotient / 2^64) leaves a * w - q * p in [0, 2p).
+    """
+    var factor: UInt64
+    var quotient: UInt64
+    var modulus: UInt64
+
+    @staticmethod
+    def of(w: ModInt) -> _Shoup:
+        return _Shoup(w.value, UInt64((UInt128(w.value) << 64) // UInt128(w.modulus)), w.modulus)
+
+    @always_inline
+    def times(self, a: UInt64) -> UInt64:
+        var q = UInt64((UInt128(a) * UInt128(self.quotient)) >> 64)
+        var r = a * self.factor - q * self.modulus  # Exact modulo 2^64, and below 2p.
+        return r - self.modulus if r >= self.modulus else r
+
+
+@fieldwise_init
+struct _Term[C: CoefficientRing, W: Int](Copyable, Movable):
+    var monomial: _Packed[Self.W]
     var coefficient: Self.C
 
 
 @fieldwise_init
-struct _Cursor[C: CoefficientRing](Copyable, Movable):
-    """A translated basis tail, or the reduction base when `source` is -1.
-
-    `unit` is 1 or -1 when the factor is that unit, so its terms are copied or
-    negated instead of multiplied, and 0 for a general factor.
-    """
-    var source: Int
-    var position: Int
-    var shift: _Packed
-    var factor: Self.C
-    var unit: Int
-    var term: _Term[Self.C]
-
-
-@fieldwise_init
-struct _Pair(ImplicitlyCopyable, Movable):
+struct _Pair[W: Int](ImplicitlyCopyable, Movable):
     var first: Int
     var second: Int
-    var lcm: _Packed
+    var lcm: _Packed[Self.W]
 
 
 def _unit[C: CoefficientRing](value: C, ring: C.Context, mut budget: Budget) raises PolyError -> Int:
@@ -140,7 +184,7 @@ def _unit[C: CoefficientRing](value: C, ring: C.Context, mut budget: Budget) rai
     return 0
 
 
-def _normalize[C: CoefficientRing, integral: Bool](mut p: List[_Term[C]], ring: C.Context, mut budget: Budget) raises PolyError:
+def _normalize[C: CoefficientRing, W: Int, integral: Bool](mut p: List[_Term[C, W]], ring: C.Context, mut budget: Budget) raises PolyError:
     """Scale a nonzero polynomial, stored in increasing order, to its canonical associate.
 
     Over a field that is the monic polynomial. In integral mode it is the
@@ -189,13 +233,13 @@ def _priorities(order: MonomialOrder, mut budget: Budget) raises PolyError -> Li
     return by_index^
 
 
-def _pack[C: CoefficientRing](p: SparsePoly[C], order: MonomialOrder, mut budget: Budget) raises PolyError -> List[_Term[C]]:
+def _pack[C: CoefficientRing, W: Int](p: SparsePoly[C], order: MonomialOrder, mut budget: Budget) raises PolyError -> List[_Term[C, W]]:
     """Terms of p, which uses `order`, as packed terms in the same increasing order."""
-    _allocation[_Term[C]](len(p.terms), budget)
-    var terms = List[_Term[C]](capacity=len(p.terms))
+    _allocation[_Term[C, W]](len(p.terms), budget)
+    var terms = List[_Term[C, W]](capacity=len(p.terms))
     for t in p.terms:
         budget.charge(1)
-        var exponents = _Exponents(0)
+        var exponents = SIMD[DType.uint32, W](0)
         for pair in t.monomial.pairs:
             budget.charge(1)
             var lane = -1
@@ -206,14 +250,14 @@ def _pack[C: CoefficientRing](p: SparsePoly[C], order: MonomialOrder, mut budget
             if lane < 0:
                 raise PolyError(PolyErrorKind.DOMAIN, "variable absent from order")
             exponents[lane] = pair[1]
-        terms.append(_Term[C](_packed(exponents), t.coefficient.copy()))
+        terms.append(_Term[C, W](_packed(exponents), t.coefficient.copy()))
     return terms^
 
 
-def _monomial(packed: _Packed, order: MonomialOrder, by_index: List[Int], mut budget: Budget) raises PolyError -> Monomial:
+def _monomial[W: Int](packed: _Packed[W], order: MonomialOrder, by_index: List[Int], mut budget: Budget) raises PolyError -> Monomial:
     var pairs = List[Tuple[Int64, UInt32]]()
     for lane in by_index:
-        var e = packed.exponents[lane]
+        var e = packed.exponents()[lane]
         if e:
             pairs.append((order.variables[lane], e))
     _allocation[Tuple[Int64, UInt32]](len(pairs), budget)
@@ -222,7 +266,7 @@ def _monomial(packed: _Packed, order: MonomialOrder, by_index: List[Int], mut bu
     return monomial^
 
 
-def _unpack[C: CoefficientRing](terms: List[_Term[C]], order: MonomialOrder, ring: C.Context, by_index: List[Int], mut budget: Budget) raises PolyError -> SparsePoly[C]:
+def _unpack[C: CoefficientRing, W: Int](terms: List[_Term[C, W]], order: MonomialOrder, ring: C.Context, by_index: List[Int], mut budget: Budget) raises PolyError -> SparsePoly[C]:
     _allocation[Term[C]](len(terms), budget)
     var result = SparsePoly[C].zero(order, ring, budget)
     result.terms.reserve(len(terms))
@@ -232,173 +276,280 @@ def _unpack[C: CoefficientRing](terms: List[_Term[C]], order: MonomialOrder, rin
     return result^
 
 
-struct _Engine[C: CoefficientRing, integral: Bool](Movable):
+@always_inline
+def _capacity(level: Int) -> Int:
+    """Bucket capacities 8, 32, 128, ...: each level holds four times the last."""
+    return 8 << (2 * level)
+
+
+struct _Buckets[C: CoefficientRing, W: Int, integral: Bool](Movable):
+    """A polynomial as geobuckets: increasing term lists, leading terms last.
+
+    In integral mode the polynomial is the sum of each bucket's terms times
+    that bucket's multiplier; `units` marks multipliers equal to one.
+    """
     var kind: UInt8
     var ring: Self.C.Context
-    var polys: List[List[_Term[Self.C]]]
-    """Basis elements: terms in increasing order and normalized, leading term last."""
-    var leads: List[_Packed]
-    var active: List[Int]
-    var pairs: List[_Pair]
+    var levels: List[List[_Term[Self.C, Self.W]]]
+    var multipliers: List[Self.C]
+    var units: List[Bool]
 
     def __init__(out self, kind: UInt8, ring: Self.C.Context):
         self.kind = kind
         self.ring = ring.copy()
-        self.polys = List[List[_Term[Self.C]]]()
-        self.leads = List[_Packed]()
-        self.active = List[Int]()
-        self.pairs = List[_Pair]()
+        self.levels = List[List[_Term[Self.C, Self.W]]]()
+        self.multipliers = List[Self.C]()
+        self.units = List[Bool]()
 
-    @always_inline
-    def _placeholder(self) -> _Term[Self.C]:
-        return _Term[Self.C](_zero_monomial(), Self.C.zero(self.ring))
+    def _merge(self, var a: List[_Term[Self.C, Self.W]], var b: List[_Term[Self.C, Self.W]], mut budget: Budget) raises PolyError -> List[_Term[Self.C, Self.W]]:
+        """Merge two increasing term lists, adding equal monomials and dropping zeros."""
+        var total = _sum(len(a), len(b))
+        budget.charge(UInt64(total))
+        _allocation[_Term[Self.C, Self.W]](total, budget)
+        var result = List[_Term[Self.C, Self.W]](capacity=total)
+        comptime if Self.C == ModInt:
+            # Residue terms copy without allocation: merge forward, smallest first.
+            var i = 0
+            var j = 0
+            while i < len(a) and j < len(b):
+                ref x = a.unsafe_get(i)
+                ref y = b.unsafe_get(j)
+                var comparison = _compare(self.kind, x.monomial, y.monomial)
+                if comparison < 0:
+                    result.append(x.copy())
+                    i += 1
+                elif comparison > 0:
+                    result.append(y.copy())
+                    j += 1
+                else:
+                    var sum = _add(x.coefficient, y.coefficient, budget)
+                    if not sum.is_zero():
+                        result.append(_Term[Self.C, Self.W](x.monomial, sum^))
+                    i += 1
+                    j += 1
+            while i < len(a):
+                result.append(a.unsafe_get(i).copy())
+                i += 1
+            while j < len(b):
+                result.append(b.unsafe_get(j).copy())
+                j += 1
+            return result^
+        while len(a) and len(b):
+            var comparison = _compare(self.kind, a[len(a) - 1].monomial, b[len(b) - 1].monomial)
+            if comparison > 0:
+                result.append(a.pop())
+            elif comparison < 0:
+                result.append(b.pop())
+            else:
+                var x = a.pop()
+                var y = b.pop()
+                x.coefficient = _add(x.coefficient, y.coefficient, budget)
+                if not x.coefficient.is_zero():
+                    result.append(x^)
+        while len(a):
+            result.append(a.pop())
+        while len(b):
+            result.append(b.pop())
+        result.reverse()
+        return result^
+
+    def _apply_multiplier(mut self, level: Int, mut budget: Budget) raises PolyError:
+        comptime if Self.integral:
+            if self.units[level]:
+                return
+            for i in range(len(self.levels[level])):
+                budget.charge(1)
+                self.levels[level][i].coefficient = self.levels[level][i].coefficient.mul(self.multipliers[level], budget)
+            self.multipliers[level] = Self.C.one(self.ring)
+            self.units[level] = True
+
+    def _level_for(mut self, length: Int, mut budget: Budget) raises PolyError -> Int:
+        """The smallest level that can hold `length` terms, created if missing."""
+        var level = 0
+        while _capacity(level) < length:
+            level += 1
+        while len(self.levels) <= level:
+            _allocation[List[_Term[Self.C, Self.W]]](1, budget)
+            self.levels.append(List[_Term[Self.C, Self.W]]())
+            self.multipliers.append(Self.C.one(self.ring))
+            self.units.append(True)
+        return level
+
+    def add(mut self, var terms: List[_Term[Self.C, Self.W]], mut budget: Budget) raises PolyError:
+        """Add an increasing term list to the polynomial."""
+        if len(terms) == 0:
+            return
+        self._carry(self._level_for(len(terms), budget), terms^, budget)
+
+    def _carry(mut self, start: Int, var terms: List[_Term[Self.C, Self.W]], mut budget: Budget) raises PolyError:
+        """Merge `terms` into level `start`, moving overflowing results upward."""
+        var level = start
+        while True:
+            if len(self.levels) <= level:
+                _ = self._level_for(_capacity(level), budget)
+            self._apply_multiplier(level, budget)
+            var held = List[_Term[Self.C, Self.W]]()
+            swap(held, self.levels[level])
+            var merged = self._merge(held^, terms^, budget)
+            if len(merged) <= _capacity(level):
+                self.levels[level] = merged^
+                return
+            terms = merged^
+            level += 1
+
+    def add_multiple(mut self, source: List[_Term[Self.C, Self.W]], shift: _Packed[Self.W], factor: ModInt, mut budget: Budget) raises PolyError:
+        """Add the tail of `source` times shift * factor, multiplying while merging.
+
+        Residue products need no allocation of their own, so the multiple goes
+        straight into a bucket instead of through an intermediate list.
+        """
+        comptime assert Self.C == ModInt and not Self.integral, "residue multiples only"
+        var n = len(source) - 1
+        if n <= 0:
+            return
+        budget.charge(UInt64(n))
+        var level = self._level_for(n, budget)
+        var held = List[_Term[Self.C, Self.W]]()
+        swap(held, self.levels[level])
+        var total = _sum(len(held), n)
+        budget.charge(UInt64(total))
+        _allocation[_Term[Self.C, Self.W]](total, budget)
+        var result = List[_Term[Self.C, Self.W]](capacity=total)
+        var shoup = _Shoup.of(factor)
+        var i = 0
+        for j in range(n):
+            ref t = source.unsafe_get(j)
+            var monomial = _mul(t.monomial, shift)
+            var comparison = -1
+            while i < len(held):
+                comparison = _compare(self.kind, held.unsafe_get(i).monomial, monomial)
+                if comparison >= 0:
+                    break
+                result.append(held.unsafe_get(i).copy())
+                i += 1
+            var value = shoup.times(rebind[ModInt](t.coefficient).value)
+            if i < len(held) and comparison == 0:
+                ref x = rebind[ModInt](held.unsafe_get(i).coefficient)
+                var sum = x.value + value  # < 2p < 2^63; cannot overflow.
+                if sum >= x.modulus:
+                    sum -= x.modulus
+                if sum:
+                    result.append(_Term[Self.C, Self.W](monomial, rebind_var[Self.C](x._with_residue(sum))))
+                i += 1
+            else:
+                result.append(_Term[Self.C, Self.W](monomial, rebind_var[Self.C](factor._with_residue(value))))
+        while i < len(held):
+            result.append(held.unsafe_get(i).copy())
+            i += 1
+        if len(result) <= _capacity(level):
+            self.levels[level] = result^
+            return
+        self._carry(level + 1, result^, budget)
+
+    def scale(mut self, factor: Self.C, mut budget: Budget) raises PolyError:
+        """Multiply the polynomial by `factor`, lazily, through the bucket multipliers."""
+        for level in range(len(self.levels)):
+            budget.charge(1)
+            if len(self.levels[level]) == 0:
+                continue
+            self.multipliers[level] = self.multipliers[level].mul(factor, budget)
+            self.units[level] = False
+
+    def leading(mut self, mut budget: Budget) raises PolyError -> Optional[_Term[Self.C, Self.W]]:
+        """Remove and return the leading term, skipping monomials whose contributions cancel."""
+        while True:
+            var best = -1
+            for level in range(len(self.levels)):
+                budget.charge(1)
+                ref bucket = self.levels[level]
+                if len(bucket) == 0:
+                    continue
+                if best < 0 or _compare(self.kind, bucket[len(bucket) - 1].monomial, self.levels[best][len(self.levels[best]) - 1].monomial) > 0:
+                    best = level
+            if best < 0:
+                return None
+            var top = self._pop(best, budget)
+            for level in range(best + 1, len(self.levels)):
+                ref bucket = self.levels[level]
+                if len(bucket) and _equal(bucket[len(bucket) - 1].monomial, top.monomial):
+                    var other = self._pop(level, budget)
+                    budget.charge(1)
+                    top.coefficient = _add(top.coefficient, other.coefficient, budget)
+            if not top.coefficient.is_zero():
+                return top^
+
+    def _pop(mut self, level: Int, mut budget: Budget) raises PolyError -> _Term[Self.C, Self.W]:
+        var term = self.levels[level].pop()
+        comptime if Self.integral:
+            if not self.units[level]:
+                term.coefficient = term.coefficient.mul(self.multipliers[level], budget)
+        return term^
+
+
+struct _Engine[C: CoefficientRing, W: Int, integral: Bool](Movable):
+    var kind: UInt8
+    var ring: Self.C.Context
+    var polys: List[List[_Term[Self.C, Self.W]]]
+    """Basis elements: terms in increasing order and normalized, leading term last."""
+    var leads: List[_Packed[Self.W]]
+    var active: List[Int]
+    var pairs: List[_Pair[Self.W]]
+
+    def __init__(out self, kind: UInt8, ring: Self.C.Context):
+        self.kind = kind
+        self.ring = ring.copy()
+        self.polys = List[List[_Term[Self.C, Self.W]]]()
+        self.leads = List[_Packed[Self.W]]()
+        self.active = List[Int]()
+        self.pairs = List[_Pair[Self.W]]()
 
     # ------------------------------------------------------------- reduction
 
-    @always_inline
-    def _before(self, cursors: List[_Cursor[Self.C]], a: Int, b: Int) -> Bool:
-        return _compare(self.kind, cursors[a].term.monomial, cursors[b].term.monomial) > 0
-
-    def _sift_down(self, mut heap: List[Int], cursors: List[_Cursor[Self.C]], mut budget: Budget) raises PolyError:
-        var position = 0
-        var value = heap[0]
-        while 2 * position + 1 < len(heap):
-            budget.charge(1)
-            var child = 2 * position + 1
-            if child + 1 < len(heap) and self._before(cursors, heap[child + 1], heap[child]):
-                child += 1
-            if not self._before(cursors, heap[child], value):
-                break
-            heap[position] = heap[child]
-            position = child
-        heap[position] = value
-
-    def _sift_up(self, mut heap: List[Int], cursors: List[_Cursor[Self.C]], mut budget: Budget) raises PolyError:
-        var position = len(heap) - 1
-        var value = heap[position]
-        while position > 0:
-            budget.charge(1)
-            var parent = (position - 1) // 2
-            if not self._before(cursors, value, heap[parent]):
-                break
-            heap[position] = heap[parent]
-            position = parent
-        heap[position] = value
-
-    def _load(self, mut cursor: _Cursor[Self.C], mut base: List[_Term[Self.C]], mut budget: Budget) raises PolyError:
-        """Compute the cursor's current term from its source position."""
-        if cursor.source < 0:
-            # The base is consumed once, in order: move its coefficient out.
-            cursor.term.monomial = base[cursor.position].monomial
-            swap(cursor.term.coefficient, base[cursor.position].coefficient)
-            if cursor.unit == 0:
-                cursor.term.coefficient = cursor.term.coefficient.mul(cursor.factor, budget)
-            elif cursor.unit < 0:
-                cursor.term.coefficient = cursor.term.coefficient.neg(budget)
-            return
-        ref t = self.polys[cursor.source][cursor.position]
-        var monomial = _mul(t.monomial, cursor.shift)
-        if cursor.unit > 0:
-            cursor.term = _Term[Self.C](monomial, t.coefficient.copy())
-        elif cursor.unit < 0:
-            cursor.term = _Term[Self.C](monomial, t.coefficient.neg(budget))
-        else:
-            cursor.term = _Term[Self.C](monomial, t.coefficient.mul(cursor.factor, budget))
-
-    def _push(self, var cursor: _Cursor[Self.C], mut heap: List[Int], mut cursors: List[_Cursor[Self.C]], mut free: List[Int], mut base: List[_Term[Self.C]], mut budget: Budget) raises PolyError:
-        if cursor.position < 0:
-            return
-        self._load(cursor, base, budget)
-        var slot: Int
-        if len(free):
-            slot = free.pop()
-            cursors[slot] = cursor^
-        else:
-            _allocation[_Cursor[Self.C]](1, budget)
-            slot = len(cursors)
-            cursors.append(cursor^)
-        heap.append(slot)
-        self._sift_up(heap, cursors, budget)
-
-    def _advance_top(self, mut heap: List[Int], mut cursors: List[_Cursor[Self.C]], mut free: List[Int], mut base: List[_Term[Self.C]], mut budget: Budget) raises PolyError:
-        var slot = heap[0]
-        cursors[slot].position -= 1
-        if cursors[slot].position >= 0:
-            self._load(cursors[slot], base, budget)
-        else:
-            free.append(slot)
-            var last = heap.pop()
-            if len(heap) == 0:
-                return
-            heap[0] = last
-        self._sift_down(heap, cursors, budget)
-
-    def _next(self, mut heap: List[Int], mut cursors: List[_Cursor[Self.C]], mut free: List[Int], mut base: List[_Term[Self.C]], mut budget: Budget) raises PolyError -> _Term[Self.C]:
-        """Pop the greatest pending monomial with the sum of its coefficients, possibly zero."""
-        budget.charge(1)
-        var top = self._placeholder()
-        swap(top, cursors[heap[0]].term)
-        self._advance_top(heap, cursors, free, base, budget)
-        while len(heap) and _equal(cursors[heap[0]].term.monomial, top.monomial):
-            budget.charge(1)
-            top.coefficient = top.coefficient.add(cursors[heap[0]].term.coefficient, budget)
-            self._advance_top(heap, cursors, free, base, budget)
-        return top^
-
-    def _drain(self, mut heap: List[Int], mut cursors: List[_Cursor[Self.C]], mut free: List[Int], mut base: List[_Term[Self.C]], mut budget: Budget) raises PolyError -> List[_Term[Self.C]]:
-        """Collect every pending term, unreduced, in increasing order, and empty the heap."""
-        var drained = List[_Term[Self.C]]()
-        while len(heap):
-            var top = self._next(heap, cursors, free, base, budget)
-            if not top.coefficient.is_zero():
-                _allocation[_Term[Self.C]](1, budget)
-                drained.append(top^)
-        drained.reverse()
-        cursors = List[_Cursor[Self.C]]()
-        free = List[Int]()
-        return drained^
-
-    def _scale(self, scale: Self.C, heap: List[Int], mut cursors: List[_Cursor[Self.C]], mut budget: Budget) raises PolyError:
-        """Multiply everything pending by `scale`: each live cursor's factor and current term."""
-        for slot in heap:
-            budget.charge(1)
-            ref cursor = cursors[slot]
-            if cursor.unit != 0:
-                cursor.factor = scale.copy() if cursor.unit > 0 else scale.neg(budget)
-                cursor.unit = 0
+    def _multiple(self, source: Int, shift: _Packed[Self.W], factor: Self.C, mut budget: Budget) raises PolyError -> List[_Term[Self.C, Self.W]]:
+        """The tail of basis element `source` times shift * factor, in increasing order."""
+        ref p = self.polys[source]
+        var n = len(p) - 1
+        budget.charge(UInt64(n))
+        _allocation[_Term[Self.C, Self.W]](n, budget)
+        var result = List[_Term[Self.C, Self.W]](capacity=n)
+        var unit = _unit(factor, self.ring, budget)
+        for i in range(n):
+            ref t = p[i]
+            var monomial = _mul(t.monomial, shift)
+            if unit > 0:
+                result.append(_Term[Self.C, Self.W](monomial, t.coefficient.copy()))
+            elif unit < 0:
+                result.append(_Term[Self.C, Self.W](monomial, t.coefficient.neg(budget)))
             else:
-                cursor.factor = cursor.factor.mul(scale, budget)
-            cursor.term.coefficient = cursor.term.coefficient.mul(scale, budget)
+                result.append(_Term[Self.C, Self.W](monomial, t.coefficient.mul(factor, budget)))
+        return result^
 
-    def reduce(self, var base: List[_Term[Self.C]], var starts: List[_Cursor[Self.C]], indices: List[Int], mut budget: Budget) raises PolyError -> List[_Term[Self.C]]:
-        """Fully reduce the sum of the starting cursors against `indices`, in that order.
+    def reduce(self, var pending: _Buckets[Self.C, Self.W, Self.integral], indices: List[Int], mut budget: Budget) raises PolyError -> List[_Term[Self.C, Self.W]]:
+        """Fully reduce the pending polynomial against `indices`, in that order.
 
         Returns the remainder with terms in increasing order. In integral mode
         the result is a nonzero integer multiple of the field remainder.
         """
-        var cursors = List[_Cursor[Self.C]]()
-        var heap = List[Int]()
-        var free = List[Int]()
-        for i in range(len(starts)):
-            var cursor = _Cursor[Self.C](starts[i].source, starts[i].position, starts[i].shift, starts[i].factor.copy(), starts[i].unit, self._placeholder())
-            self._push(cursor^, heap, cursors, free, base, budget)
-        var remainder = List[_Term[Self.C]]()
+        var remainder = List[_Term[Self.C, Self.W]]()
         # Integral mode: the successive scalings of everything pending, and how
         # many of them preceded each remainder term.
         var scales = List[Self.C]()
         var epochs = List[Int]()
-        while len(heap):
-            var top = self._next(heap, cursors, free, base, budget)
-            if top.coefficient.is_zero():
-                continue
+        while True:
+            var next = pending.leading(budget)
+            if not next:
+                break
+            var top = next.take()
             var reducer = -1
+            var checked = 0
             for i in indices:
-                budget.charge(1)
+                checked += 1
                 if _divides(self.leads[i], top.monomial):
                     reducer = i
                     break
+            budget.charge(UInt64(checked))
             if reducer < 0:
-                _allocation[_Term[Self.C]](1, budget)
+                _allocation[_Term[Self.C, Self.W]](1, budget)
                 remainder.append(top^)
                 comptime if Self.integral:
                     epochs.append(len(scales))
@@ -411,20 +562,17 @@ struct _Engine[C: CoefficientRing, integral: Bool](Movable):
                 var scale = _exact(lead, common, budget)
                 factor = _exact(top.coefficient, common, budget).neg(budget)
                 if scale != Self.C.one(self.ring):
-                    if len(heap) >= _FRONTIER:
-                        var drained = self._drain(heap, cursors, free, base, budget)
-                        base = drained^
-                        var restart = _Cursor[Self.C](-1, len(base) - 1, _zero_monomial(), Self.C.one(self.ring), 1, self._placeholder())
-                        self._push(restart^, heap, cursors, free, base, budget)
-                    self._scale(scale, heap, cursors, budget)
+                    pending.scale(scale, budget)
                     _allocation[Self.C](1, budget)
                     scales.append(scale^)
             else:
                 # Basis elements are monic: subtract c * (m / lead) * g.
                 factor = top.coefficient.neg(budget)
-            var unit = _unit(factor, self.ring, budget)
-            var cursor = _Cursor[Self.C](reducer, len(self.polys[reducer]) - 2, _div(top.monomial, self.leads[reducer]), factor^, unit, self._placeholder())
-            self._push(cursor^, heap, cursors, free, base, budget)
+            var shift = _div(top.monomial, self.leads[reducer])
+            comptime if Self.C == ModInt:
+                pending.add_multiple(self.polys[reducer], shift, rebind[ModInt](factor), budget)
+            else:
+                pending.add(self._multiple(reducer, shift, factor, budget), budget)
         comptime if Self.integral:
             # Remainder terms missed the scalings that came after them.
             var multiplier = Self.C.one(self.ring)
@@ -439,13 +587,13 @@ struct _Engine[C: CoefficientRing, integral: Bool](Movable):
         remainder.reverse()
         return remainder^
 
-    def reduce_base(self, var base: List[_Term[Self.C]], indices: List[Int], mut budget: Budget) raises PolyError -> List[_Term[Self.C]]:
-        var starts = List[_Cursor[Self.C]]()
-        starts.append(_Cursor[Self.C](-1, len(base) - 1, _zero_monomial(), Self.C.one(self.ring), 1, self._placeholder()))
-        return self.reduce(base^, starts^, indices, budget)
+    def reduce_base(self, var base: List[_Term[Self.C, Self.W]], indices: List[Int], mut budget: Budget) raises PolyError -> List[_Term[Self.C, Self.W]]:
+        var pending = _Buckets[Self.C, Self.W, Self.integral](self.kind, self.ring)
+        pending.add(base^, budget)
+        return self.reduce(pending^, indices, budget)
 
-    def reduce_pair(self, pair: _Pair, mut budget: Budget) raises PolyError -> List[_Term[Self.C]]:
-        """Reduce the S-polynomial of a pair, merging both translated tails directly."""
+    def reduce_pair(self, pair: _Pair[Self.W], mut budget: Budget) raises PolyError -> List[_Term[Self.C, Self.W]]:
+        """Reduce the S-polynomial of a pair, built from the two translated tails."""
         var left: Self.C
         var right: Self.C
         comptime if Self.integral:
@@ -457,12 +605,14 @@ struct _Engine[C: CoefficientRing, integral: Bool](Movable):
         else:
             left = Self.C.one(self.ring)
             right = left.neg(budget)
-        var left_unit = _unit(left, self.ring, budget)
-        var right_unit = _unit(right, self.ring, budget)
-        var starts = List[_Cursor[Self.C]]()
-        starts.append(_Cursor[Self.C](pair.first, len(self.polys[pair.first]) - 2, _div(pair.lcm, self.leads[pair.first]), left^, left_unit, self._placeholder()))
-        starts.append(_Cursor[Self.C](pair.second, len(self.polys[pair.second]) - 2, _div(pair.lcm, self.leads[pair.second]), right^, right_unit, self._placeholder()))
-        return self.reduce(List[_Term[Self.C]](), starts^, self.active, budget)
+        var pending = _Buckets[Self.C, Self.W, Self.integral](self.kind, self.ring)
+        comptime if Self.C == ModInt:
+            pending.add_multiple(self.polys[pair.first], _div(pair.lcm, self.leads[pair.first]), rebind[ModInt](left), budget)
+            pending.add_multiple(self.polys[pair.second], _div(pair.lcm, self.leads[pair.second]), rebind[ModInt](right), budget)
+        else:
+            pending.add(self._multiple(pair.first, _div(pair.lcm, self.leads[pair.first]), left, budget), budget)
+            pending.add(self._multiple(pair.second, _div(pair.lcm, self.leads[pair.second]), right, budget), budget)
+        return self.reduce(pending^, self.active, budget)
 
     # ------------------------------------------------------- pair bookkeeping
 
@@ -479,8 +629,8 @@ struct _Engine[C: CoefficientRing, integral: Bool](Movable):
     def install(mut self, index: Int, mut budget: Budget) raises PolyError:
         # Gebauer–Möller installation exactly as in groebner._install.
         var mh = self.leads[index]
-        _allocation[_Packed](len(self.active), budget)
-        var lcms = List[_Packed](capacity=len(self.active))
+        _allocation[_Packed[Self.W]](len(self.active), budget)
+        var lcms = List[_Packed[Self.W]](capacity=len(self.active))
         for old in self.active:
             budget.charge(1)
             lcms.append(_lcm(mh, self.leads[old]))
@@ -504,8 +654,8 @@ struct _Engine[C: CoefficientRing, integral: Bool](Movable):
                             break
             if not redundant:
                 kept.append(i)
-        _allocation[_Pair](_sum(len(self.pairs), len(kept)), budget)
-        var next_pairs = List[_Pair](capacity=_sum(len(self.pairs), len(kept)))
+        _allocation[_Pair[Self.W]](_sum(len(self.pairs), len(kept)), budget)
+        var next_pairs = List[_Pair[Self.W]](capacity=_sum(len(self.pairs), len(kept)))
         for pair in self.pairs:
             budget.charge(1)
             if not _divides(mh, pair.lcm) or _equal(_lcm(mh, self.leads[pair.first]), pair.lcm) or _equal(_lcm(mh, self.leads[pair.second]), pair.lcm):
@@ -513,7 +663,7 @@ struct _Engine[C: CoefficientRing, integral: Bool](Movable):
         for i in kept:
             budget.charge(1)
             if not _equal(_mul(mh, self.leads[self.active[i]]), lcms[i]):
-                next_pairs.append(_Pair(min(index, self.active[i]), max(index, self.active[i]), lcms[i]))
+                next_pairs.append(_Pair[Self.W](min(index, self.active[i]), max(index, self.active[i]), lcms[i]))
         self.pairs = next_pairs^
         _allocation[Int](_sum(len(self.active), 1), budget)
         var next_active = List[Int](capacity=_sum(len(self.active), 1))
@@ -525,7 +675,7 @@ struct _Engine[C: CoefficientRing, integral: Bool](Movable):
         self.active = next_active^
 
     @always_inline
-    def _pair_before(self, a: _Pair, b: _Pair) -> Bool:
+    def _pair_before(self, a: _Pair[Self.W], b: _Pair[Self.W]) -> Bool:
         var comparison = _compare(self.kind, a.lcm, b.lcm)
         return comparison < 0 or (comparison == 0 and (a.first < b.first or (a.first == b.first and a.second < b.second)))
 
@@ -548,7 +698,7 @@ struct _Engine[C: CoefficientRing, integral: Bool](Movable):
             budget.charge(1)
             self._sift_pairs(i, budget)
 
-    def select(mut self, mut budget: Budget) raises PolyError -> _Pair:
+    def select(mut self, mut budget: Budget) raises PolyError -> _Pair[Self.W]:
         var selected = self.pairs.pop()
         if len(self.pairs):
             var root = self.pairs[0]
@@ -557,22 +707,22 @@ struct _Engine[C: CoefficientRing, integral: Bool](Movable):
             self._sift_pairs(0, budget)
         return selected
 
-    def insert(mut self, var p: List[_Term[Self.C]], mut budget: Budget) raises PolyError:
+    def insert(mut self, var p: List[_Term[Self.C, Self.W]], mut budget: Budget) raises PolyError:
         """Normalize p, add it to the basis, and install its pairs."""
-        _normalize[Self.C, Self.integral](p, self.ring, budget)
-        _allocation[List[_Term[Self.C]]](1, budget)
+        _normalize[Self.C, Self.W, Self.integral](p, self.ring, budget)
+        _allocation[List[_Term[Self.C, Self.W]]](1, budget)
         self.leads.append(p[len(p) - 1].monomial)
         self.polys.append(p^)
         self.install(len(self.polys) - 1, budget)
         self.heapify_pairs(budget)
 
-    def run(mut self, var generators: List[List[_Term[Self.C]]], mut budget: Budget) raises PolyError -> List[List[_Term[Self.C]]]:
+    def run(mut self, var generators: List[List[_Term[Self.C, Self.W]]], mut budget: Budget) raises PolyError -> List[List[_Term[Self.C, Self.W]]]:
         """Buchberger's loop; returns the reduced basis, normalized, in decreasing leading-monomial order."""
         for i in range(len(generators)):
             budget.charge(1)
             if len(generators[i]) == 0:
                 continue
-            var p = List[_Term[Self.C]]()
+            var p = List[_Term[Self.C, Self.W]]()
             swap(p, generators[i])
             var reduced = self.reduce_base(p^, self.active, budget)
             if len(reduced) == 0:
@@ -591,8 +741,8 @@ struct _Engine[C: CoefficientRing, integral: Bool](Movable):
             self.insert(reduced^, budget)
             dirty_order = True
         self.sort_active(budget)
-        _allocation[List[_Term[Self.C]]](len(self.active), budget)
-        var basis = List[List[_Term[Self.C]]](capacity=len(self.active))
+        _allocation[List[_Term[Self.C, Self.W]]](len(self.active), budget)
+        var basis = List[List[_Term[Self.C, Self.W]]](capacity=len(self.active))
         # Active leading monomials are mutually nondividing, so reducing each tail
         # against the others keeps every leading term and yields the reduced basis.
         for position in range(len(self.active) - 1, -1, -1):
@@ -604,27 +754,24 @@ struct _Engine[C: CoefficientRing, integral: Bool](Movable):
                 budget.charge(1)
                 if j != index:
                     others.append(j)
-            _allocation[_Term[Self.C]](len(self.polys[index]), budget)
-            var copy = List[_Term[Self.C]](capacity=len(self.polys[index]))
+            _allocation[_Term[Self.C, Self.W]](len(self.polys[index]), budget)
+            var copy = List[_Term[Self.C, Self.W]](capacity=len(self.polys[index]))
             for t in self.polys[index]:
-                copy.append(_Term[Self.C](t.monomial, t.coefficient.copy()))
+                copy.append(_Term[Self.C, Self.W](t.monomial, t.coefficient.copy()))
             var reduced = self.reduce_base(copy^, others, budget)
-            _normalize[Self.C, Self.integral](reduced, self.ring, budget)
+            _normalize[Self.C, Self.W, Self.integral](reduced, self.ring, budget)
             basis.append(reduced^)
         return basis^
 
 
-def _packed_groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: MonomialOrder, mut budget: Budget) raises PolyError -> List[SparsePoly[C]]:
-    """The reduced monic basis, in decreasing leading-monomial order; generators share a field."""
-    if len(generators) == 0:
-        return List[SparsePoly[C]]()
+def _field_basis[C: CoefficientField, W: Int](generators: List[SparsePoly[C]], order: MonomialOrder, mut budget: Budget) raises PolyError -> List[SparsePoly[C]]:
     var ring = generators[0].ring.copy()
-    _allocation[List[_Term[C]]](len(generators), budget)
-    var packed = List[List[_Term[C]]](capacity=len(generators))
+    _allocation[List[_Term[C, W]]](len(generators), budget)
+    var packed = List[List[_Term[C, W]]](capacity=len(generators))
     for g in generators:
         budget.charge(1)
-        packed.append(_pack(g.reorder(order, budget), order, budget))
-    var engine = _Engine[C, False](order.kind, ring)
+        packed.append(_pack[C, W](g.reorder(order, budget), order, budget))
+    var engine = _Engine[C, W, False](order.kind, ring)
     var basis = engine.run(packed^, budget)
     var by_index = _priorities(order, budget)
     _allocation[SparsePoly[C]](len(basis), budget)
@@ -635,27 +782,33 @@ def _packed_groebner[C: CoefficientField](generators: List[SparsePoly[C]], order
     return result^
 
 
-def _packed_groebner_rational(generators: List[SparsePoly[QQ]], order: MonomialOrder, mut budget: Budget) raises PolyError -> List[SparsePoly[QQ]]:
-    """The reduced monic basis over QQ, computed fraction-free over ZZ."""
+def _packed_groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: MonomialOrder, mut budget: Budget) raises PolyError -> List[SparsePoly[C]]:
+    """The reduced monic basis, in decreasing leading-monomial order; generators share a field."""
     if len(generators) == 0:
-        return List[SparsePoly[QQ]]()
-    _allocation[List[_Term[ZZ]]](len(generators), budget)
-    var integral = List[List[_Term[ZZ]]](capacity=len(generators))
+        return List[SparsePoly[C]]()
+    if len(order.variables) <= 8:
+        return _field_basis[C, 8](generators, order, budget)
+    return _field_basis[C, 16](generators, order, budget)
+
+
+def _rational_basis[W: Int](generators: List[SparsePoly[QQ]], order: MonomialOrder, mut budget: Budget) raises PolyError -> List[SparsePoly[QQ]]:
+    _allocation[List[_Term[ZZ, W]]](len(generators), budget)
+    var integral = List[List[_Term[ZZ, W]]](capacity=len(generators))
     for g in generators:
         budget.charge(1)
-        var rational = _pack(g.reorder(order, budget), order, budget)
+        var rational = _pack[QQ, W](g.reorder(order, budget), order, budget)
         # Clear denominators; the engine normalizes each input before use.
         var common = Integer(1)
         for t in rational:
             budget.charge(1)
             common = _denominator(common, t.coefficient, budget)
-        _allocation[_Term[ZZ]](len(rational), budget)
-        var terms = List[_Term[ZZ]](capacity=len(rational))
+        _allocation[_Term[ZZ, W]](len(rational), budget)
+        var terms = List[_Term[ZZ, W]](capacity=len(rational))
         for t in rational:
             budget.charge(1)
-            terms.append(_Term[ZZ](t.monomial, _scaled_integer(t.coefficient, common, budget)))
+            terms.append(_Term[ZZ, W](t.monomial, _scaled_integer(t.coefficient, common, budget)))
         integral.append(terms^)
-    var engine = _Engine[ZZ, True](order.kind, NoContext())
+    var engine = _Engine[ZZ, W, True](order.kind, NoContext())
     var basis = engine.run(integral^, budget)
     var by_index = _priorities(order, budget)
     _allocation[SparsePoly[QQ]](len(basis), budget)
@@ -680,5 +833,14 @@ def _packed_groebner_rational(generators: List[SparsePoly[QQ]], order: MonomialO
     return result^
 
 
+def _packed_groebner_rational(generators: List[SparsePoly[QQ]], order: MonomialOrder, mut budget: Budget) raises PolyError -> List[SparsePoly[QQ]]:
+    """The reduced monic basis over QQ, computed fraction-free over ZZ."""
+    if len(generators) == 0:
+        return List[SparsePoly[QQ]]()
+    if len(order.variables) <= 8:
+        return _rational_basis[8](generators, order, budget)
+    return _rational_basis[16](generators, order, budget)
+
+
 def _packed_supported(order: MonomialOrder) -> Bool:
-    return order.kind != MonomialOrder.KERNEL and len(order.variables) <= _LANES
+    return order.kind != MonomialOrder.KERNEL and len(order.variables) <= _MAX_LANES
