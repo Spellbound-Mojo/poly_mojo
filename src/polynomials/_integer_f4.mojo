@@ -182,6 +182,9 @@ struct _Row(Movable):
     var ncols: Int
     var data: List[UInt64]
     var sizes: List[Int]
+    var marks: List[UInt64]
+    """A bit per column, set whenever the entry is written, so that scans skip
+    untouched columns 64 at a time; every entry with a nonzero size is marked."""
     var scratch: List[UInt64]
     var factor_digits: List[UInt64]
     """With IFMA, the factor of the current load as a padded digit string."""
@@ -197,6 +200,7 @@ struct _Row(Movable):
         self.width = 0
         self.data = List[UInt64]()
         self.sizes = List[Int]()
+        self.marks = List[UInt64]()
         self.scratch = List[UInt64]()
         self.factor_digits = List[UInt64]()
         self.entry_digits = List[UInt64]()
@@ -211,12 +215,21 @@ struct _Row(Movable):
             self.width = width
             self.data = List[UInt64](length=self.ncols * width, fill=0)
             self.scratch = List[UInt64](length=2 * width + 2, fill=0)
-        budget.charge(UInt64(self.ncols))
+        var words = self.ncols // 64 + 1
+        budget.charge(UInt64(words))
         if len(self.sizes) != self.ncols:
             self.sizes = List[Int](length=self.ncols, fill=0)
+            self.marks = List[UInt64](length=words, fill=0)
         else:
-            for c in range(self.ncols):
-                self.sizes.unsafe_get(c) = 0
+            # Only marked entries can have nonzero sizes.
+            for w in range(words):
+                var word = self.marks.unsafe_get(w)
+                while word != 0:
+                    var c = 64 * w + Int(count_trailing_zeros(word))
+                    budget.charge(1)
+                    self.sizes.unsafe_get(c) = 0
+                    word &= word - 1
+                self.marks.unsafe_get(w) = 0
         self.bound = 0
 
     def room_for_sum(mut self, bits: Int, mut budget: Budget) raises PolyError:
@@ -242,10 +255,12 @@ struct _Row(Movable):
         """Replace the size bounds by the entries' sizes."""
         budget.charge(UInt64(len(self.data)))
         var bound = 0
-        for c in range(self.ncols):
+        var c = self.next_marked(0)
+        while c < self.ncols:
             if self.sizes.unsafe_get(c) > 0:
                 self.sizes.unsafe_get(c) = self._entry_bits(c)
                 bound = max(bound, self.sizes.unsafe_get(c))
+            c = self.next_marked(c + 1)
         self.bound = bound
 
     def _entry_bits(self, c: Int) -> Int:
@@ -320,7 +335,26 @@ struct _Row(Movable):
     def negative(self, c: Int) -> Bool:
         return (self.data.unsafe_get(c * self.width + self.width - 1) >> 63) != 0
 
+    def next_marked(self, c: Int) -> Int:
+        """The least marked column at or after c, or `ncols` if none is."""
+        if c >= self.ncols:
+            return self.ncols
+        var w = c // 64
+        var word = self.marks.unsafe_get(w) & (UInt64.MAX << UInt64(c % 64))
+        while word == 0:
+            w += 1
+            if w >= len(self.marks):
+                return self.ncols
+            word = self.marks.unsafe_get(w)
+        return min(64 * w + Int(count_trailing_zeros(word)), self.ncols)
+
+    def unmark(mut self, c: Int):
+        """Forget a zero entry."""
+        self.sizes.unsafe_get(c) = 0
+        self.marks.unsafe_get(c // 64) &= ~(UInt64(1) << UInt64(c % 64))
+
     def set_zero(mut self, c: Int):
+        self.marks.unsafe_get(c // 64) &= ~(UInt64(1) << UInt64(c % 64))
         self.sizes.unsafe_get(c) = 0
         var base = c * self.width
         for l in range(self.width):
@@ -339,6 +373,7 @@ struct _Row(Movable):
         var size = max(self.sizes.unsafe_get(c), bits) + 1
         self.sizes.unsafe_get(c) = size
         self.bound = max(self.bound, size)
+        self.marks.unsafe_get(c // 64) |= UInt64(1) << UInt64(c % 64)
 
     def add_product(mut self, c: Int, factor: List[UInt64], terms: List[UInt64], start: Int, end: Int, bits: Int):
         """Add factor times the magnitude terms[start:end], of at most `bits` bits, to entry c."""
@@ -386,8 +421,11 @@ struct _Row(Movable):
                 self.set_factor_digits(factor)
                 digits = True
         var scratch = self.scratch.unsafe_ptr()
-        for c in range(first, self.ncols):
+        var c = self.next_marked(first)
+        while c < self.ncols:
+            var next = self.next_marked(c + 1)
             if self.is_zero(c):
+                c = next
                 continue
             # The low u limbs hold the entry X - sign B^u, and the product
             # X s - sign s B^u fits in n limbs before its sign repeats.
@@ -428,18 +466,27 @@ struct _Row(Movable):
             var fill = UInt64.MAX if negative else UInt64(0)
             for l in range(n, self.width):
                 entry.unsafe_offset(l).unsafe_store(fill)
+            c = next
 
 
+@always_inline
 def _accumulate[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int):
     """data += a[0:na] * b[0:nb], or -= when `subtract`, over `width` limbs of two's complement.
 
     Products past the width are dropped, which is exact modulo 2^(64 width).
     A short factor goes in a limb pair at a time, each pair in one carry
-    chain along the longer one; two long ones go a column at a time.
+    chain along the longer one; two long ones go a column at a time. Inlined,
+    since a reduction step makes one such update per term.
     """
-    if na > nb:
-        _accumulate[subtract](data, width, b, nb, a, na)
-        return
+    if na <= nb:
+        _accumulate_ordered[subtract](data, width, a, na, b, nb)
+    else:
+        _accumulate_ordered[subtract](data, width, b, nb, a, na)
+
+
+@always_inline
+def _accumulate_ordered[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int):
+    """`_accumulate` for na <= nb."""
     if na >= _COMBA:
         _comba[subtract](data, width, a, na, b, nb)
         return
@@ -953,14 +1000,17 @@ def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coeffi
     _load(row, matrix, coefficients, b, fb, negative_b, True, budget)
     var first = Int(matrix.entries[matrix.starts[a]])
     row.set_zero(first)
-    for c in range(first + 1, row.ncols):
+    var c = row.next_marked(first + 1)
+    while c < row.ncols:
         budget.charge(UInt64(row.width))
         if row.is_zero(c):
-            continue
-        var q = pivot[c]
-        if q < 0:
-            return False
-        _cancel(row, matrix, coefficients, c, q, c, quotient, budget)
+            row.unmark(c)
+        else:
+            var q = pivot[c]
+            if q < 0:
+                return False
+            _cancel(row, matrix, coefficients, c, q, c, quotient, budget)
+        c = row.next_marked(c + 1)
     return True
 
 
@@ -1050,11 +1100,12 @@ def _reduced_tails[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget)
         row.prepare(coefficients.bits[matrix.sources[r]] + 1, budget)
         _load(row, matrix, coefficients, r, unit, False, False, budget)
         var first = Int(matrix.entries[matrix.starts[r]])
-        for c in range(first + 1, ncols):
+        var c = row.next_marked(first + 1)
+        while c < ncols:
             budget.charge(UInt64(row.width))
-            if row.is_zero(c) or pivot[c] < 0:
-                continue
-            _cancel(row, matrix, coefficients, c, pivot[c], first, quotient, budget)
+            if not row.is_zero(c) and pivot[c] >= 0:
+                _cancel(row, matrix, coefficients, c, pivot[c], first, quotient, budget)
+            c = row.next_marked(c + 1)
         # The remaining entries, as an increasing term list; the row is zero again after.
         var terms = List[_Term[ZZ, W]]()
         for c in range(ncols - 1, first - 1, -1):
