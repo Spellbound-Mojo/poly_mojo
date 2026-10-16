@@ -13,3 +13,17 @@ Finding: the bits needed to prove the identity track the fraction-free row
 widths (work-weighted 0.86–1.22x), so the modular route wins only through word
 arithmetic; per-quotient CRT is quadratic in the prime count and erodes the
 gain at cyclic-8 heights.
+
+## Refitting the routing cost models
+
+`_pair_routes` chooses between the modular and the exact route by two cost
+models counted in operations (`_exact_cost`, `_modular_cost`), so routes are
+deterministic. Their weights are fitted to nanoseconds on one machine and
+depend on the kernels of both routes; refit after changing either:
+
+    python3 experiments/cert_reconstruct/calibrate_routes.py patch src /tmp/cal
+    # build a library from /tmp/cal/src and certified drivers, run cases such as
+    # cyclic-7/8, katsura-9/10, eco-10/11, noon-8, saving stdout as CASE.cal
+    python3 experiments/cert_reconstruct/calibrate_routes.py fit /tmp/cal/*.cal
+
+and copy the printed weights into the two functions.
