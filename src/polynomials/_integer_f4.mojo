@@ -242,7 +242,8 @@ struct _Row(Movable):
         if width > self.width or 2 * width < self.width:
             _allocation[UInt64](_product(self.ncols, width), budget)
             self.width = width
-            self.data = List[UInt64](length=self.ncols * width, fill=0)
+            # Limbs above an entry's size are never read, so need no zeros.
+            self.data = List[UInt64](unsafe_uninit_length=self.ncols * width)
             self.scratch = List[UInt64](length=2 * width + 2, fill=0)
         var words = self.ncols // 64 + 1
         budget.charge(UInt64(words))
@@ -318,7 +319,7 @@ struct _Row(Movable):
         var width = max(bound // 64 + 1, self.width + self.width // 2)
         _allocation[UInt64](_product(self.ncols, width), budget)
         budget.charge(UInt64(self.ncols * width))
-        var data = List[UInt64](length=self.ncols * width, fill=0)
+        var data = List[UInt64](unsafe_uninit_length=self.ncols * width)
         for c in range(self.ncols):
             var old = c * self.width
             for l in range(self._limbs(c)):
