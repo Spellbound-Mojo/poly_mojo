@@ -89,6 +89,10 @@ struct _Coefficients(Movable):
     var starts: List[List[Int]]
     """Where each coefficient's limbs start, then where the last one's end."""
     var negative: List[List[Bool]]
+    var by_sign: List[List[Int]]
+    """Each element's term indices, the positive coefficients' first."""
+    var positives: List[Int]
+    """How many of each element's coefficients are positive."""
     var bits: List[Int]
     """The bit length of each element's largest coefficient."""
     var leads: List[Integer]
@@ -109,6 +113,8 @@ struct _Coefficients(Movable):
         self.limbs = List[List[UInt64]]()
         self.starts = List[List[Int]]()
         self.negative = List[List[Bool]]()
+        self.by_sign = List[List[Int]]()
+        self.positives = List[Int]()
         self.bits = List[Int]()
         self.leads = List[Integer]()
         self.words = List[UInt64]()
@@ -132,6 +138,16 @@ struct _Coefficients(Movable):
                 bits = max(bits, value.magnitude_bit_length())
             starts.append(len(limbs))
             _allocation[UInt64](len(limbs), budget)
+            _allocation[Int](len(negative), budget)
+            var by_sign = List[Int](capacity=len(negative))
+            for k in range(len(negative)):
+                if not negative[k]:
+                    by_sign.append(k)
+            self.positives.append(len(by_sign))
+            for k in range(len(negative)):
+                if negative[k]:
+                    by_sign.append(k)
+            self.by_sign.append(by_sign^)
             var digits = List[UInt64]()
             var digit_starts = List[Int]()
             var digit_counts = List[Int]()
@@ -1138,42 +1154,60 @@ def _load[W: Int](mut row: _Row, matrix: _Matrix[W], coefficients: _Coefficients
     var bits = coefficients.bits[g] + _bits(factor)
     row.room_for_sum(bits, budget)
     ref limbs = coefficients.limbs[g]
-    ref starts = coefficients.starts[g]
-    ref signs = coefficients.negative[g]
     var s = matrix.starts[r]
     var n = matrix.starts[r + 1] - s
     budget.charge(UInt64(_product(n, len(factor) * (coefficients.bits[g] // 64 + 1) + row.width)))
+    ref by_sign = coefficients.by_sign[g]
+    var positives = coefficients.positives[g]
+    # Each column takes one term, so the terms go in any order: those to add,
+    # then those to subtract, with no branch on each term's sign.
+    var plus_first = subtract == negative
     if coefficients.bits[g] <= 64:
         # Word coefficients, the common case: one carry chain along the factor per term.
-        var f = factor.unsafe_ptr()
-        var nf = len(factor)
-        for k in range(n):
-            var c = Int(matrix.entries.unsafe_get(s + k))
-            if subtract != (negative != signs.unsafe_get(k)):
-                row.word_product[True](c, f, nf, limbs.unsafe_get(k), bits)
-            else:
-                row.word_product[False](c, f, nf, limbs.unsafe_get(k), bits)
+        if plus_first:
+            _word_terms[minus=False](row, matrix, s, by_sign, 0, positives, limbs, factor, bits)
+            _word_terms[minus=True](row, matrix, s, by_sign, positives, n, limbs, factor, bits)
+        else:
+            _word_terms[minus=True](row, matrix, s, by_sign, 0, positives, limbs, factor, bits)
+            _word_terms[minus=False](row, matrix, s, by_sign, positives, n, limbs, factor, bits)
         return
     var digits = False
     comptime if _IFMA:
         if len(factor) >= _IFMA_MIN and len(coefficients.digits[g]) > 0:
             row.set_factor_digits(factor)
             digits = True
-    for k in range(n):
+    if plus_first:
+        _long_terms[minus=False](row, matrix, coefficients, g, s, 0, positives, factor, digits, bits)
+        _long_terms[minus=True](row, matrix, coefficients, g, s, positives, n, factor, digits, bits)
+    else:
+        _long_terms[minus=True](row, matrix, coefficients, g, s, 0, positives, factor, digits, bits)
+        _long_terms[minus=False](row, matrix, coefficients, g, s, positives, n, factor, digits, bits)
+
+
+@always_inline
+def _word_terms[W: Int, minus: Bool](mut row: _Row, matrix: _Matrix[W], s: Int, by_sign: List[Int], begin: Int, end: Int, limbs: List[UInt64], factor: List[UInt64], bits: Int):
+    """Add, or subtract when `minus`, factor times the word terms by_sign[begin:end] of the matrix row starting at s."""
+    var f = factor.unsafe_ptr()
+    var nf = len(factor)
+    for i in range(begin, end):
+        var k = by_sign.unsafe_get(i)
         var c = Int(matrix.entries.unsafe_get(s + k))
-        # The term's sign, times the factor's, decides between adding and subtracting.
-        var minus = subtract != (negative != signs.unsafe_get(k))
+        row.word_product[minus](c, f, nf, limbs.unsafe_get(k), bits)
+
+
+def _long_terms[W: Int, minus: Bool](mut row: _Row, matrix: _Matrix[W], coefficients: _Coefficients, g: Int, s: Int, begin: Int, end: Int, factor: List[UInt64], digits: Bool, bits: Int):
+    """Add, or subtract when `minus`, factor times the terms by_sign[begin:end] of element g's matrix row starting at s."""
+    ref limbs = coefficients.limbs[g]
+    ref starts = coefficients.starts[g]
+    ref by_sign = coefficients.by_sign[g]
+    for i in range(begin, end):
+        var k = by_sign.unsafe_get(i)
+        var c = Int(matrix.entries.unsafe_get(s + k))
         comptime if _IFMA:
             if digits and starts.unsafe_get(k + 1) - starts.unsafe_get(k) >= _IFMA_MIN:
-                ref string = coefficients.digits[g]
-                var at = coefficients.digit_starts[g].unsafe_get(k)
-                var count = coefficients.digit_counts[g].unsafe_get(k)
-                if minus:
-                    row.digit_product[True](c, string, at, count, bits)
-                else:
-                    row.digit_product[False](c, string, at, count, bits)
+                row.digit_product[minus](c, coefficients.digits[g], coefficients.digit_starts[g].unsafe_get(k), coefficients.digit_counts[g].unsafe_get(k), bits)
                 continue
-        if minus:
+        comptime if minus:
             row.subtract_product(c, factor, limbs, starts.unsafe_get(k), starts.unsafe_get(k + 1), bits)
         else:
             row.add_product(c, factor, limbs, starts.unsafe_get(k), starts.unsafe_get(k + 1), bits)
