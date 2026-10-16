@@ -1296,27 +1296,94 @@ def _load[W: Int](mut row: _Row, matrix: _Matrix[W], coefficients: _Coefficients
 
 @always_inline
 def _word_terms[W: Int, minus: Bool](mut row: _Row, matrix: _Matrix[W], s: Int, by_sign: List[Int], begin: Int, end: Int, limbs: List[UInt64], factor: List[UInt64], bits: Int):
-    """Add, or subtract when `minus`, factor times the word terms by_sign[begin:end] of the matrix row starting at s."""
+    """Add, or subtract when `minus`, factor times the word terms by_sign[begin:end] of the matrix row starting at s.
+
+    As `_Row.word_product` for each term, with the row's fields held in
+    registers across the terms.
+    """
     var f = factor.unsafe_ptr()
     var nf = len(factor)
+    var data = row.data.unsafe_ptr()
+    var width = row.width
+    var sizes = row.sizes.unsafe_ptr()
+    var marks = row.marks.unsafe_ptr()
+    var entries = matrix.entries.unsafe_ptr().unsafe_offset(s)
+    var order = by_sign.unsafe_ptr()
+    var terms = limbs.unsafe_ptr()
+    var bound = row.bound
     for i in range(begin, end):
-        var k = by_sign.unsafe_get(i)
-        var c = Int(matrix.entries.unsafe_get(s + k))
-        row.word_product[minus](c, f, nf, limbs.unsafe_get(k), bits)
+        var k = order.unsafe_offset(i).unsafe_load()
+        var c = Int(entries.unsafe_offset(k).unsafe_load())
+        var old = sizes.unsafe_offset(c).unsafe_load()
+        var size = max(old, bits) + 1
+        var valid = (old // 64 + 1) * Int(old > 0)
+        var entry = data.unsafe_offset(c * width)
+        # The sign of the entry, with no branch on whether it was zero.
+        var top = entry.unsafe_offset(max(valid - 1, 0)).unsafe_load()
+        var fill = (UInt64(0) - (top >> 63)) & (UInt64(0) - UInt64(Int(valid > 0)))
+        sizes.unsafe_offset(c).unsafe_store(size)
+        bound = max(bound, size)
+        marks.unsafe_offset(c >> 6).unsafe_store(marks.unsafe_offset(c >> 6).unsafe_load() | (UInt64(1) << UInt64(c & 63)))
+        comptime if minus:
+            _sub_mul_1[True, True](entry, size // 64 + 1, terms.unsafe_offset(k).unsafe_load(), f, nf, valid, fill)
+        else:
+            _add_mul_1[True, True](entry, size // 64 + 1, terms.unsafe_offset(k).unsafe_load(), f, nf, valid, fill)
+    row.bound = bound
 
 
 def _long_terms[W: Int, minus: Bool](mut row: _Row, matrix: _Matrix[W], coefficients: _Coefficients, g: Int, s: Int, begin: Int, end: Int, factor: List[UInt64], digits: Bool, bits: Int):
-    """Add, or subtract when `minus`, factor times the terms by_sign[begin:end] of element g's matrix row starting at s."""
+    """Add, or subtract when `minus`, factor times the terms by_sign[begin:end] of element g's matrix row starting at s.
+
+    As `_Row.add_product` and `subtract_product` for each term, with the
+    row's fields held in registers across the terms.
+    """
+    comptime if _IFMA:
+        if digits:
+            _digit_terms[minus](row, matrix, coefficients, g, s, begin, end, factor, bits)
+            return
+    var f = factor.unsafe_ptr()
+    var nf = len(factor)
+    var data = row.data.unsafe_ptr()
+    var width = row.width
+    var sizes = row.sizes.unsafe_ptr()
+    var marks = row.marks.unsafe_ptr()
+    var entries = matrix.entries.unsafe_ptr().unsafe_offset(s)
+    var order = coefficients.by_sign[g].unsafe_ptr()
+    var limbs = coefficients.limbs[g].unsafe_ptr()
+    var starts = coefficients.starts[g].unsafe_ptr()
+    var bound = row.bound
+    for i in range(begin, end):
+        var k = order.unsafe_offset(i).unsafe_load()
+        var c = Int(entries.unsafe_offset(k).unsafe_load())
+        var old = sizes.unsafe_offset(c).unsafe_load()
+        var size = max(old, bits) + 1
+        var u = (old // 64 + 1) * Int(old > 0)
+        var v = size // 64 + 1
+        var entry = data.unsafe_offset(c * width)
+        if v > u:
+            var fill = UInt64.MAX if u > 0 and (entry.unsafe_offset(u - 1).unsafe_load() >> 63) != 0 else UInt64(0)
+            for l in range(u, v):
+                entry.unsafe_offset(l).unsafe_store(fill)
+        sizes.unsafe_offset(c).unsafe_store(size)
+        bound = max(bound, size)
+        marks.unsafe_offset(c >> 6).unsafe_store(marks.unsafe_offset(c >> 6).unsafe_load() | (UInt64(1) << UInt64(c & 63)))
+        var start = starts.unsafe_offset(k).unsafe_load()
+        var count = starts.unsafe_offset(k + 1).unsafe_load() - start
+        _accumulate[minus](entry, v, f, nf, limbs.unsafe_offset(start), count)
+    row.bound = bound
+
+
+def _digit_terms[W: Int, //, minus: Bool](mut row: _Row, matrix: _Matrix[W], coefficients: _Coefficients, g: Int, s: Int, begin: Int, end: Int, factor: List[UInt64], bits: Int):
+    """`_long_terms` with IFMA: terms of at least `_IFMA_MIN` limbs go through digit strings."""
     ref limbs = coefficients.limbs[g]
     ref starts = coefficients.starts[g]
     ref by_sign = coefficients.by_sign[g]
     for i in range(begin, end):
         var k = by_sign.unsafe_get(i)
         var c = Int(matrix.entries.unsafe_get(s + k))
-        comptime if _IFMA:
-            if digits and starts.unsafe_get(k + 1) - starts.unsafe_get(k) >= _IFMA_MIN:
-                row.digit_product[minus](c, coefficients.digits[g], coefficients.digit_starts[g].unsafe_get(k), coefficients.digit_counts[g].unsafe_get(k), bits)
-                continue
+        if starts.unsafe_get(k + 1) - starts.unsafe_get(k) >= _IFMA_MIN:
+            row.digit_product[minus](c, coefficients.digits[g], coefficients.digit_starts[g].unsafe_get(k), coefficients.digit_counts[g].unsafe_get(k), bits)
+            continue
         comptime if minus:
             row.subtract_product(c, factor, limbs, starts.unsafe_get(k), starts.unsafe_get(k + 1), bits)
         else:
