@@ -405,6 +405,21 @@ struct _Row(Movable):
         self.marks.unsafe_get(c // 64) |= UInt64(1) << UInt64(c % 64)
         return v
 
+    @always_inline
+    def _claim(mut self, c: Int, bits: Int, mut valid: Int, mut fill: UInt64) -> Int:
+        """`_grow` without the filling: return the entry's new limbs, set valid
+        to its old ones and fill to the sign word the limbs above them take."""
+        var u = self._limbs(c)
+        var size = max(self.sizes.unsafe_get(c), bits) + 1
+        var top = self.data.unsafe_get(c * self.width + max(u - 1, 0))
+        # No branch on whether the entry was zero: its stale top limb is masked.
+        fill = (UInt64(0) - (top >> 63)) & (UInt64(0) - UInt64(Int(u > 0)))
+        valid = u
+        self.sizes.unsafe_get(c) = size
+        self.bound = max(self.bound, size)
+        self.marks.unsafe_get(c // 64) |= UInt64(1) << UInt64(c % 64)
+        return size // 64 + 1
+
     def add_product(mut self, c: Int, factor: List[UInt64], terms: List[UInt64], start: Int, end: Int, bits: Int):
         """Add factor times the magnitude terms[start:end], of at most `bits` bits, to entry c."""
         var u = self._grow(c, bits)
@@ -420,12 +435,14 @@ struct _Row(Movable):
     @always_inline
     def word_product[subtract: Bool](mut self, c: Int, factor: Pointer[mut=False, UInt64, _], n: Int, term: UInt64, bits: Int):
         """Add, or subtract, the word term times the magnitude factor[0:n], of at most `bits` bits, to entry c."""
-        var u = self._grow(c, bits)
+        var valid = 0
+        var fill = UInt64(0)
+        var v = self._claim(c, bits, valid, fill)
         var data = self.data.unsafe_ptr().unsafe_offset(c * self.width)
         comptime if subtract:
-            _sub_mul_1[True](data, u, term, factor, n)
+            _sub_mul_1[True, True](data, v, term, factor, n, valid, fill)
         else:
-            _add_mul_1[True](data, u, term, factor, n)
+            _add_mul_1[True, True](data, v, term, factor, n, valid, fill)
 
     def set_factor_digits(mut self, factor: List[UInt64]):
         """Keep the factor as a padded digit string for `digit_product`."""
@@ -535,8 +552,12 @@ def _accumulate[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, 
 
 
 @always_inline
-def _add_mul_1[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int):
-    """data += f * other[0:n] over `width` limbs of two's complement, in one carry chain."""
+def _add_mul_1[whole: Bool = False, extend: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int, valid: Int = 0, fill: UInt64 = 0):
+    """data += f * other[0:n] over `width` limbs of two's complement, in one carry chain.
+
+    With `extend`, only data[0:valid] holds the value, and the limbs above
+    read as fill, its sign extension; `whole` must be set too.
+    """
     var g = UInt128(f)
     var carry = UInt64(0)
     var m = min(n, width)
@@ -546,6 +567,8 @@ def _add_mul_1[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: I
         var low = UInt64(p & UInt128(UInt64.MAX))
         var high = UInt64(p >> 64)
         var e = data.unsafe_offset(l).unsafe_load()
+        comptime if extend:
+            e = fill if l >= valid else e
         low += e
         high += UInt64(1) if low < e else UInt64(0)
         low += carry
@@ -553,12 +576,12 @@ def _add_mul_1[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: I
         data.unsafe_offset(l).unsafe_store(low)
         carry = high
         l += 1
-    _carry_word[whole](data, width, l, carry)
+    _carry_word[whole, extend](data, width, l, carry, valid, fill)
 
 
 @always_inline
-def _sub_mul_1[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int):
-    """data -= f * other[0:n] over `width` limbs of two's complement, in one borrow chain."""
+def _sub_mul_1[whole: Bool = False, extend: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int, valid: Int = 0, fill: UInt64 = 0):
+    """data -= f * other[0:n] over `width` limbs of two's complement, in one borrow chain; `extend` as for `_add_mul_1`."""
     var g = UInt128(f)
     var borrow = UInt64(0)
     var m = min(n, width)
@@ -570,10 +593,12 @@ def _sub_mul_1[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: I
         low += borrow
         high += UInt64(1) if low < borrow else UInt64(0)
         var e = data.unsafe_offset(l).unsafe_load()
+        comptime if extend:
+            e = fill if l >= valid else e
         data.unsafe_offset(l).unsafe_store(e - low)
         borrow = high + (UInt64(1) if e < low else UInt64(0))
         l += 1
-    _borrow_word[whole](data, width, l, borrow)
+    _borrow_word[whole, extend](data, width, l, borrow, valid, fill)
 
 
 @always_inline
@@ -709,7 +734,7 @@ def _comba[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Po
 
 
 @always_inline
-def _carry_word[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, start: Int, var carry: UInt64):
+def _carry_word[whole: Bool = False, extend: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, start: Int, var carry: UInt64, valid: Int = 0, fill: UInt64 = 0):
     """Add the word carry to data[start:width], two's complement.
 
     With `whole`, the carry goes through every limb even once it is zero, in
@@ -717,18 +742,23 @@ def _carry_word[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: 
     """
     var l = start
     while (whole or carry != 0) and l < width:
-        var x = data.unsafe_offset(l).unsafe_load() + carry
+        var e = data.unsafe_offset(l).unsafe_load()
+        comptime if extend:
+            e = fill if l >= valid else e
+        var x = e + carry
         data.unsafe_offset(l).unsafe_store(x)
         carry = UInt64(1) if x < carry else UInt64(0)
         l += 1
 
 
 @always_inline
-def _borrow_word[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, start: Int, var borrow: UInt64):
+def _borrow_word[whole: Bool = False, extend: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, start: Int, var borrow: UInt64, valid: Int = 0, fill: UInt64 = 0):
     """Subtract the word borrow from data[start:width], two's complement; `whole` as for `_carry_word`."""
     var l = start
     while (whole or borrow != 0) and l < width:
         var e = data.unsafe_offset(l).unsafe_load()
+        comptime if extend:
+            e = fill if l >= valid else e
         data.unsafe_offset(l).unsafe_store(e - borrow)
         borrow = UInt64(1) if e < borrow else UInt64(0)
         l += 1
