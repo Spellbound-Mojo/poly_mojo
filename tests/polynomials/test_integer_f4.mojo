@@ -36,12 +36,7 @@ def check_row(mut c: Checker, mut work: Budget) raises:
     for step in range(1200):
         var kind = rng.below(10)
         var column = rng.below(n)
-        if step % 97 == 96:
-            # A fresh start over stale limbs, at another width now and then.
-            row.prepare(64 * Int(rng.below(8)) + 1, work)
-            for k in range(n):
-                expected[k] = Integer(0)
-        elif kind < 6:
+        if kind < 6:
             # Mostly short factors, sometimes long enough for column sums.
             var long = step % 4 == 0
             var factor = random_magnitude(rng, Int(rng.below(36 if long else 12)) + 1)

@@ -21,9 +21,13 @@ once. Rows are reduced in a dense accumulator of 64-bit words, which is
 reduced modulo p only when an entry is read: below 2^16 the products of
 residues fit in 32 bits and plain sums cannot overflow; below 2^31 they fit in
 62 bits and each entry stays below p^2 by one conditional subtraction. The
-accumulator skips runs of zero words eight at a time. The final reduced basis
-is computed by one more matrix, whose rows are the basis elements and their
-reducers.
+accumulator skips runs of zero words eight at a time. Rows that are not pivots
+are reduced `_BLOCK` at a time, one per SIMD lane: neighbouring rows need
+nearly the same pivots, so each pivot entry updates every lane in one vector
+operation, and a row that leads in a new column is subtracted from the rows
+after it at once, which gives each row exactly what reducing them one after
+another gives. The final reduced basis is computed by one more matrix, whose
+rows are the basis elements and their reducers.
 
 A run can be recorded (`_f4_learn`) and replayed modulo another prime
 (`_f4_replay`): the replay reduces only the recorded rows that gave new
@@ -38,6 +42,7 @@ prime in one SIMD vector, and every update is one vector operation.
 GREVLEX, over at most sixteen variables; other cases use Buchberger's
 algorithm in the packed or sparse engine.
 """
+from std.bit import count_leading_zeros
 from std.math import max, min
 from .coefficients import CoefficientRing, ModInt, Modulus
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product, _sum
@@ -175,11 +180,10 @@ struct _Columns[W: Int](Movable):
 
 def _sort_descending[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) raises PolyError -> List[Int]:
     """Indices of `monomials` from greatest to least, by bottom-up merge sort."""
-    comptime if W <= 8:
-        if len(monomials) < (1 << 32):
-            var keys = _keys(kind, monomials, budget)
-            if keys:
-                return _sort_keys(keys.take(), budget)
+    if len(monomials) < (1 << 32):
+        var keys = _keys(kind, monomials, budget)
+        if keys:
+            return _sort_keys(keys.take(), budget)
     var n = len(monomials)
     _allocation[Int](2 * n, budget)
     var order = List[Int](capacity=n)
@@ -219,29 +223,49 @@ def _sort_descending[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budge
 
 
 def _keys[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) raises PolyError -> Optional[List[UInt128]]:
-    """Keys whose integer order is the monomial order, each with its index in the low 32 bits; None unless every exponent is below 2^8 and every degree below 2^16.
+    """Keys whose integer order is the monomial order, each with its index in the low 32 bits; None unless they fit in 128 bits.
 
-    From the top: the degree (zero under LEX), then one byte per lane in
-    the order that decides, which under GREVLEX is from the last lane up,
-    with the exponent complemented, since a smaller one there is greater.
+    From the top: the degree (none under LEX), then a digit of b bits per
+    lane that some monomial uses, in the order that decides, which under
+    GREVLEX is from the last lane up, with the exponent complemented, since a
+    smaller one there is greater. Lanes no monomial uses are equal
+    throughout and get no digit; b and the degree's width are the fewest
+    bits that hold every exponent and degree.
     """
-    comptime assert W <= 8, "one byte per lane in 64 bits"
     var n = len(monomials)
+    budget.charge(UInt64(n))
+    var top = SIMD[DType.uint32, W](0)
+    var degree = UInt64(0)
+    for i in range(n):
+        ref m = monomials.unsafe_get(i)
+        top = max(top, m.exponents())
+        degree = max(degree, m.degree)
+    var largest = top.reduce_max()
+    var b = 32 - Int(count_leading_zeros(largest))
+    var degree_bits = 0 if kind == MonomialOrder.LEX else 64 - Int(count_leading_zeros(degree))
+    var used = 0
+    comptime for j in range(W):
+        if top[j] != 0:
+            used += 1
+    if degree_bits + used * b > 96:
+        return None
     _allocation[UInt128](n, budget)
     budget.charge(UInt64(n))
     var keys = List[UInt128](capacity=n)
+    var mask = UInt128((1 << b) - 1)
     for i in range(n):
         ref m = monomials.unsafe_get(i)
         var e = m.exponents()
-        if m.degree >= (1 << 16) or e.reduce_max() >= 256:
-            return None
-        var digits = UInt64(0)
-        comptime for j in range(W):
-            var lane = UInt64(e[W - 1 - j]) if kind == MonomialOrder.GREVLEX else UInt64(e[j])
-            var digit = UInt64(255) - lane if kind == MonomialOrder.GREVLEX else lane
-            digits |= digit << UInt64(8 * (7 - j))
-        var degree = UInt128(0) if kind == MonomialOrder.LEX else UInt128(m.degree)
-        keys.append((degree << 112) | (UInt128(digits) << 48) | UInt128(i))
+        var key = UInt128(0) if kind == MonomialOrder.LEX else UInt128(m.degree)
+        if kind == MonomialOrder.GREVLEX:
+            comptime for j in range(W - 1, -1, -1):
+                if top[j] != 0:
+                    key = (key << UInt128(b)) | (mask - UInt128(e[j]))
+        else:
+            comptime for j in range(W):
+                if top[j] != 0:
+                    key = (key << UInt128(b)) | UInt128(e[j])
+        keys.append((key << 32) | UInt128(i))
     return keys^
 
 
@@ -329,10 +353,20 @@ struct _Matrix[W: Int](Movable):
         `engine.active` must be sorted, and the order graded, so the search
         stops at the first leading monomial of greater degree.
         """
-        _allocation[_Packed[Self.W]](len(engine.active), budget)
-        var leads = List[_Packed[Self.W]](capacity=len(engine.active))
+        var count = len(engine.active)
+        _allocation[_Packed[Self.W]](count, budget)
+        _allocation[UInt32](count + 16, budget)
+        var leads = List[_Packed[Self.W]](capacity=count)
+        # The supports apart, padded with full masks, to rule out most leading monomials 16 at a time.
+        var supports = List[UInt32](capacity=count + 16)
         for g in engine.active:
             leads.append(engine.leads[g])
+            supports.append(engine.leads[g].support)
+        for _ in range(16):
+            supports.append(UInt32.MAX)
+        # The leading monomials of degree at most `degree` are the first `limit`.
+        var degree = UInt64.MAX
+        var limit = 0
         var next = 0
         while next < len(self.columns.monomials):
             var c = next
@@ -340,17 +374,27 @@ struct _Matrix[W: Int](Movable):
             if self.columns.covered[c]:
                 continue
             var u = self.columns.monomials[c]
+            if u.degree != degree:
+                degree = u.degree
+                limit = 0
+                while limit < count and leads[limit].degree <= degree:
+                    limit += 1
+            var outside = ~u.support
+            var exponents = u.exponents()
             var found = -1
             var i = 0
-            while i < len(leads):
-                ref lead = leads.unsafe_get(i)
-                if lead.degree > u.degree:
-                    break
-                if _divides(lead, u):
-                    found = i
-                    break
-                i += 1
-            budget.charge(UInt64(i + 1))
+            while i < limit:
+                var block = supports.unsafe_ptr().unsafe_offset(i).unsafe_load[width=16]()
+                var candidates = (block & outside).eq(0)
+                if candidates.reduce_or():
+                    for k in range(min(16, limit - i)):
+                        if candidates[k] and leads.unsafe_get(i + k).exponents().le(exponents).reduce_and():
+                            found = i + k
+                            break
+                    if found >= 0:
+                        break
+                i += 16
+            budget.charge(UInt64((found if found >= 0 else limit) + 1))
             if found >= 0:
                 self.add_row(engine, store, engine.active[found], _div(u, leads[found]), budget)
 
@@ -382,15 +426,45 @@ struct _Rows(Movable):
 
 
 @always_inline
+def _reciprocal(prime: UInt64) -> UInt64:
+    """floor(2^64 / prime), for `_residue`; the prime is at least 2."""
+    return UInt64((UInt128(1) << 64) // UInt128(prime))
+
+
+@always_inline
+def _residue(v: UInt64, prime: UInt64, reciprocal: UInt64) -> UInt64:
+    """v modulo prime, by Barrett's method with reciprocal = floor(2^64 / prime).
+
+    v * reciprocal / 2^64 exceeds v / prime - v / 2^64 > v / prime - 1, so
+    the estimated quotient is floor(v / prime) or one less, and one
+    conditional subtraction finishes.
+    """
+    var q = UInt64((UInt128(v) * UInt128(reciprocal)) >> 64)
+    var r = v - q * prime
+    return r - prime if r >= prime else r
+
+
+@always_inline
 def _axpy[small: Bool](data: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factor: UInt64, square: UInt64):
-    """Add factor times a row, after its leading entry, to the dense accumulator."""
-    for k in range(1, n):
-        var j = Int(columns.unsafe_offset(k).unsafe_load())
-        var x = data.unsafe_offset(j).unsafe_load() + factor * UInt64(values.unsafe_offset(k).unsafe_load())
-        comptime if small:
-            data.unsafe_offset(j).unsafe_store(x)
-        else:
-            data.unsafe_offset(j).unsafe_store(x - square if x >= square else x)
+    """Add factor times a row, after its leading entry, to the dense accumulator, four entries a step."""
+    var k = 1
+    while k + 4 <= n:
+        comptime for u in range(4):
+            _update[small](data, columns, values, k + u, factor, square)
+        k += 4
+    while k < n:
+        _update[small](data, columns, values, k, factor, square)
+        k += 1
+
+
+@always_inline
+def _update[small: Bool](data: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], k: Int, factor: UInt64, square: UInt64):
+    var j = Int(columns.unsafe_offset(k).unsafe_load())
+    var x = data.unsafe_offset(j).unsafe_load() + factor * UInt64(values.unsafe_offset(k).unsafe_load())
+    comptime if small:
+        data.unsafe_offset(j).unsafe_store(x)
+    else:
+        data.unsafe_offset(j).unsafe_store(x - square if x >= square else x)
 
 
 def _reduce_row[W: Int](mut dense: List[UInt64], start: Int, pivot: List[Int], matrix: _Matrix[W], values: List[List[UInt32]], mut found: _Rows, prime: UInt64, mut budget: Budget) raises PolyError:
@@ -451,6 +525,163 @@ def _reduce_row_in[small: Bool, W: Int](mut dense: List[UInt64], start: Int, piv
         c += 1
 
 
+comptime _BLOCK = 8
+"""Rows `_eliminate` reduces at once, one per SIMD lane."""
+
+comptime _Block = SIMD[DType.uint64, _BLOCK]
+
+
+struct _Field(Copyable, Movable):
+    """A prime with the constants that reduce modulo it, in every lane."""
+    var prime: UInt64
+    var reciprocal: UInt64
+    var primes: _Block
+    var squares: _Block
+    var wraps: _Block
+    """2^32 modulo the prime."""
+    var inverses: SIMD[DType.float64, _BLOCK]
+
+    def __init__(out self, prime: UInt64):
+        self.prime = prime
+        self.reciprocal = _reciprocal(prime)
+        self.primes = _Block(prime)
+        self.squares = _Block(prime * prime)
+        self.wraps = _Block((UInt64(1) << 32) % prime)
+        self.inverses = SIMD[DType.float64, _BLOCK](1.0) / self.primes.cast[DType.float64]()
+
+
+@always_inline
+def _residues(v: _Block, field: _Field) -> _Block:
+    """Each lane of v modulo the prime.
+
+    Folding the high half by 2^32 modulo the prime leaves a value below
+    2^62, whose quotient estimated in floating point is off by one at most
+    either way.
+    """
+    var a = (v >> 32) * field.wraps + (v & 0xFFFFFFFF)
+    var q = (a.cast[DType.float64]() * field.inverses).cast[DType.uint64]()
+    var r = a - q * field.primes
+    r = (r >> 63).ne(0).select(r + field.primes, r)
+    return r.ge(field.primes).select(r - field.primes, r)
+
+
+@no_inline
+def _axpy_block[small: Bool](data: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factors: SIMD[DType.uint32, _BLOCK], square: _Block):
+    """Add each lane's factor times a row, after its leading entry, to that lane of the dense block.
+
+    Both factors widen from 32 bits, so each product is one 32 by 32 bit
+    multiplication. Inlined, the widening is lost before instructions are
+    selected, which then multiply all 64 bits.
+    """
+    var factor = factors.cast[DType.uint64]()
+    for k in range(1, n):
+        var at = data.unsafe_offset(_BLOCK * Int(columns.unsafe_offset(k).unsafe_load()))
+        var x = at.unsafe_load[width=_BLOCK]() + factor * _Block(UInt64(values.unsafe_offset(k).unsafe_load()))
+        comptime if small:
+            at.unsafe_store[width=_BLOCK](x)
+        else:
+            at.unsafe_store[width=_BLOCK](x.ge(square).select(x - square, x))
+
+
+struct _Lane(Movable):
+    """The entries one lane of a block keeps: its leading entry first, then its tail."""
+    var columns: List[Int32]
+    var values: List[UInt32]
+
+    def __init__(out self):
+        self.columns = List[Int32]()
+        self.values = List[UInt32]()
+
+
+def _reduce_block[small: Bool, W: Int](mut dense: List[UInt64], rows: List[Int], first: Int, count: Int, pivot: List[Int], matrix: _Matrix[W], values: List[List[UInt32]], found: _Rows, mut lanes: List[_Lane], field: _Field, ring: Modulus, mut budget: Budget) raises PolyError:
+    """Reduce rows[first : first + count] at once, row first + l in lane l, as `_reduce_row` would one after another.
+
+    Each lane keeps in `lanes` what no pivot covers. One after another, a
+    row leading in a column no pivot covers becomes a pivot for the rows
+    after it; here the first lane without a leading entry that is nonzero in
+    such a column leads there, and the later lanes subtract a multiple of
+    it at once. Every lane is then the row reduced by the same pivots and the
+    same earlier rows, with zeros in their leading columns, which fixes it.
+    For p < 2^16 an entry gains at most one product below 2^32 per column
+    and per lane before it is read; otherwise entries stay below p^2.
+    """
+    var ncols = len(pivot)
+    var rows_in_matrix = len(matrix.sources)
+    var data = dense.unsafe_ptr()
+    var start = ncols
+    for l in range(count):
+        var r = rows[first + l]
+        var s = matrix.starts[r]
+        ref v = values[matrix.sources[r]]
+        for k in range(matrix.starts[r + 1] - s):
+            data.unsafe_offset(_BLOCK * Int(matrix.entries.unsafe_get(s + k)) + l).unsafe_store(UInt64(v.unsafe_get(k)))
+        start = min(start, Int(matrix.entries[s]))
+        lanes[l].columns.clear()
+        lanes[l].values.clear()
+    var led = SIMD[DType.bool, _BLOCK](fill=False)
+    budget.charge(UInt64(ncols - start))
+    for c in range(start, ncols):
+        var at = data.unsafe_offset(_BLOCK * c)
+        var v = at.unsafe_load[width=_BLOCK]()
+        if not v.ne(0).reduce_or():
+            continue
+        at.unsafe_store[width=_BLOCK](_Block(0))
+        v = _residues(v, field)
+        var nonzero = v.ne(0)
+        if not nonzero.reduce_or():
+            continue
+        var q = pivot.unsafe_get(c)
+        if q >= 0:
+            var factor = nonzero.select(field.primes - v, _Block(0)).cast[DType.uint32]()
+            var weight = UInt64(nonzero.cast[DType.uint8]().reduce_add())
+            if q >= rows_in_matrix:
+                var r = q - rows_in_matrix
+                var s = found.starts.unsafe_get(r)
+                var n = found.starts.unsafe_get(r + 1) - s
+                budget.charge(UInt64(n) * weight)
+                _axpy_block[small](data, found.columns.unsafe_ptr().unsafe_offset(s), found.values.unsafe_ptr().unsafe_offset(s), n, factor, field.squares)
+            else:
+                var s = matrix.starts.unsafe_get(q)
+                var n = matrix.starts.unsafe_get(q + 1) - s
+                budget.charge(UInt64(n) * weight)
+                _axpy_block[small](data, matrix.entries.unsafe_ptr().unsafe_offset(s), values[matrix.sources.unsafe_get(q)].unsafe_ptr(), n, factor, field.squares)
+            continue
+        var leader = -1
+        for l in range(count):
+            if nonzero[l] and not led[l]:
+                leader = l
+                break
+        for l in range(count):
+            if nonzero[l] and (leader < 0 or l <= leader):
+                lanes[l].columns.append(Int32(c))
+                lanes[l].values.append(UInt32(v[l]))
+        if leader < 0:
+            continue
+        led[leader] = True
+        # The later lanes subtract their multiple of the leader from here on.
+        var inverse = ModInt(v[leader], ring).inverse(budget).value
+        var factors = SIMD[DType.uint32, _BLOCK](0)
+        var any = False
+        for l in range(leader + 1, count):
+            if nonzero[l]:
+                factors[l] = UInt32(field.prime - _residue(v[l] * inverse, field.prime, field.reciprocal))
+                any = True
+        if not any:
+            continue
+        budget.charge(UInt64(ncols - c))
+        var factor = factors.cast[DType.uint64]()
+        for k in range(c + 1, ncols):
+            var to = data.unsafe_offset(_BLOCK * k)
+            var x = to.unsafe_offset(leader).unsafe_load()
+            if x == 0:
+                continue
+            var y = to.unsafe_load[width=_BLOCK]() + factor * _Block(UInt64(UInt32(_residue(x, field.prime, field.reciprocal))))
+            comptime if small:
+                to.unsafe_store[width=_BLOCK](y)
+            else:
+                to.unsafe_store[width=_BLOCK](y.ge(field.squares).select(y - field.squares, y))
+
+
 def _scatter[W: Int](mut dense: List[UInt64], matrix: _Matrix[W], values: List[List[UInt32]], row: Int, skip: Int):
     """Write a matrix row's residues, after its first `skip` entries, into the dense accumulator."""
     var s = matrix.starts[row]
@@ -467,7 +698,9 @@ struct _Step[W: Int](Copyable, Movable):
     pivots are then reduced by one another from the right; in the final
     matrix every row is a pivot and the first `basis` rows have their tails
     reduced. `supports` lists each result's columns, leading column first, in
-    the order the results come; the final matrix also keeps their monomials.
+    the order the results are inserted, which `inserted` gives as positions
+    in the order they come when it is not empty; the final matrix also keeps
+    their monomials.
     """
     var final: Bool
     var ncols: Int
@@ -478,6 +711,7 @@ struct _Step[W: Int](Copyable, Movable):
     var basis: Int
     var leads: List[Int32]
     var supports: List[List[Int32]]
+    var inserted: List[Int]
     var monomials: List[List[_Packed[Self.W]]]
 
     def __init__(out self, final: Bool, ncols: Int):
@@ -490,6 +724,7 @@ struct _Step[W: Int](Copyable, Movable):
         self.basis = 0
         self.leads = List[Int32]()
         self.supports = List[List[Int32]]()
+        self.inserted = List[Int]()
         self.monomials = List[List[_Packed[Self.W]]]()
 
     def keep(mut self, matrix: _Matrix[Self.W], r: Int, mut budget: Budget) raises PolyError:
@@ -516,39 +751,51 @@ struct _Trace[W: Int](Movable):
     var inputs: List[List[_Packed[Self.W]]]
     """Each element's monomials after the start, in increasing order."""
     var steps: List[_Step[Self.W]]
-    var usable: Bool
-    """False when the run inserted an element outside its matrices."""
 
     def __init__(out self):
         self.inputs = List[List[_Packed[Self.W]]]()
         self.steps = List[_Step[Self.W]]()
-        self.usable = True
 
 
 def _eliminate[W: Int](matrix: _Matrix[W], mut pivot: List[Int], reduce: List[Int], values: List[List[UInt32]], prime: UInt64, ring: Modulus, mut found: _Rows, mut kept: List[Int], mut budget: Budget) raises PolyError -> List[Int]:
     """Reduce rows `reduce` in turn, each nonzero remainder becoming a monic pivot; then reduce the new pivots by one another.
 
-    `kept` gets the rows that gave pivots. Returns the reduced new pivots,
-    rows of `found`, by decreasing leading column.
+    The rows are reduced `_BLOCK` at a time by `_reduce_block`, with the
+    result of reducing them in turn. `kept` gets the rows that gave pivots.
+    Returns the reduced new pivots, rows of `found`, by decreasing leading
+    column.
     """
     var nrows = len(matrix.sources)
     var ncols = len(pivot)
+    var field = _Field(prime)
+    _allocation[UInt64](_product(ncols, _BLOCK), budget)
+    var block = List[UInt64](length=_BLOCK * ncols, fill=0)
+    var lanes = List[_Lane](capacity=_BLOCK)
+    for _ in range(_BLOCK):
+        lanes.append(_Lane())
+    var first = 0
+    while first < len(reduce):
+        var count = min(_BLOCK, len(reduce) - first)
+        if prime < 65536:
+            _reduce_block[True](block, reduce, first, count, pivot, matrix, values, found, lanes, field, ring, budget)
+        else:
+            _reduce_block[False](block, reduce, first, count, pivot, matrix, values, found, lanes, field, ring, budget)
+        for l in range(count):
+            ref lane = lanes[l]
+            if len(lane.columns) == 0:
+                continue
+            _allocation[UInt32](2 * len(lane.columns), budget)
+            # A new pivot: monic, and used by the rows that follow.
+            var inverse = ModInt(UInt64(lane.values[0]), ring).inverse(budget).value
+            for k in range(len(lane.columns)):
+                found.columns.append(lane.columns[k])
+                found.values.append(UInt32(_residue(UInt64(lane.values[k]) * inverse, prime, field.reciprocal)))
+            pivot[Int(lane.columns[0])] = nrows + len(found.starts) - 1
+            found.starts.append(len(found.columns))
+            kept.append(reduce[first + l])
+        first += count
     _allocation[UInt64](ncols, budget)
     var dense = List[UInt64](length=ncols, fill=0)
-    for r in reduce:
-        _scatter(dense, matrix, values, r, 0)
-        var before = len(found.columns)
-        _reduce_row(dense, Int(matrix.entries[matrix.starts[r]]), pivot, matrix, values, found, prime, budget)
-        if len(found.columns) == before:
-            continue
-        _allocation[UInt32](2 * (len(found.columns) - before), budget)
-        # A new pivot: monic, and used by the rows that follow.
-        var inverse = ModInt(UInt64(found.values[before]), ring).inverse(budget).value
-        for k in range(before, len(found.values)):
-            found.values[k] = UInt32((UInt64(found.values[k]) * inverse) % prime)
-        pivot[Int(found.columns[before])] = nrows + len(found.starts) - 1
-        found.starts.append(len(found.columns))
-        kept.append(r)
     # The new pivots by decreasing leading column. Each is reduced by every
     # reducer already, so it only needs reducing by the new pivots right of
     # its leading column; taken from the right, those are final when it is
@@ -602,8 +849,50 @@ def _supports(found: _Rows, rows: List[Int], mut budget: Budget) raises PolyErro
     return supports^
 
 
+def _insertion[W: Int](found: _Rows, results: List[Int], monomials: List[_Packed[W]], order: List[Int], mut budget: Budget) raises PolyError -> List[Int]:
+    """The order to insert a round's new elements in, as positions in `results`; empty for their own order, smallest leading monomial first.
+
+    Under an inhomogeneous run, a new element's leading monomial may be one
+    that a smaller new element's divides. Such elements go first, by
+    decreasing leading monomial: inserting the divisor then retires each from
+    the active elements and installs their pair, which a later matrix
+    reduces, so the whole run stays in its matrices.
+    """
+    _allocation[Bool](len(results), budget)
+    var divided = List[Bool](length=len(results), fill=False)
+    var some = False
+    for k in range(len(results)):
+        var lead = monomials[order[Int(found.columns[found.starts[results[k]]])]]
+        for j in range(k):
+            budget.charge(1)
+            if _divides(monomials[order[Int(found.columns[found.starts[results[j]]])]], lead):
+                divided[k] = True
+                some = True
+                break
+    var inserted = List[Int]()
+    if not some:
+        return inserted^
+    for k in range(len(results) - 1, -1, -1):
+        if divided[k]:
+            inserted.append(k)
+    for k in range(len(results)):
+        if not divided[k]:
+            inserted.append(k)
+    return inserted^
+
+
+def _inserted(results: List[Int], inserted: List[Int]) -> List[Int]:
+    """`results` in the recorded insertion order."""
+    if len(inserted) == 0:
+        return results.copy()
+    var permuted = List[Int](capacity=len(results))
+    for k in inserted:
+        permuted.append(results[k])
+    return permuted^
+
+
 def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _Store[W], prime: UInt64, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
-    """Run one F4 round on the pairs of least LCM degree; return the new elements, monic."""
+    """Run one F4 round on the pairs of least LCM degree; return the new elements, monic, in the order to insert them."""
     var degree = engine.pairs[0].lcm.degree
     var matrix = _Matrix[W]()
     # Both halves of every selected pair. A half is fixed by its element and
@@ -644,6 +933,8 @@ def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _
     var found = _Rows()
     var kept = List[Int]()
     var results = _eliminate(matrix, pivot, reduce, store.values, prime, ring, found, kept, budget)
+    var inserted = _insertion(found, results, matrix.columns.monomials, order, budget)
+    results = _inserted(results, inserted)
     comptime if record:
         # The replay keeps the pivots and the rows that gave new ones.
         var step = _Step[W](False, ncols)
@@ -654,8 +945,9 @@ def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _
             step.keep(matrix, kept[i], budget)
             step.leads.append(found.columns[found.starts[i]])
         step.supports = _supports(found, results, budget)
+        step.inserted = inserted^
         trace.steps.append(step^)
-    # The new elements, smallest leading monomial first, as increasing term lists.
+    # The new elements in the order to insert them, as increasing term lists.
     var fresh = List[List[_Term[ModInt, W]]]()
     for i in results:
         var n = found.starts[i + 1] - found.starts[i]
@@ -738,20 +1030,6 @@ def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], 
         for k in range(len(fresh)):
             var p = List[_Term[ModInt, W]]()
             swap(p, fresh[k])
-            # An element found earlier in this round may divide this one's leading monomial.
-            var divided = False
-            for g in engine.active:
-                budget.charge(1)
-                if _divides(engine.leads[g], p[len(p) - 1].monomial):
-                    divided = True
-                    break
-            if divided:
-                # Reduced outside the matrices, so a replay could not follow.
-                trace.usable = False
-                engine.sort_active(budget)
-                p = engine.reduce_base(p^, engine.active, budget)
-                if len(p) == 0:
-                    continue
             engine.insert(p^, budget)
     store.extend(engine, budget)
     return _interreduce[W, record](engine, store, prime, ring, trace, budget)
@@ -846,7 +1124,7 @@ def _f4_replay[W: Int](trace: _Trace[W], var generators: List[List[_Term[ModInt,
             for i in range(len(kept)):
                 if found.columns[found.starts[i]] != step.leads[i]:
                     return None
-            if not _replay_rows(found, results, step.supports, values, budget):
+            if not _replay_rows(found, _inserted(results, step.inserted), step.supports, values, budget):
                 return None
             continue
         _tails(matrix, step.basis, pivot, values, prime, found, budget)
@@ -1158,7 +1436,7 @@ def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_T
             var results = _eliminate_lanes(step, dense, pivot, values, found, lanes, budget)
             if lanes.live == 0:
                 return bases^
-            _replay_rows_lanes(found, results, step.supports, values, lanes, budget)
+            _replay_rows_lanes(found, _inserted(results, step.inserted), step.supports, values, lanes, budget)
             if lanes.live == 0:
                 return bases^
             continue
