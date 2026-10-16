@@ -325,10 +325,28 @@ def _keys[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) 
 
 
 def _sort_keys(var keys: List[UInt128], mut budget: Budget) raises PolyError -> List[Int]:
-    """The indices in the low 32 bits of distinct keys, by decreasing key."""
+    """The indices in the low 32 bits of distinct keys, by decreasing key.
+
+    Long lists go by radix sort, 11 bits at a time above the index, which
+    distinct keys need not be sorted by.
+    """
     var n = len(keys)
     _allocation[UInt128](n, budget)
     var scratch = List[UInt128](length=n, fill=0)
+    if n < 2048:
+        _merge_keys(keys, scratch, budget)
+    else:
+        _radix_keys(keys, scratch, budget)
+    _allocation[Int](n, budget)
+    var order = List[Int](capacity=n)
+    for k in range(n):
+        order.append(Int(keys.unsafe_get(k) & UInt128(0xFFFFFFFF)))
+    return order^
+
+
+def _merge_keys(mut keys: List[UInt128], mut scratch: List[UInt128], mut budget: Budget) raises PolyError:
+    """Sort distinct keys decreasingly, by bottom-up merge sort."""
+    var n = len(keys)
     var width = 1
     while width < n:
         budget.charge(UInt64(n))
@@ -360,11 +378,40 @@ def _sort_keys(var keys: List[UInt128], mut budget: Budget) raises PolyError -> 
             start = end
         swap(keys, scratch)
         width *= 2
-    _allocation[Int](n, budget)
-    var order = List[Int](capacity=n)
+
+
+def _radix_keys(mut keys: List[UInt128], mut scratch: List[UInt128], mut budget: Budget) raises PolyError:
+    """Sort distinct keys decreasingly, least significant digit first above the index; charged as the merge sort."""
+    var n = len(keys)
+    var width = 1
+    while width < n:
+        budget.charge(UInt64(n))
+        width *= 2
+    var top = UInt128(0)
     for k in range(n):
-        order.append(Int(keys.unsafe_get(k) & UInt128(0xFFFFFFFF)))
-    return order^
+        top = max(top, keys.unsafe_get(k))
+    var bits = 128 - Int(count_leading_zeros(top >> 32))
+    comptime DIGIT = 11
+    var counts = List[Int](length=1 << DIGIT, fill=0)
+    var shift = 32
+    while shift < 32 + bits:
+        for d in range(1 << DIGIT):
+            counts.unsafe_get(d) = 0
+        for k in range(n):
+            counts.unsafe_get(Int((keys.unsafe_get(k) >> UInt128(shift)) & UInt128((1 << DIGIT) - 1))) += 1
+        # Decreasing digits first, so the pass is stable for a descending order.
+        var at = 0
+        for d in range((1 << DIGIT) - 1, -1, -1):
+            var c = counts.unsafe_get(d)
+            counts.unsafe_get(d) = at
+            at += c
+        for k in range(n):
+            var key = keys.unsafe_get(k)
+            var d = Int((key >> UInt128(shift)) & UInt128((1 << DIGIT) - 1))
+            scratch.unsafe_get(counts.unsafe_get(d)) = key
+            counts.unsafe_get(d) += 1
+        swap(keys, scratch)
+        shift += DIGIT
 
 
 @always_inline
