@@ -81,17 +81,13 @@ def _magnitude(value: Integer, mut limbs: List[UInt64]):
 
 
 def _bits(limbs: List[UInt64]) -> Int:
+    var data = limbs.unsafe_ptr()
     var n = len(limbs)
-    while n > 0 and limbs[n - 1] == 0:
+    while n > 0 and data.unsafe_offset(n - 1).unsafe_load() == 0:
         n -= 1
     if n == 0:
         return 0
-    var top = limbs[n - 1]
-    var bits = 64 * (n - 1)
-    while top:
-        bits += 1
-        top >>= 1
-    return bits
+    return 64 * n - Int(count_leading_zeros(data.unsafe_offset(n - 1).unsafe_load()))
 
 
 struct _Coefficients(Movable):

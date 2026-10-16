@@ -43,7 +43,7 @@ GREVLEX, over at most sixteen variables; other cases use Buchberger's
 algorithm in the packed or sparse engine.
 """
 from std.bit import count_leading_zeros
-from std.math import max, min
+from std.math import iota, max, min
 from .coefficients import CoefficientRing, ModInt, Modulus
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product, _sum
 from .monomial import MonomialOrder
@@ -312,6 +312,17 @@ def _sort_keys(var keys: List[UInt128], mut budget: Budget) raises PolyError -> 
     return order^
 
 
+@always_inline
+def _divisibility_mask[W: Int, B: Int](exponents: SIMD[DType.uint32, W], thresholds: List[SIMD[DType.uint32, W]]) -> UInt64:
+    """Bit k * W + lane set when the exponent in the lane reaches thresholds[k] there."""
+    comptime lanes = SIMD[DType.uint64, W](1) << iota[DType.uint64, W]()
+    var mask = UInt64(0)
+    comptime for k in range(B):
+        var reached = exponents.ge(thresholds.unsafe_get(k)).select(lanes, SIMD[DType.uint64, W](0)).reduce_or()
+        mask |= reached << UInt64(k * W)
+    return mask
+
+
 struct _Matrix[W: Int](Movable):
     """One F4 matrix: rows as multiples of basis elements, their columns concatenated."""
     var columns: _Columns[Self.W]
@@ -355,15 +366,27 @@ struct _Matrix[W: Int](Movable):
         """
         var count = len(engine.active)
         _allocation[_Packed[Self.W]](count, budget)
-        _allocation[UInt32](count + 16, budget)
+        _allocation[UInt64](count + 8, budget)
         var leads = List[_Packed[Self.W]](capacity=count)
-        # The supports apart, padded with full masks, to rule out most leading monomials 16 at a time.
-        var supports = List[UInt32](capacity=count + 16)
+        var top = SIMD[DType.uint32, Self.W](0)
         for g in engine.active:
             leads.append(engine.leads[g])
-            supports.append(engine.leads[g].support)
-        for _ in range(16):
-            supports.append(UInt32.MAX)
+            top = max(top, engine.leads[g].exponents())
+        # Divisibility masks: bit k * W + lane says the exponent in the lane
+        # reaches the lane's k-th threshold, the thresholds spread over the
+        # leading monomials' exponents. A leading monomial divides u only if
+        # its mask is inside u's, which rules out most of them 8 at a time.
+        comptime B = 64 // Self.W
+        var thresholds = List[SIMD[DType.uint32, Self.W]](capacity=B)
+        for k in range(B):
+            var t = SIMD[DType.uint32, Self.W](1) + (top * UInt32(k)) // UInt32(B)
+            thresholds.append(top.eq(0).select(SIMD[DType.uint32, Self.W](UInt32.MAX), t))
+        var masks = List[UInt64](capacity=count + 8)
+        for i in range(count):
+            masks.append(_divisibility_mask[Self.W, B](leads[i].exponents(), thresholds))
+        # Padding no monomial's mask contains.
+        for _ in range(8):
+            masks.append(UInt64.MAX)
         # The leading monomials of degree at most `degree` are the first `limit`.
         var degree = UInt64.MAX
         var limit = 0
@@ -379,21 +402,21 @@ struct _Matrix[W: Int](Movable):
                 limit = 0
                 while limit < count and leads[limit].degree <= degree:
                     limit += 1
-            var outside = ~u.support
             var exponents = u.exponents()
+            var outside = ~_divisibility_mask[Self.W, B](exponents, thresholds)
             var found = -1
             var i = 0
             while i < limit:
-                var block = supports.unsafe_ptr().unsafe_offset(i).unsafe_load[width=16]()
+                var block = masks.unsafe_ptr().unsafe_offset(i).unsafe_load[width=8]()
                 var candidates = (block & outside).eq(0)
                 if candidates.reduce_or():
-                    for k in range(min(16, limit - i)):
+                    for k in range(min(8, limit - i)):
                         if candidates[k] and leads.unsafe_get(i + k).exponents().le(exponents).reduce_and():
                             found = i + k
                             break
                     if found >= 0:
                         break
-                i += 16
+                i += 8
             budget.charge(UInt64((found if found >= 0 else limit) + 1))
             if found >= 0:
                 self.add_row(engine, store, engine.active[found], _div(u, leads[found]), budget)
