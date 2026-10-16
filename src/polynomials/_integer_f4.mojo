@@ -54,6 +54,15 @@ comptime _PAD = 32
 
 def _magnitude(value: Integer, mut limbs: List[UInt64]):
     """Append the magnitude of value in 64-bit limbs, least significant first."""
+    if value.magnitude_bit_length() <= 63:
+        # Word values, the common case, without a byte string.
+        try:
+            var word = value.to_native_exact[DType.int64]()
+            if word != 0:
+                limbs.append(UInt64(word if word > 0 else -word))
+            return
+        except:
+            pass
     var bytes = value.to_bytes()
     var count = len(bytes)
     var full = count // 8
@@ -307,7 +316,11 @@ struct _Row(Movable):
         """Entry c as an Integer."""
         var base = c * self.width
         var negative = (self.data.unsafe_get(base + self.width - 1) >> 63) != 0
-        var used = (self._entry_bits(c) + 63) // 64
+        var bits = self._entry_bits(c)
+        if bits <= 63:
+            # The low limb, sign-extended, is the whole entry.
+            return Integer(Int64(self.data.unsafe_get(base)))
+        var used = (bits + 63) // 64
         var bytes = List[UInt8](length=8 * used, fill=0)
         var carry = UInt64(1)
         for l in range(used):
