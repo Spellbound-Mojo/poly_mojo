@@ -61,7 +61,7 @@ from .sparse import SparsePoly, Term
 from .primes import _residue
 from ._images import _denominator, _scaled_integer
 from ._packed_groebner import _Buckets, _Engine, _Packed, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
-from ._f4 import _LANES, _Matrix, _Store, _Trace, _f4_learn, _f4_replay, _f4_replay_lanes
+from ._f4 import _LANES, _LaneBases, _Matrix, _Store, _Trace, _f4_learn, _f4_replay_bases, _lane_basis
 from ._integer_f4 import _add_mul_1, _divide, _magnitude, _pairs_reduce_to_zero, _reduced_tails, _remainder, _sub_mul_1
 
 comptime _PRIME_LIMIT = 4096
@@ -451,6 +451,8 @@ struct _Images[W: Int](Movable):
     var leads: List[_Packed[Self.W]]
     var monomials: List[List[_Packed[Self.W]]]
     """Each element's monomials so far, in increasing order."""
+    var verified: List[Int]
+    """For each element, the generation of the recorded run whose final supports are its monomials, or -1."""
     var primes: List[UInt64]
     var residues: List[List[List[UInt32]]]
     """Each element's residues, by block and then by prime: slot j of a block holds the j-th prime's, one per coefficient."""
@@ -462,6 +464,7 @@ struct _Images[W: Int](Movable):
         self.kind = kind
         self.leads = List[_Packed[Self.W]]()
         self.monomials = List[List[_Packed[Self.W]]]()
+        self.verified = List[Int]()
         self.primes = List[UInt64]()
         self.residues = List[List[List[UInt32]]]()
         self.count = 0
@@ -475,28 +478,46 @@ struct _Images[W: Int](Movable):
                 return False
         return True
 
+    def matches_supports(self, supports: List[List[_Packed[Self.W]]]) -> Bool:
+        """As `matches` for a replayed basis on the supports, by decreasing monomial."""
+        if len(supports) != len(self.leads):
+            return False
+        for i in range(len(supports)):
+            if not _equal(supports[i][0], self.leads[i]):
+                return False
+        return True
+
     def reset(mut self):
         self.leads = List[_Packed[Self.W]]()
         self.monomials = List[List[_Packed[Self.W]]]()
+        self.verified = List[Int]()
         self.primes = List[UInt64]()
         self.residues = List[List[List[UInt32]]]()
         self.count = 0
         self.probe = (0, 0)
 
-    def _cover(mut self, e: Int, image: List[_Term[ModInt, Self.W]], mut budget: Budget) raises PolyError:
-        """Give element e every monomial of the image, new ones with residues zero."""
+    def _start(mut self, leads: List[_Packed[Self.W]]):
+        for lead in leads:
+            self.leads.append(lead)
+            self.monomials.append(List[_Packed[Self.W]]())
+            self.verified.append(-1)
+            self.residues.append(List[List[UInt32]]())
+
+    def _cover(mut self, e: Int, image: List[_Packed[Self.W]], mut budget: Budget) raises PolyError:
+        """Give element e every monomial of the image, in increasing order, new ones with residues zero."""
         var missing = 0
         var i = 0
         for j in range(len(image)):
             budget.charge(1)
-            while i < len(self.monomials[e]) and _compare(self.kind, self.monomials[e][i], image[j].monomial) < 0:
+            while i < len(self.monomials[e]) and _compare(self.kind, self.monomials[e][i], image[j]) < 0:
                 i += 1
-            if i < len(self.monomials[e]) and _equal(self.monomials[e][i], image[j].monomial):
+            if i < len(self.monomials[e]) and _equal(self.monomials[e][i], image[j]):
                 i += 1
             else:
                 missing += 1
         if missing == 0:
             return
+        self.verified[e] = -1
         var n = len(self.monomials[e]) + missing
         _allocation[UInt32](_product(n * _BATCH, len(self.residues[e])), budget)
         var monomials = List[_Packed[Self.W]](capacity=n)
@@ -512,7 +533,7 @@ struct _Images[W: Int](Movable):
             elif i == len(self.monomials[e]):
                 comparison = 1
             else:
-                comparison = _compare(self.kind, self.monomials[e][i], image[j].monomial)
+                comparison = _compare(self.kind, self.monomials[e][i], image[j])
             if comparison <= 0:
                 places.append(len(monomials))
                 monomials.append(self.monomials[e][i])
@@ -520,7 +541,7 @@ struct _Images[W: Int](Movable):
                 if comparison == 0:
                     j += 1
             else:
-                monomials.append(image[j].monomial)
+                monomials.append(image[j])
                 j += 1
         var old = len(places)
         for b in range(len(self.residues[e])):
@@ -532,13 +553,20 @@ struct _Images[W: Int](Movable):
             self.residues[e][b] = residues^
         self.monomials[e] = monomials^
 
+    def _block(mut self, e: Int, slot: Int, mut budget: Budget) raises PolyError:
+        """Start a new block for element e at its first slot."""
+        if slot == 0:
+            var n = len(self.monomials[e])
+            _allocation[UInt32](n * _BATCH, budget)
+            self.residues[e].append(List[UInt32](length=n * _BATCH, fill=0))
+
     def add(mut self, basis: List[List[_Term[ModInt, Self.W]]], p: UInt64, mut budget: Budget) raises PolyError:
         """Add one image: its residues join their block, over the union of supports."""
         if self.count == 0:
+            var leads = List[_Packed[Self.W]]()
             for element in basis:
-                self.leads.append(element[len(element) - 1].monomial)
-                self.monomials.append(List[_Packed[Self.W]]())
-                self.residues.append(List[List[UInt32]]())
+                leads.append(element[len(element) - 1].monomial)
+            self._start(leads)
         var slot = self.count % _BATCH
         for e in range(len(basis)):
             ref image = basis[e]
@@ -551,11 +579,12 @@ struct _Images[W: Int](Movable):
                         same = False
                         break
             if not same:
-                self._cover(e, image, budget)
+                var monomials = List[_Packed[Self.W]](capacity=len(image))
+                for t in image:
+                    monomials.append(t.monomial)
+                self._cover(e, monomials, budget)
+            self._block(e, slot, budget)
             var n = len(self.monomials[e])
-            if slot == 0:
-                _allocation[UInt32](n * _BATCH, budget)
-                self.residues[e].append(List[UInt32](length=n * _BATCH, fill=0))
             ref block = self.residues[e][len(self.residues[e]) - 1]
             if same:
                 for j in range(len(image)):
@@ -568,6 +597,55 @@ struct _Images[W: Int](Movable):
                     budget.charge(1)
                     i += 1
                 block[slot * n + i] = UInt32(image[j].coefficient.value)
+        self.primes.append(p)
+        self.count += 1
+
+    def add_lane(mut self, supports: List[List[_Packed[Self.W]]], generation: Int, bases: _LaneBases, lane: Int, p: UInt64, mut budget: Budget) raises PolyError:
+        """Add one lane of a replayed batch, on the supports of the run of the given generation.
+
+        An element whose monomials are found to be the supports' keeps that
+        generation, so later lanes of the run take their residues directly.
+        """
+        if self.count == 0:
+            var leads = List[_Packed[Self.W]]()
+            for support in supports:
+                leads.append(support[0])
+            self._start(leads)
+        var slot = self.count % _BATCH
+        for e in range(len(supports)):
+            ref support = supports[e]
+            var m = len(support)
+            if self.verified[e] != generation:
+                var same = m == len(self.monomials[e])
+                if same:
+                    budget.charge(UInt64(m))
+                    for k in range(m):
+                        if not _equal(self.monomials[e][m - 1 - k], support[k]):
+                            same = False
+                            break
+                if same:
+                    self.verified[e] = generation
+                else:
+                    var monomials = List[_Packed[Self.W]](capacity=m)
+                    for k in range(m - 1, -1, -1):
+                        monomials.append(support[k])
+                    self._cover(e, monomials, budget)
+            self._block(e, slot, budget)
+            var n = len(self.monomials[e])
+            ref block = self.residues[e][len(self.residues[e]) - 1]
+            ref values = bases.values[e]
+            budget.charge(UInt64(m))
+            if self.verified[e] == generation:
+                for k in range(m):
+                    block[slot * n + n - 1 - k] = values[_LANES * k + lane]
+                continue
+            # The supports' monomials are among the element's, which increase.
+            var i = 0
+            for k in range(m - 1, -1, -1):
+                while not _equal(self.monomials[e][i], support[k]):
+                    budget.charge(1)
+                    i += 1
+                block[slot * n + i] = values[_LANES * k + lane]
         self.primes.append(p)
         self.count += 1
 
@@ -920,10 +998,12 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
     # prime whose replay departs from it is computed in full and recorded.
     var trace = _Trace[W]()
     var learned = False
+    # Counts the recorded runs, so that images can tell when their supports change.
+    var generation = 0
     # Replays run `_LANES` primes at once: the images of the primes after
-    # this one wait in `ahead`, computed from the same recorded run, and are
-    # dropped whenever the run is recorded anew.
-    var ahead = List[List[List[_Term[ModInt, W]]]]()
+    # this one wait in `ahead`, as residues on the recorded run's final
+    # supports, and are dropped whenever the run is recorded anew.
+    var ahead = _LaneBases()
     var ahead_primes = List[UInt64]()
     var p = (UInt64(1) << 31) + 1
     for _ in range(_PRIME_LIMIT):
@@ -932,12 +1012,12 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
         if not _admissible(inputs, p, budget):
             continue
         var ring = Modulus(_prime_value=p)
-        var replayed = Optional[List[List[_Term[ModInt, W]]]](None)
+        var lane = -1
         if learned:
-            if len(ahead_primes) > 0 and ahead_primes[0] == p:
-                replayed = ahead.pop(0)
-                _ = ahead_primes.pop(0)
-            else:
+            for l in range(ahead.live):
+                if ahead_primes[l] == p:
+                    lane = l
+            if lane < 0:
                 # This prime and the next admissible ones, in one batch.
                 var rings: List[Modulus] = [ring]
                 var batch = List[List[List[_Term[ModInt, W]]]]()
@@ -948,21 +1028,22 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
                     if _admissible(inputs, q, budget):
                         rings.append(Modulus(_prime_value=q))
                         batch.append(_images_of(inputs, rings[len(rings) - 1], budget))
-                ahead = _f4_replay_lanes[W](trace, batch^, kind, rings, budget)
+                ahead = _f4_replay_bases[W](trace, batch^, kind, rings, budget)
                 ahead_primes = List[UInt64]()
-                for i in range(1, len(ahead)):
-                    ahead_primes.append(rings[i].value)
-                if len(ahead) > 0:
-                    replayed = ahead.pop(0)
-        var basis: List[List[_Term[ModInt, W]]]
-        if replayed:
-            basis = replayed.take()
-        else:
+                for ring_l in rings:
+                    ahead_primes.append(ring_l.value)
+                if ahead.live > 0:
+                    lane = 0
+        # A replayed image stays as residues unless its terms are needed.
+        var basis = List[List[_Term[ModInt, W]]]()
+        if lane < 0:
             basis = _f4_learn[W](_images_of(inputs, ring, budget), kind, ring, trace, budget)
             learned = True
-            ahead = List[List[List[_Term[ModInt, W]]]]()
+            generation += 1
+            ahead = _LaneBases()
             ahead_primes = List[UInt64]()
-        if images.count > 0 and not images.matches(basis):
+        ref supports = trace.steps[len(trace.steps) - 1].monomials
+        if images.count > 0 and not (images.matches_supports(supports) if lane >= 0 else images.matches(basis)):
             mismatches += 1
             if mismatches < _MISMATCH_LIMIT:
                 continue
@@ -972,6 +1053,9 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
             attempt = 1
         mismatches = 0
         if candidate:
+            if lane >= 0:
+                basis = _lane_basis(trace, ahead, lane, ring, budget)
+                lane = -1
             if _agrees(kind, candidate.value(), basis, p, budget):
                 certifications += 1
                 if not certify or _certify(kind, inputs, candidate.value(), budget):
@@ -981,10 +1065,13 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
                 # The images may follow an unlucky recorded run: record anew,
                 # so that differing leading monomials can show.
                 learned = False
-                ahead = List[List[List[_Term[ModInt, W]]]]()
+                ahead = _LaneBases()
                 ahead_primes = List[UInt64]()
             candidate = None
-        images.add(basis, p, budget)
+        if lane >= 0:
+            images.add_lane(supports, generation, ahead, lane, p, budget)
+        else:
+            images.add(basis, p, budget)
         var count = images.count
         if count >= attempt:
             candidate = images.reconstruct(budget)
