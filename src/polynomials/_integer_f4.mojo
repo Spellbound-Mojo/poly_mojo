@@ -1112,8 +1112,9 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
             pivot[Int(matrix.entries[matrix.starts[r]])] = r
         var row = _Row(ncols)
         var lanes = _LaneRow(ncols, budget)
-        # Costs of this degree's long pairs, those reaching `_LONG` primes, in
-        # nanoseconds: a few, and then one in `_EVERY`, are also checked
+        # Costs of this degree's long pairs, those reaching `_LONG` primes, by
+        # the cost models `_modular_cost` and `_exact_cost`, which count
+        # operations, never time: a few, and then one in `_EVERY`, are also checked
         # exactly, which compares the routes on the same pairs. A modular
         # attempt stops once it costs as much as an average exact check; the
         # degree turns to the exact check alone once most attempts fail, or
@@ -1137,13 +1138,12 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
                 var allowance = 0
                 if sampled > 0:
                     allowance = sample_exact // sampled
-                var setup = images.setup
-                var before = budget.remaining()
                 var t0 = _clock()
+                var cost = 0
                 # The primes the last pair needed: attempts start a batch below.
-                k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, max(_FIRST_PRIMES, hint - _LANES), allowance, counts, budget)
-                spent = _weighted(Int(before - budget.remaining()) - (images.setup - setup))
-                counts[6] += Int(before - budget.remaining()) - (images.setup - setup)
+                k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, max(_FIRST_PRIMES, hint - _LANES), allowance, cost, counts, budget)
+                spent = cost
+                counts[6] += cost
                 counts[7] += _clock() - t0
                 if k > 0:
                     modular += 1
@@ -1152,16 +1152,19 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
                     exactly = False
                 else:
                     failed += 1
-            var sample = attempted and (k == 0 or k >= _LONG) and (sampled < _TIMED or tried % _EVERY == 0)
+            # Past the first samples, only a close comparison needs more.
+            var close = 100 * sample_modular > _CLEAR * sample_exact
+            var sample = attempted and (k == 0 or k >= _LONG) and (sampled < _TIMED or (close and tried % _EVERY == 0))
             if not exactly and not sample:
                 continue
             if exactly:
                 exact += 1
             var before = budget.remaining()
+            var terms = 0
             var t = _clock()
-            if not _reduces(row, matrix, pivot, coefficients, a, quotient, budget):
+            if not _reduces(row, matrix, pivot, coefficients, a, quotient, terms, budget):
                 return _Routes(False, modular, exact, used, counts.copy())
-            var e = Int(before - budget.remaining())
+            var e = _exact_cost(Int(before - budget.remaining()), terms, ncols - Int(matrix.entries[matrix.starts[a]]))
             counts[8] += e
             counts[9] += _clock() - t
             if sample:
@@ -1172,8 +1175,11 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
     return _Routes(True, modular, exact, used, counts.copy())
 
 
-def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, a: Int, mut quotient: List[UInt64], mut budget: Budget) raises PolyError -> Bool:
-    """Whether the S-polynomial of matrix rows a and a + 1, which lead in one column, reduces to zero."""
+def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, a: Int, mut quotient: List[UInt64], mut terms: Int, mut budget: Budget) raises PolyError -> Bool:
+    """Whether the S-polynomial of matrix rows a and a + 1, which lead in one column, reduces to zero.
+
+    Adds the number of row terms it loads to `terms`, for `_exact_cost`.
+    """
     var b = a + 1
     var ga = matrix.sources[a]
     var gb = matrix.sources[b]
@@ -1194,6 +1200,7 @@ def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coeffi
     row.prepare(max(coefficients.bits[ga] + _bits(fa), coefficients.bits[gb] + _bits(fb)) + 1, budget)
     _load(row, matrix, coefficients, a, fa, negative_a, False, budget)
     _load(row, matrix, coefficients, b, fb, negative_b, True, budget)
+    terms += matrix.starts[b + 1] - matrix.starts[a]
     var first = Int(matrix.entries[matrix.starts[a]])
     row.set_zero(first)
     var c = row.next_marked(first + 1)
@@ -1205,6 +1212,7 @@ def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coeffi
             var q = pivot[c]
             if q < 0:
                 return False
+            terms += matrix.starts[q + 1] - matrix.starts[q]
             _cancel(row, matrix, coefficients, c, q, c, quotient, budget)
         c = row.next_marked(c + 1)
     return True
@@ -1406,17 +1414,17 @@ comptime _GIVE_UP = 4
 comptime _TIMED = 3
 """Long pairs a degree samples before comparing the routes' costs."""
 
-comptime _RATIO = 75
+comptime _RATIO = 85
 """Percent of the exact cost above which a degree leaves the modular route."""
 
 comptime _LONG = 48
 """Primes from which a pair counts as long, and may be sampled (see `_pair_routes`)."""
 
 comptime _EVERY = 32
-"""After the first `_TIMED`, one long pair in this many is sampled."""
+"""After the first `_TIMED`, one long pair in this many is sampled, while the comparison is close."""
 
-comptime _WEIGHT = 100
-"""Percent: what a budget unit of the modular route costs against one of the exact check."""
+comptime _CLEAR = 60
+"""Percent of the exact cost below which the modular route wins clearly and sampling stops."""
 
 comptime _CERT_STATS = False
 """Whether certification prints how many pairs each route proved."""
@@ -1429,9 +1437,19 @@ def _clock() -> Int:
     return 0
 
 
-def _weighted(units: Int) -> Int:
-    """Budget units of the modular route in exact-route units (`_WEIGHT`)."""
-    return units * _WEIGHT // 100
+def _exact_cost(units: Int, terms: Int, columns: Int) -> Int:
+    """The exact check's cost model, in hundredths of a nanosecond on the
+    calibration machine: from its budget units, the row terms it loaded and
+    the columns after the pair's leading one (fitted over cyclic-7/8,
+    katsura-9/10, eco-10/11 and noon-8 to a few percent)."""
+    return 79 * units + 1030 * terms + 165 * columns
+
+
+def _modular_cost(lane_units: Int, crt_units: Int, slots: Int) -> Int:
+    """The modular route's cost model, in the units of `_exact_cost`: from the
+    budget units of its lane sweeps and of its proofs, and the quotient slots
+    its attempts combine (fitted as `_exact_cost`, to about fifteen percent)."""
+    return 38 * lane_units + 232 * crt_units + 21000 * slots
 
 
 def _remainder_of(limbs: Pointer[mut=False, UInt64, _], n: Int, d: UInt64) -> UInt64:
@@ -1562,8 +1580,6 @@ struct _PairPrimes(Movable):
     """Per batch, each element's leading coefficient inverse, `_LANES` per element."""
     var bases: List[_Basis]
     """The CRT basis of the first `_LANES` * (i + 1) primes."""
-    var setup: Int
-    """Budget units charged preparing batches and bases, left out of the routes' costs."""
 
     def __init__(out self, coefficients: _Coefficients, limit: Int, mut budget: Budget) raises PolyError:
         self.limit = (limit // _LANES) * _LANES
@@ -1572,7 +1588,6 @@ struct _PairPrimes(Movable):
         self.values = List[List[List[UInt32]]]()
         self.inverses = List[List[UInt64]]()
         self.bases = List[_Basis]()
-        self.setup = 0
         var candidate = UInt64(1) << 31
         while len(self.primes) < self.limit:
             candidate -= 1
@@ -1591,7 +1606,6 @@ struct _PairPrimes(Movable):
         """Prepare the residues of batches up to `batch`."""
         if len(self.batches) > batch:
             return
-        var start = budget.remaining()
         while len(self.batches) <= batch:
             var b = len(self.batches)
             var rings = List[Modulus]()
@@ -1621,14 +1635,11 @@ struct _PairPrimes(Movable):
             self.batches.append(lanes^)
             self.values.append(values^)
             self.inverses.append(inverses^)
-        self.setup += Int(start - budget.remaining())
 
     def basis(mut self, attempt: Int, mut budget: Budget) raises PolyError:
         """Prepare the CRT basis of attempt `attempt`."""
-        var start = budget.remaining()
         while len(self.bases) <= attempt:
             self.bases.append(_Basis(self.primes, _LANES * (len(self.bases) + 1), budget))
-        self.setup += Int(start - budget.remaining())
 
 
 struct _LaneRow(Movable):
@@ -1815,7 +1826,7 @@ def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int]
     return True
 
 
-def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, mut images: _PairPrimes, a: Int, first: Int, allowance: Int, mut counts: List[Int], mut budget: Budget) raises PolyError -> Int:
+def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, mut images: _PairPrimes, a: Int, first: Int, allowance: Int, mut cost: Int, mut counts: List[Int], mut budget: Budget) raises PolyError -> Int:
     """The number of primes that proved the S-polynomial of rows a and a + 1 reduces to zero, or 0 if they did not.
 
     Modulo each prime p the reduction gives S = sum r_c R_c, R_c the row
@@ -1829,9 +1840,9 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
     Primes come in batches of `_LANES`, the first alone and later ones two
     at a time; an attempt follows each batch from `first` primes on. Gives
     up after `images.limit` primes, or, when `allowance` is positive, after
-    the attempt that brings its cost past it: `_weighted` budget units,
-    besides those preparing primes. Every decision follows budget charges,
-    so a route never depends on timing.
+    the attempt that brings its cost past it. Its cost, by `_modular_cost`,
+    is added to `cost`; every decision follows that count, so a route never
+    depends on timing.
     """
     var b = a + 1
     var ga = matrix.sources[a]
@@ -1849,22 +1860,24 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
     # S = la R_a - lb R_b bounds its coefficients by 2^s.
     var s_bits = max(coefficients.bits[ga] + la.magnitude_bit_length(), coefficients.bits[gb] + lb.magnitude_bit_length()) + 1
     var limit = images.limit
-    var start = budget.remaining()
-    var setup = images.setup
     var batch = 0
     var proved = 0
+    var own = 0
     while _LANES * batch < limit:
         # The first batch alone, which often suffices; later ones two at a time.
         var two = batch > 0 and _LANES * (batch + 2) <= limit
         images.ensure(batch + 1 if two else batch, coefficients, budget)
         var t0 = _clock()
+        var units = budget.remaining()
         var passed: Bool
         if two:
             passed = _lane_pass_two(lanes, matrix, pivot, images.values[batch], images.values[batch + 1], images.batches[batch], images.batches[batch + 1], a, batch, limit, budget)
         else:
             passed = _lane_pass(lanes, matrix, pivot, images.values[batch], images.batches[batch], a, batch, limit, budget)
         counts[0] += _clock() - t0
+        own += _modular_cost(Int(units - budget.remaining()), 0, 0)
         if not passed:
+            cost += own
             return 0
         for _ in range(2 if two else 1):
             batch += 1
@@ -1874,15 +1887,18 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
             var attempt = batch - 1
             images.basis(attempt, budget)
             var t1 = _clock()
+            var crt = budget.remaining()
             var proves = _proves(lanes, matrix, pivot, coefficients, images, attempt, multiple, s_bits, counts, budget)
+            own += _modular_cost(0, Int(crt - budget.remaining()), len(lanes.columns))
             counts[1] += _clock() - t1
             counts[2] += 1
             if proves:
                 proved = k
                 break
-        if proved > 0 or (allowance > 0 and _weighted(Int(start - budget.remaining()) - (images.setup - setup)) > allowance):
+        if proved > 0 or (allowance > 0 and own > allowance):
             break
     lanes.clear(_LANES)
+    cost += own
     return proved
 
 
