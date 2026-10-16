@@ -538,32 +538,42 @@ def _accumulate[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, 
 def _add_mul_1(data: Pointer[mut=True, UInt64, _], width: Int, f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int):
     """data += f * other[0:n] over `width` limbs of two's complement, in one carry chain."""
     var g = UInt128(f)
-    var carry = UInt128(0)
+    var carry = UInt64(0)
     var m = min(n, width)
     var l = 0
     while l < m:
-        var t = g * UInt128(other.unsafe_offset(l).unsafe_load()) + UInt128(data.unsafe_offset(l).unsafe_load()) + carry
-        data.unsafe_offset(l).unsafe_store(UInt64(t & UInt128(UInt64.MAX)))
-        carry = t >> 64
+        var p = g * UInt128(other.unsafe_offset(l).unsafe_load())
+        var low = UInt64(p & UInt128(UInt64.MAX))
+        var high = UInt64(p >> 64)
+        var e = data.unsafe_offset(l).unsafe_load()
+        low += e
+        high += UInt64(1) if low < e else UInt64(0)
+        low += carry
+        high += UInt64(1) if low < carry else UInt64(0)
+        data.unsafe_offset(l).unsafe_store(low)
+        carry = high
         l += 1
-    _carry(data, width, l, carry)
+    _carry_word(data, width, l, carry)
 
 
 @always_inline
 def _sub_mul_1(data: Pointer[mut=True, UInt64, _], width: Int, f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int):
     """data -= f * other[0:n] over `width` limbs of two's complement, in one borrow chain."""
     var g = UInt128(f)
-    var borrow = UInt128(0)
+    var borrow = UInt64(0)
     var m = min(n, width)
     var l = 0
     while l < m:
-        var t = g * UInt128(other.unsafe_offset(l).unsafe_load()) + borrow
-        var low = UInt64(t & UInt128(UInt64.MAX))
+        var p = g * UInt128(other.unsafe_offset(l).unsafe_load())
+        var low = UInt64(p & UInt128(UInt64.MAX))
+        var high = UInt64(p >> 64)
+        low += borrow
+        high += UInt64(1) if low < borrow else UInt64(0)
         var e = data.unsafe_offset(l).unsafe_load()
         data.unsafe_offset(l).unsafe_store(e - low)
-        borrow = (t >> 64) + (UInt128(1) if e < low else UInt128(0))
+        borrow = high + (UInt64(1) if e < low else UInt64(0))
         l += 1
-    _borrow(data, width, l, borrow)
+    _borrow_word(data, width, l, borrow)
 
 
 @always_inline
@@ -678,6 +688,28 @@ def _comba[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Po
         _borrow(data, width, columns, carry)
     else:
         _carry(data, width, columns, carry)
+
+
+@always_inline
+def _carry_word(data: Pointer[mut=True, UInt64, _], width: Int, start: Int, var carry: UInt64):
+    """Add the word carry to data[start:width], two's complement."""
+    var l = start
+    while carry != 0 and l < width:
+        var x = data.unsafe_offset(l).unsafe_load() + carry
+        data.unsafe_offset(l).unsafe_store(x)
+        carry = UInt64(1) if x < carry else UInt64(0)
+        l += 1
+
+
+@always_inline
+def _borrow_word(data: Pointer[mut=True, UInt64, _], width: Int, start: Int, var borrow: UInt64):
+    """Subtract the word borrow from data[start:width], two's complement."""
+    var l = start
+    while borrow != 0 and l < width:
+        var e = data.unsafe_offset(l).unsafe_load()
+        data.unsafe_offset(l).unsafe_store(e - borrow)
+        borrow = UInt64(1) if e < borrow else UInt64(0)
+        l += 1
 
 
 @always_inline
