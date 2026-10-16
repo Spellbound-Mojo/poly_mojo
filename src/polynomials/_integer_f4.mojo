@@ -279,8 +279,14 @@ struct _Row(Movable):
     def add_product(mut self, c: Int, factor: List[UInt64], terms: List[UInt64], start: Int, end: Int, bits: Int):
         """Add factor times the magnitude terms[start:end], of at most `bits` bits, to entry c."""
         self._grow(c, bits)
-        var used = self._product(factor, terms, start, end)
         var data = self.data.unsafe_ptr().unsafe_offset(c * self.width)
+        if len(factor) == 1:
+            _add_mul_1(data, self.width, factor.unsafe_get(0), terms.unsafe_ptr().unsafe_offset(start), end - start)
+            return
+        if end - start == 1:
+            _add_mul_1(data, self.width, terms.unsafe_get(start), factor.unsafe_ptr(), len(factor))
+            return
+        var used = self._product(factor, terms, start, end)
         var product = self.scratch.unsafe_ptr()
         var carry = UInt64(0)
         for l in range(used):
@@ -303,8 +309,14 @@ struct _Row(Movable):
     def subtract_product(mut self, c: Int, factor: List[UInt64], terms: List[UInt64], start: Int, end: Int, bits: Int):
         """Subtract factor times the magnitude terms[start:end], of at most `bits` bits, from entry c."""
         self._grow(c, bits)
-        var used = self._product(factor, terms, start, end)
         var data = self.data.unsafe_ptr().unsafe_offset(c * self.width)
+        if len(factor) == 1:
+            _sub_mul_1(data, self.width, factor.unsafe_get(0), terms.unsafe_ptr().unsafe_offset(start), end - start)
+            return
+        if end - start == 1:
+            _sub_mul_1(data, self.width, terms.unsafe_get(start), factor.unsafe_ptr(), len(factor))
+            return
+        var used = self._product(factor, terms, start, end)
         var product = self.scratch.unsafe_ptr()
         var borrow = UInt64(0)
         for l in range(used):
@@ -326,22 +338,64 @@ struct _Row(Movable):
     def scale(mut self, first: Int, factor: List[UInt64], bits: Int):
         """Multiply every entry from column `first` on by the positive factor of `bits` bits; the bound must allow it."""
         self.bound += bits
+        # Two's complement products modulo 2^(64 width) are exact while they fit.
         for c in range(first, self.ncols):
             if self.is_zero(c):
                 continue
             self.sizes.unsafe_get(c) += bits
-            var negative = (self.data.unsafe_get(c * self.width + self.width - 1) >> 63) != 0
-            if negative:
-                self._negate(c)
-            var base = c * self.width
-            var used = (self._entry_bits(c) + 63) // 64
-            var entry = self.data.unsafe_ptr().unsafe_offset(base)
-            _multiply(self.scratch.unsafe_ptr(), factor.unsafe_ptr(), len(factor), entry, used)
-            var n = min(used + len(factor), self.width)
+            var entry = self.data.unsafe_ptr().unsafe_offset(c * self.width)
+            if len(factor) == 1:
+                var f = UInt128(factor.unsafe_get(0))
+                var carry = UInt128(0)
+                for l in range(self.width):
+                    var t = f * UInt128(entry.unsafe_offset(l).unsafe_load()) + carry
+                    entry.unsafe_offset(l).unsafe_store(UInt64(t & UInt128(UInt64.MAX)))
+                    carry = t >> 64
+                continue
+            _multiply(self.scratch.unsafe_ptr(), factor.unsafe_ptr(), len(factor), entry, self.width)
             for l in range(self.width):
-                entry.unsafe_offset(l).unsafe_store(self.scratch.unsafe_get(l) if l < n else UInt64(0))
-            if negative:
-                self._negate(c)
+                entry.unsafe_offset(l).unsafe_store(self.scratch.unsafe_get(l))
+
+
+@always_inline
+def _add_mul_1(data: Pointer[mut=True, UInt64, _], width: Int, f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int):
+    """data += f * other[0:n] over `width` limbs of two's complement, in one carry chain."""
+    var g = UInt128(f)
+    var carry = UInt128(0)
+    var l = 0
+    while l < n and l < width:
+        var t = g * UInt128(other.unsafe_offset(l).unsafe_load()) + UInt128(data.unsafe_offset(l).unsafe_load()) + carry
+        data.unsafe_offset(l).unsafe_store(UInt64(t & UInt128(UInt64.MAX)))
+        carry = t >> 64
+        l += 1
+    while carry != 0 and l < width:
+        var x = UInt128(data.unsafe_offset(l).unsafe_load()) + carry
+        data.unsafe_offset(l).unsafe_store(UInt64(x & UInt128(UInt64.MAX)))
+        carry = x >> 64
+        l += 1
+
+
+@always_inline
+def _sub_mul_1(data: Pointer[mut=True, UInt64, _], width: Int, f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int):
+    """data -= f * other[0:n] over `width` limbs of two's complement, in one borrow chain."""
+    var g = UInt128(f)
+    var rest = UInt128(0)
+    var l = 0
+    while l < n and l < width:
+        var t = g * UInt128(other.unsafe_offset(l).unsafe_load()) + rest
+        var low = UInt64(t & UInt128(UInt64.MAX))
+        rest = t >> 64
+        var e = data.unsafe_offset(l).unsafe_load()
+        data.unsafe_offset(l).unsafe_store(e - low)
+        if e < low:
+            rest += 1
+        l += 1
+    while rest != 0 and l < width:
+        var e = UInt128(data.unsafe_offset(l).unsafe_load())
+        var low = rest & UInt128(UInt64.MAX)
+        data.unsafe_offset(l).unsafe_store(UInt64((e - low) & UInt128(UInt64.MAX)))
+        rest = (rest >> 64) + (UInt128(1) if e < low else UInt128(0))
+        l += 1
 
 
 def _multiply(result: Pointer[mut=True, UInt64, _], a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int):
