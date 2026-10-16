@@ -763,12 +763,11 @@ struct _Images[W: Int](Movable):
                         if abs(candidate) <= bound:
                             numerator = Optional(candidate^)
                 if not numerator:
-                    self._gather(e, k, blocks, unscaled, gathered)
-                    var value = full.value(gathered, budget)
-                    _work(full.modulus.magnitude_bit_length() // 8 + 1, denominator.magnitude_bit_length() // 8 + 1, True, budget)
-                    var exact: Integer
+                    # The coefficient times d modulo M, lifted from the
+                    # residues times d.
+                    self._gather(e, k, blocks, scales, gathered)
+                    var exact = full.value(gathered, budget)
                     try:
-                        exact = div_rem_euclid(value * denominator, full.modulus)[1].copy()
                         if exact > half:
                             exact -= full.modulus
                     except err:
@@ -789,8 +788,7 @@ struct _Images[W: Int](Movable):
                         exact = f.numerator().copy()
                         changes.append(k)
                         denominators.append(denominator.copy())
-                        if use_prefix:
-                            _residues(denominator, self.primes, len(self.primes), scales, budget)
+                        _residues(denominator, self.primes, len(self.primes), scales, budget)
                     numerator = Optional(exact^)
                 numerators.append(numerator.take())
             # Over the final denominator: numerators before a change lack the
