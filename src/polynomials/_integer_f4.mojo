@@ -604,6 +604,14 @@ def _add_mul_1[whole: Bool = False, extend: Bool = False](data: Pointer[mut=True
     var carry = UInt64(0)
     var m = min(n, width)
     var l = 0
+    comptime if _ADX:
+        if m >= _ROWS:
+            # Whole groups of four limbs in assembly, the value filled in first.
+            l = m & ~3
+            comptime if extend:
+                for k in range(valid, l):
+                    data.unsafe_offset(k).unsafe_store(fill)
+            carry = _adx_add_mul_4(data, f, other, l)
     while l < m:
         var p = g * UInt128(other.unsafe_offset(l).unsafe_load())
         var low = UInt64(p & UInt128(UInt64.MAX))
@@ -628,6 +636,13 @@ def _sub_mul_1[whole: Bool = False, extend: Bool = False](data: Pointer[mut=True
     var borrow = UInt64(0)
     var m = min(n, width)
     var l = 0
+    comptime if _ADX:
+        if m >= _ROWS:
+            l = m & ~3
+            comptime if extend:
+                for k in range(valid, l):
+                    data.unsafe_offset(k).unsafe_store(fill)
+            borrow = _adx_sub_mul_4(data, f, other, l)
     while l < m:
         var p = g * UInt128(other.unsafe_offset(l).unsafe_load())
         var low = UInt64(p & UInt128(UInt64.MAX))
