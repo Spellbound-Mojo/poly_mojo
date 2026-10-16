@@ -52,7 +52,7 @@ from .sparse import SparsePoly, Term
 from .primes import _residue
 from ._images import _denominator, _scaled_integer
 from ._packed_groebner import _Buckets, _Engine, _Packed, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
-from ._f4 import _LANES, _LaneBases, _Matrix, _Store, _Trace, _f4_learn, _f4_replay, _f4_replay_lanes
+from ._f4 import _Columns, _LANES, _LaneBases, _Matrix, _raw_hash, _Store, _Trace, _f4_learn, _f4_replay, _f4_replay_lanes
 from ._integer_f4 import _add_mul_1, _divide, _pairs_reduce_to_zero, _reduced_tails, _remainder, _sub_mul_1
 
 comptime _PRIME_LIMIT = 4096
@@ -240,8 +240,10 @@ struct _Images[W: Int](Movable):
     """
     var kind: UInt8
     var leads: List[_Packed[Self.W]]
-    var monomials: List[List[_Packed[Self.W]]]
-    """Each element's monomials so far, in increasing order."""
+    var table: _Columns[Self.W]
+    """The distinct monomials of all elements, each once."""
+    var monomials: List[List[UInt32]]
+    """Each element's monomials so far, in increasing order, as numbers in `table`."""
     var values: List[List[Integer]]
     """Each coefficient modulo `modulus`, in [0, modulus)."""
     var modulus: Integer
@@ -258,7 +260,8 @@ struct _Images[W: Int](Movable):
     def __init__(out self, kind: UInt8):
         self.kind = kind
         self.leads = List[_Packed[Self.W]]()
-        self.monomials = List[List[_Packed[Self.W]]]()
+        self.table = _Columns[Self.W]()
+        self.monomials = List[List[UInt32]]()
         self.values = List[List[Integer]]()
         self.modulus = Integer(1)
         self.batch = List[UInt64]()
@@ -277,7 +280,8 @@ struct _Images[W: Int](Movable):
 
     def reset(mut self):
         self.leads = List[_Packed[Self.W]]()
-        self.monomials = List[List[_Packed[Self.W]]]()
+        self.table = _Columns[Self.W]()
+        self.monomials = List[List[UInt32]]()
         self.values = List[List[Integer]]()
         self.modulus = Integer(1)
         self.batch = List[UInt64]()
@@ -286,15 +290,19 @@ struct _Images[W: Int](Movable):
         self.count = 0
         self.probe = (0, 0)
 
+    @always_inline
+    def _monomial(self, e: Int, i: Int) -> _Packed[Self.W]:
+        return self.table.monomials.unsafe_get(Int(self.monomials[e].unsafe_get(i)))
+
     def _cover(mut self, e: Int, image: List[_Term[ModInt, Self.W]], mut budget: Budget) raises PolyError:
         """Give element e every monomial of the image, new ones with value and residues zero."""
         var missing = 0
         var i = 0
         for j in range(len(image)):
             budget.charge(1)
-            while i < len(self.monomials[e]) and _compare(self.kind, self.monomials[e][i], image[j].monomial) < 0:
+            while i < len(self.monomials[e]) and _compare(self.kind, self._monomial(e, i), image[j].monomial) < 0:
                 i += 1
-            if i < len(self.monomials[e]) and _equal(self.monomials[e][i], image[j].monomial):
+            if i < len(self.monomials[e]) and _equal(self._monomial(e, i), image[j].monomial):
                 i += 1
             else:
                 missing += 1
@@ -303,7 +311,8 @@ struct _Images[W: Int](Movable):
         var n = len(self.monomials[e]) + missing
         _allocation[Integer](n, budget)
         _allocation[UInt32](n * self.slots, budget)
-        var monomials = List[_Packed[Self.W]](capacity=n)
+        self.table.reserve(missing, budget)
+        var monomials = List[UInt32](capacity=n)
         var values = List[Integer](capacity=n)
         var residues = List[UInt32](capacity=n * self.slots)
         i = 0
@@ -316,7 +325,7 @@ struct _Images[W: Int](Movable):
             elif i == len(self.monomials[e]):
                 comparison = 1
             else:
-                comparison = _compare(self.kind, self.monomials[e][i], image[j].monomial)
+                comparison = _compare(self.kind, self._monomial(e, i), image[j].monomial)
             if comparison <= 0:
                 monomials.append(self.monomials[e][i])
                 values.append(self.values[e][i].copy())
@@ -326,7 +335,7 @@ struct _Images[W: Int](Movable):
                 if comparison == 0:
                     j += 1
             else:
-                monomials.append(image[j].monomial)
+                monomials.append(UInt32(self.table.find(image[j].monomial, _raw_hash(image[j].monomial))))
                 values.append(Integer(0))
                 for _ in range(self.slots):
                     residues.append(0)
@@ -340,7 +349,7 @@ struct _Images[W: Int](Movable):
         if self.count == 0:
             for element in basis:
                 self.leads.append(element[len(element) - 1].monomial)
-                self.monomials.append(List[_Packed[Self.W]]())
+                self.monomials.append(List[UInt32]())
                 self.values.append(List[Integer]())
                 self.residues.append(List[UInt32]())
         var slot = len(self.batch)
@@ -352,7 +361,7 @@ struct _Images[W: Int](Movable):
             # The image's monomials are now among the element's; both increase.
             var i = 0
             for j in range(len(image)):
-                while not _equal(self.monomials[e][i], image[j].monomial):
+                while not _equal(self._monomial(e, i), image[j].monomial):
                     budget.charge(1)
                     i += 1
                 self.residues[e][i * self.slots + slot] = UInt32(image[j].coefficient.value)
@@ -538,7 +547,7 @@ struct _Images[W: Int](Movable):
                     value = numerators[k] * factor
                 except err:
                     raise PolyError(PolyErrorKind.CAPACITY, String(err))
-                terms.append(_Term[ZZ, Self.W](self.monomials[e][k], ZZ(value^)))
+                terms.append(_Term[ZZ, Self.W](self._monomial(e, k), ZZ(value^)))
             result.append(terms^)
         return result^
 
