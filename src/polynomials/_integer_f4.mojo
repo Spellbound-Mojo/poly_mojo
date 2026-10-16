@@ -477,6 +477,9 @@ struct _Row(Movable):
             if len(factor) >= _IFMA_MIN:
                 self.set_factor_digits(factor)
                 digits = True
+        if len(factor) == 1 and not digits:
+            self._scale_word(first, factor[0], bits)
+            return
         var scratch = self.scratch.unsafe_ptr()
         var c = self.next_marked(first)
         while c < self.ncols:
@@ -521,6 +524,29 @@ struct _Row(Movable):
                 _ = _subtract_limbs(scratch.unsafe_offset(u), n - u, factor.unsafe_ptr(), min(len(factor), n - u))
             for l in range(n):
                 entry.unsafe_offset(l).unsafe_store(scratch.unsafe_offset(l).unsafe_load())
+            c = next
+
+
+    def _scale_word(mut self, first: Int, f: UInt64, bits: Int):
+        """`scale` by the word factor f, in place: the entry, sign-extended by a limb, times f."""
+        var c = self.next_marked(first)
+        while c < self.ncols:
+            var next = self.next_marked(c + 1)
+            if self.is_zero(c):
+                c = next
+                continue
+            var u = self._limbs(c)
+            var negative = self.negative(c)
+            self.sizes.unsafe_get(c) += bits
+            var entry = self.data.unsafe_ptr().unsafe_offset(c * self.width)
+            var carry = UInt64(0)
+            for l in range(u):
+                var p = UInt128(f) * UInt128(entry.unsafe_offset(l).unsafe_load()) + UInt128(carry)
+                entry.unsafe_offset(l).unsafe_store(UInt64(p & UInt128(UInt64.MAX)))
+                carry = UInt64(p >> 64)
+            if u < self.width:
+                # The sign limb B - 1 times f, plus the carry, is f B + carry - f.
+                entry.unsafe_offset(u).unsafe_store(carry - (f if negative else UInt64(0)))
             c = next
 
 
