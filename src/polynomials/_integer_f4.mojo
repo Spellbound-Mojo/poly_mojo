@@ -580,65 +580,83 @@ def _sub_mul_1(data: Pointer[mut=True, UInt64, _], width: Int, f: UInt64, other:
 def _add_mul_2(data: Pointer[mut=True, UInt64, _], width: Int, f0: UInt64, f1: UInt64, b: Pointer[mut=False, UInt64, _], n: Int):
     """data += (f0 + f1 2^64) * b[0:n] over `width` limbs, both limbs in one carry chain.
 
-    Limb l receives f0 b[l] + f1 b[l - 1] + data[l] and a carry below 2^65,
-    a sum that overflows 128 bits at most three times.
+    Limb l receives the low words of f0 b[l] and f1 b[l - 1], data[l] and
+    the carry c0 + c1 2^64, where c1 is at most two; the high words, the
+    overflows and c1 make the next carry.
     """
-    var g0 = UInt128(f0)
-    var g1 = UInt128(f1)
     var m = min(n, width)
-    var carry = UInt128(0)
-    var previous = UInt128(0)
+    var c0 = UInt64(0)
+    var c1 = UInt64(0)
+    var previous = UInt64(0)
     var l = 0
     while l < m:
-        var bl = UInt128(b.unsafe_offset(l).unsafe_load())
-        var x = g0 * bl
-        var t = x + g1 * previous
-        var over = UInt128(1) if t < x else UInt128(0)
-        var t2 = t + carry
-        over += UInt128(1) if t2 < t else UInt128(0)
-        var t3 = t2 + UInt128(data.unsafe_offset(l).unsafe_load())
-        over += UInt128(1) if t3 < t2 else UInt128(0)
-        data.unsafe_offset(l).unsafe_store(UInt64(t3 & UInt128(UInt64.MAX)))
-        carry = (t3 >> 64) + (over << 64)
+        var bl = b.unsafe_offset(l).unsafe_load()
+        var x = UInt128(f0) * UInt128(bl)
+        var y = UInt128(f1) * UInt128(previous)
+        var x0 = UInt64(x & UInt128(UInt64.MAX))
+        var y0 = UInt64(y & UInt128(UInt64.MAX))
+        var e = data.unsafe_offset(l).unsafe_load()
+        var s = x0 + y0
+        var k = UInt64(1) if s < x0 else UInt64(0)
+        s += e
+        k += UInt64(1) if s < e else UInt64(0)
+        s += c0
+        k += UInt64(1) if s < c0 else UInt64(0)
+        data.unsafe_offset(l).unsafe_store(s)
+        var x1 = UInt64(x >> 64)
+        var t = x1 + UInt64(y >> 64)
+        var o = UInt64(1) if t < x1 else UInt64(0)
+        var kc = k + c1
+        t += kc
+        c1 = o + (UInt64(1) if t < kc else UInt64(0))
+        c0 = t
         previous = bl
         l += 1
     if l == n and l < width:
         # The second limb's last product.
-        var t = g1 * previous + carry
+        var t = UInt128(f1) * UInt128(previous) + UInt128(c0)
         var t3 = t + UInt128(data.unsafe_offset(l).unsafe_load())
         var over = UInt128(1) if t3 < t else UInt128(0)
         data.unsafe_offset(l).unsafe_store(UInt64(t3 & UInt128(UInt64.MAX)))
-        _carry(data, width, l + 1, (t3 >> 64) + (over << 64))
+        _carry(data, width, l + 1, (t3 >> 64) + (over << 64) + UInt128(c1))
 
 
 @always_inline
 def _sub_mul_2(data: Pointer[mut=True, UInt64, _], width: Int, f0: UInt64, f1: UInt64, b: Pointer[mut=False, UInt64, _], n: Int):
     """data -= (f0 + f1 2^64) * b[0:n] over `width` limbs, both limbs in one borrow chain."""
-    var g0 = UInt128(f0)
-    var g1 = UInt128(f1)
     var m = min(n, width)
-    var borrow = UInt128(0)
-    var previous = UInt128(0)
+    var c0 = UInt64(0)
+    var c1 = UInt64(0)
+    var previous = UInt64(0)
     var l = 0
     while l < m:
-        var bl = UInt128(b.unsafe_offset(l).unsafe_load())
-        var x = g0 * bl
-        var t = x + g1 * previous
-        var over = UInt128(1) if t < x else UInt128(0)
-        var t2 = t + borrow
-        over += UInt128(1) if t2 < t else UInt128(0)
-        var low = UInt64(t2 & UInt128(UInt64.MAX))
+        var bl = b.unsafe_offset(l).unsafe_load()
+        var x = UInt128(f0) * UInt128(bl)
+        var y = UInt128(f1) * UInt128(previous)
+        var x0 = UInt64(x & UInt128(UInt64.MAX))
+        var y0 = UInt64(y & UInt128(UInt64.MAX))
+        var s = x0 + y0
+        var k = UInt64(1) if s < x0 else UInt64(0)
+        s += c0
+        k += UInt64(1) if s < c0 else UInt64(0)
         var e = data.unsafe_offset(l).unsafe_load()
-        data.unsafe_offset(l).unsafe_store(e - low)
-        borrow = (t2 >> 64) + (over << 64) + (UInt128(1) if e < low else UInt128(0))
+        data.unsafe_offset(l).unsafe_store(e - s)
+        k += UInt64(1) if e < s else UInt64(0)
+        var x1 = UInt64(x >> 64)
+        var t = x1 + UInt64(y >> 64)
+        var o = UInt64(1) if t < x1 else UInt64(0)
+        var kc = k + c1
+        t += kc
+        c1 = o + (UInt64(1) if t < kc else UInt64(0))
+        c0 = t
         previous = bl
         l += 1
     if l == n and l < width:
-        var t = g1 * previous + borrow
+        var t = UInt128(f1) * UInt128(previous) + UInt128(c0)
         var low = UInt64(t & UInt128(UInt64.MAX))
         var e = data.unsafe_offset(l).unsafe_load()
         data.unsafe_offset(l).unsafe_store(e - low)
-        _borrow(data, width, l + 1, (t >> 64) + (UInt128(1) if e < low else UInt128(0)))
+        _borrow(data, width, l + 1, (t >> 64) + (UInt128(1) if e < low else UInt128(0)) + UInt128(c1))
 
 
 def _comba[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int):
