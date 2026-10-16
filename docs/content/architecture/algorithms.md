@@ -77,7 +77,8 @@ is F4 instead: each round turns every pair of least LCM degree, with the
 reducers symbolic preprocessing finds, into one sparse matrix and reduces its
 rows in a dense 64-bit accumulator that is reduced modulo the prime only when
 read. Over `QQ` under GREVLEX the inputs are homogenized, and the basis comes
-from F4 images modulo primes, Chinese remaindering, rational reconstruction,
+from F4 images modulo primes, where later primes replay the first prime's
+recorded matrices, Chinese remaindering, rational reconstruction,
 and an exact certificate that the result is the reduced basis, whose S-pairs
 are reduced in F4 matrices over the integers; the packed engine computes the
 basis exactly if reconstruction gives up. Over `QQ` the computation is fraction-free over the integers: each

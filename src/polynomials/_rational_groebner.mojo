@@ -6,7 +6,9 @@ reduced basis of their ideal J is reconstructed from modular images and
 certified, and setting h = 1 then gives the basis of the input ideal.
 
 1. Images. Modulo each prime below 2^31 that divides no leading coefficient,
-   F4 computes the reduced basis of the image of J. Images whose leading
+   F4 computes the reduced basis of the image of J. The first prime's run
+   is recorded and later primes replay its matrices; a prime whose replay
+   declines is computed in full and recorded instead. Images whose leading
    monomials differ from the first one's are set aside.
 2. Reconstruction. Each coefficient is lifted by the Chinese remainder
    theorem over the union of the images' supports and recovered as a
@@ -48,7 +50,7 @@ from .sparse import SparsePoly, Term
 from .primes import _residue
 from ._images import _denominator, _scaled_integer
 from ._packed_groebner import _Buckets, _Engine, _Packed, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
-from ._f4 import _f4_packed
+from ._f4 import _Trace, _f4_learn, _f4_replay
 from ._integer_f4 import _pairs_reduce_to_zero
 
 comptime _PRIME_LIMIT = 4096
@@ -571,6 +573,10 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut bud
     var mismatches = 0
     var certifications = 0
     var attempt = 1
+    # The first prime's F4 run is recorded, and later primes replay it; a
+    # prime whose replay departs from it is computed in full and recorded.
+    var trace = _Trace[W]()
+    var learned = False
     var p = (UInt64(1) << 31) + 1
     for _ in range(_PRIME_LIMIT):
         budget.charge(1)
@@ -594,7 +600,15 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut bud
                 if r != 0:
                     terms.append(_Term[ModInt, W](t.monomial, ModInt(r, ring)))
             reduced.append(terms^)
-        var basis = _f4_packed[W](reduced^, kind, ring, budget)
+        var replayed = Optional[List[List[_Term[ModInt, W]]]](None)
+        if learned and trace.usable:
+            replayed = _f4_replay[W](trace, reduced.copy(), kind, ring, budget)
+        var basis: List[List[_Term[ModInt, W]]]
+        if replayed:
+            basis = replayed.take()
+        else:
+            basis = _f4_learn[W](reduced^, kind, ring, trace, budget)
+            learned = True
         if images.count > 0 and not images.matches(basis):
             mismatches += 1
             if mismatches < _MISMATCH_LIMIT:
@@ -614,6 +628,9 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut bud
                     return proposal^
                 if certifications >= _CERTIFY_LIMIT:
                     return None
+                # The images may follow an unlucky recorded run: record anew,
+                # so that differing leading monomials can show.
+                learned = False
             candidate = None
         images.add(basis, p, budget)
         var count = images.count

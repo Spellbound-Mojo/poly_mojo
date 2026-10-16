@@ -25,6 +25,12 @@ accumulator skips runs of zero words eight at a time. The final reduced basis
 is computed by one more matrix, whose rows are the basis elements and their
 reducers.
 
+A run can be recorded (`_f4_learn`) and replayed modulo another prime
+(`_f4_replay`): the replay reduces only the recorded rows that gave new
+elements, against the recorded pivots, with no pairs, symbolic
+preprocessing, or rows that reduced to zero, and declines as soon as a row
+leads elsewhere or a result leaves its recorded support.
+
 `groebner` uses F4 for untracked bases over primes below 2^31 under GRLEX and
 GREVLEX, over at most sixteen variables; other cases use Buchberger's
 algorithm in the packed or sparse engine.
@@ -375,7 +381,150 @@ def _scatter[W: Int](mut dense: List[UInt64], matrix: _Matrix[W], values: List[L
         dense.unsafe_get(Int(matrix.entries.unsafe_get(s + k))) = UInt64(v.unsafe_get(k))
 
 
-def _round[W: Int](mut engine: _Engine[ModInt, W, False], store: _Store[W], prime: UInt64, ring: Modulus, mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
+struct _Step[W: Int](Copyable, Movable):
+    """One matrix of a recorded F4 run, which runs modulo other primes replay.
+
+    The first `pivots` rows are pivots from the start. In a round, each later
+    row is reduced in turn to a new pivot leading in `leads`, and the new
+    pivots are then reduced by one another from the right; in the final
+    matrix every row is a pivot and the first `basis` rows have their tails
+    reduced. `supports` lists each result's columns, leading column first, in
+    the order the results come; the final matrix also keeps their monomials.
+    """
+    var final: Bool
+    var ncols: Int
+    var sources: List[Int]
+    var starts: List[Int]
+    var entries: List[Int32]
+    var pivots: Int
+    var basis: Int
+    var leads: List[Int32]
+    var supports: List[List[Int32]]
+    var monomials: List[List[_Packed[Self.W]]]
+
+    def __init__(out self, final: Bool, ncols: Int):
+        self.final = final
+        self.ncols = ncols
+        self.sources = List[Int]()
+        self.starts = [0]
+        self.entries = List[Int32]()
+        self.pivots = 0
+        self.basis = 0
+        self.leads = List[Int32]()
+        self.supports = List[List[Int32]]()
+        self.monomials = List[List[_Packed[Self.W]]]()
+
+    def keep(mut self, matrix: _Matrix[Self.W], r: Int, mut budget: Budget) raises PolyError:
+        """Append matrix row r."""
+        var s = matrix.starts[r]
+        var e = matrix.starts[r + 1]
+        _allocation[Int32](e - s, budget)
+        for k in range(s, e):
+            self.entries.append(matrix.entries[k])
+        self.sources.append(matrix.sources[r])
+        self.starts.append(len(self.entries))
+
+    def matrix(self) -> _Matrix[Self.W]:
+        """The recorded rows as a matrix, with no monomials."""
+        var matrix = _Matrix[Self.W]()
+        matrix.sources = self.sources.copy()
+        matrix.starts = self.starts.copy()
+        matrix.entries = self.entries.copy()
+        return matrix^
+
+
+struct _Trace[W: Int](Movable):
+    """A recorded F4 run: the elements its start leaves, and its matrices."""
+    var inputs: List[List[_Packed[Self.W]]]
+    """Each element's monomials after the start, in increasing order."""
+    var steps: List[_Step[Self.W]]
+    var usable: Bool
+    """False when the run inserted an element outside its matrices."""
+
+    def __init__(out self):
+        self.inputs = List[List[_Packed[Self.W]]]()
+        self.steps = List[_Step[Self.W]]()
+        self.usable = True
+
+
+def _eliminate[W: Int](matrix: _Matrix[W], mut pivot: List[Int], reduce: List[Int], values: List[List[UInt32]], prime: UInt64, ring: Modulus, mut found: _Rows, mut kept: List[Int], mut budget: Budget) raises PolyError -> List[Int]:
+    """Reduce rows `reduce` in turn, each nonzero remainder becoming a monic pivot; then reduce the new pivots by one another.
+
+    `kept` gets the rows that gave pivots. Returns the reduced new pivots,
+    rows of `found`, by decreasing leading column.
+    """
+    var nrows = len(matrix.sources)
+    var ncols = len(pivot)
+    _allocation[UInt64](ncols, budget)
+    var dense = List[UInt64](length=ncols, fill=0)
+    for r in reduce:
+        _scatter(dense, matrix, values, r, 0)
+        var before = len(found.columns)
+        _reduce_row(dense, Int(matrix.entries[matrix.starts[r]]), pivot, matrix, values, found, prime, budget)
+        if len(found.columns) == before:
+            continue
+        _allocation[UInt32](2 * (len(found.columns) - before), budget)
+        # A new pivot: monic, and used by the rows that follow.
+        var inverse = ModInt(UInt64(found.values[before]), ring).inverse(budget).value
+        for k in range(before, len(found.values)):
+            found.values[k] = UInt32((UInt64(found.values[k]) * inverse) % prime)
+        pivot[Int(found.columns[before])] = nrows + len(found.starts) - 1
+        found.starts.append(len(found.columns))
+        kept.append(r)
+    # The new pivots by decreasing leading column. Each is reduced by every
+    # reducer already, so it only needs reducing by the new pivots right of
+    # its leading column; taken from the right, those are final when it is
+    # reached.
+    var created = List[Int]()
+    for i in range(len(found.starts) - 1):
+        var j = len(created)
+        created.append(i)
+        while j > 0 and found.columns[found.starts[created[j - 1]]] < found.columns[found.starts[i]]:
+            created[j] = created[j - 1]
+            j -= 1
+        created[j] = i
+    var results = List[Int](capacity=len(created))
+    for i in created:
+        var lead = Int(found.columns[found.starts[i]])
+        for k in range(found.starts[i] + 1, found.starts[i + 1]):
+            dense[Int(found.columns[k])] = UInt64(found.values[k])
+        var before = len(found.columns)
+        found.columns.append(Int32(lead))
+        found.values.append(UInt32(1))
+        _reduce_row(dense, lead + 1, pivot, matrix, values, found, prime, budget)
+        _allocation[UInt32](2 * (len(found.columns) - before), budget)
+        pivot[lead] = nrows + len(found.starts) - 1
+        results.append(len(found.starts) - 1)
+        found.starts.append(len(found.columns))
+    return results^
+
+
+def _tails[W: Int](matrix: _Matrix[W], basis: Int, pivot: List[Int], values: List[List[UInt32]], prime: UInt64, mut found: _Rows, mut budget: Budget) raises PolyError:
+    """Reduce the tails of the first `basis` rows against all rows, each a row of `found`."""
+    _allocation[UInt64](len(pivot), budget)
+    var dense = List[UInt64](length=len(pivot), fill=0)
+    for r in range(basis):
+        var first = Int(matrix.entries[matrix.starts[r]])
+        _scatter(dense, matrix, values, r, 1)
+        found.columns.append(Int32(first))
+        found.values.append(values[matrix.sources[r]][0])
+        _reduce_row(dense, first + 1, pivot, matrix, values, found, prime, budget)
+        _allocation[UInt32](2 * (len(found.columns) - found.starts[len(found.starts) - 1]), budget)
+        found.starts.append(len(found.columns))
+
+
+def _supports(found: _Rows, rows: List[Int], mut budget: Budget) raises PolyError -> List[List[Int32]]:
+    var supports = List[List[Int32]](capacity=len(rows))
+    for i in rows:
+        _allocation[Int32](found.starts[i + 1] - found.starts[i], budget)
+        var columns = List[Int32](capacity=found.starts[i + 1] - found.starts[i])
+        for k in range(found.starts[i], found.starts[i + 1]):
+            columns.append(found.columns[k])
+        supports.append(columns^)
+    return supports^
+
+
+def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _Store[W], prime: UInt64, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
     """Run one F4 round on the pairs of least LCM degree; return the new elements, monic."""
     var degree = engine.pairs[0].lcm.degree
     var matrix = _Matrix[W]()
@@ -402,67 +551,45 @@ def _round[W: Int](mut engine: _Engine[ModInt, W, False], store: _Store[W], prim
     # Pivots: every reducer row, then the first pair row for each leading column.
     _allocation[Int](ncols, budget)
     var pivot = List[Int](length=ncols, fill=-1)
+    var pivots = List[Int]()
     for r in range(pair_rows, nrows):
         pivot[Int(matrix.entries[matrix.starts[r]])] = r
+        pivots.append(r)
     var reduce = List[Int]()
     for r in range(pair_rows):
         var c = Int(matrix.entries[matrix.starts[r]])
         if pivot[c] < 0:
             pivot[c] = r
+            pivots.append(r)
         else:
             reduce.append(r)
-    # Reduce the remaining rows, in order, against every pivot so far.
-    _allocation[UInt64](ncols, budget)
-    var dense = List[UInt64](length=ncols, fill=0)
     var found = _Rows()
-    for r in reduce:
-        _scatter(dense, matrix, store.values, r, 0)
-        var before = len(found.columns)
-        _reduce_row(dense, Int(matrix.entries[matrix.starts[r]]), pivot, matrix, store.values, found, prime, budget)
-        if len(found.columns) == before:
-            continue
-        _allocation[UInt32](2 * (len(found.columns) - before), budget)
-        # A new pivot: monic, and used by the rows that follow.
-        var inverse = ModInt(UInt64(found.values[before]), ring).inverse(budget).value
-        for k in range(before, len(found.values)):
-            found.values[k] = UInt32((UInt64(found.values[k]) * inverse) % prime)
-        pivot[Int(found.columns[before])] = nrows + len(found.starts) - 1
-        found.starts.append(len(found.columns))
-    # The new pivots by decreasing leading column. Each is reduced by every
-    # reducer already, so it only needs reducing by the new pivots right of
-    # its leading column; taken from the right, those are final when it is
-    # reached. The results are the new elements, smallest leading monomial
-    # first, as increasing term lists.
-    var created = List[Int]()
-    for i in range(len(found.starts) - 1):
-        var j = len(created)
-        created.append(i)
-        while j > 0 and found.columns[found.starts[created[j - 1]]] < found.columns[found.starts[i]]:
-            created[j] = created[j - 1]
-            j -= 1
-        created[j] = i
+    var kept = List[Int]()
+    var results = _eliminate(matrix, pivot, reduce, store.values, prime, ring, found, kept, budget)
+    comptime if record:
+        # The replay keeps the pivots and the rows that gave new ones.
+        var step = _Step[W](False, ncols)
+        for r in pivots:
+            step.keep(matrix, r, budget)
+        step.pivots = len(pivots)
+        for i in range(len(kept)):
+            step.keep(matrix, kept[i], budget)
+            step.leads.append(found.columns[found.starts[i]])
+        step.supports = _supports(found, results, budget)
+        trace.steps.append(step^)
+    # The new elements, smallest leading monomial first, as increasing term lists.
     var fresh = List[List[_Term[ModInt, W]]]()
-    for i in created:
-        var lead = Int(found.columns[found.starts[i]])
-        for k in range(found.starts[i] + 1, found.starts[i + 1]):
-            dense[Int(found.columns[k])] = UInt64(found.values[k])
-        var before = len(found.columns)
-        found.columns.append(Int32(lead))
-        found.values.append(UInt32(1))
-        _reduce_row(dense, lead + 1, pivot, matrix, store.values, found, prime, budget)
-        var n = len(found.columns) - before
-        _allocation[UInt32](2 * n, budget)
-        pivot[lead] = nrows + len(found.starts) - 1
-        found.starts.append(len(found.columns))
+    for i in results:
+        var n = found.starts[i + 1] - found.starts[i]
         _allocation[_Term[ModInt, W]](n, budget)
         var terms = List[_Term[ModInt, W]](capacity=n)
-        for k in range(len(found.columns) - 1, before - 1, -1):
+        for k in range(found.starts[i + 1] - 1, found.starts[i] - 1, -1):
             terms.append(_Term[ModInt, W](matrix.columns.monomials[order[Int(found.columns[k])]], ModInt(UInt64(found.values[k]), ring)))
         fresh.append(terms^)
     return fresh^
 
 
-def _interreduce[W: Int](mut engine: _Engine[ModInt, W, False], store: _Store[W], prime: UInt64, ring: Modulus, mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
+def _interreduce[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _Store[W], prime: UInt64, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
     """The reduced basis from the active elements, by one matrix, in decreasing leading-monomial order.
 
     Every active element is a row, and symbolic preprocessing adds a reducer
@@ -485,42 +612,51 @@ def _interreduce[W: Int](mut engine: _Engine[ModInt, W, False], store: _Store[W]
     var pivot = List[Int](length=ncols, fill=-1)
     for r in range(nrows):
         pivot[Int(matrix.entries[matrix.starts[r]])] = r
-    _allocation[UInt64](ncols, budget)
-    var dense = List[UInt64](length=ncols, fill=0)
     var found = _Rows()
+    _tails(matrix, basis_rows, pivot, store.values, prime, found, budget)
+    var rows = List[Int](capacity=basis_rows)
+    for r in range(basis_rows):
+        rows.append(r)
+    comptime if record:
+        var step = _Step[W](True, ncols)
+        for r in range(nrows):
+            step.keep(matrix, r, budget)
+        step.pivots = nrows
+        step.basis = basis_rows
+        step.supports = _supports(found, rows, budget)
+        for r in range(basis_rows):
+            var monomials = List[_Packed[W]]()
+            for k in range(found.starts[r], found.starts[r + 1]):
+                monomials.append(matrix.columns.monomials[order[Int(found.columns[k])]])
+            step.monomials.append(monomials^)
+        trace.steps.append(step^)
     var basis = List[List[_Term[ModInt, W]]](capacity=basis_rows)
     for r in range(basis_rows):
-        var first = Int(matrix.entries[matrix.starts[r]])
-        _scatter(dense, matrix, store.values, r, 1)
-        found.columns.clear()
-        found.values.clear()
-        found.columns.append(Int32(first))
-        found.values.append(store.values[matrix.sources[r]][0])
-        _reduce_row(dense, first + 1, pivot, matrix, store.values, found, prime, budget)
-        var n = len(found.columns)
+        var n = found.starts[r + 1] - found.starts[r]
         _allocation[_Term[ModInt, W]](n, budget)
         var terms = List[_Term[ModInt, W]](capacity=n)
-        for k in range(n - 1, -1, -1):
+        for k in range(found.starts[r + 1] - 1, found.starts[r] - 1, -1):
             terms.append(_Term[ModInt, W](matrix.columns.monomials[order[Int(found.columns[k])]], ModInt(UInt64(found.values[k]), ring)))
         basis.append(terms^)
     return basis^
 
 
-def _f4_packed[W: Int](var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
-    """The reduced monic basis of packed generators, in decreasing leading-monomial order.
-
-    Generators are increasing term lists over a degree order `kind` and a
-    prime below 2^31; zero generators are allowed.
-    """
+def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
     var prime = ring.value
     var engine = _Engine[ModInt, W, False](kind, ring)
     engine.start(generators^, budget)
+    comptime if record:
+        for p in engine.polys:
+            var monomials = List[_Packed[W]](capacity=len(p))
+            for t in p:
+                monomials.append(t.monomial)
+            trace.inputs.append(monomials^)
     var store = _Store[W]()
     while len(engine.pairs):
         budget.charge(1)
         engine.sort_active(budget)
         store.extend(engine, budget)
-        var fresh = _round(engine, store, prime, ring, budget)
+        var fresh = _round[W, record](engine, store, prime, ring, trace, budget)
         for k in range(len(fresh)):
             var p = List[_Term[ModInt, W]]()
             swap(p, fresh[k])
@@ -532,13 +668,127 @@ def _f4_packed[W: Int](var generators: List[List[_Term[ModInt, W]]], kind: UInt8
                     divided = True
                     break
             if divided:
+                # Reduced outside the matrices, so a replay could not follow.
+                trace.usable = False
                 engine.sort_active(budget)
                 p = engine.reduce_base(p^, engine.active, budget)
                 if len(p) == 0:
                     continue
             engine.insert(p^, budget)
     store.extend(engine, budget)
-    return _interreduce(engine, store, prime, ring, budget)
+    return _interreduce[W, record](engine, store, prime, ring, trace, budget)
+
+
+def _f4_packed[W: Int](var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
+    """The reduced monic basis of packed generators, in decreasing leading-monomial order.
+
+    Generators are increasing term lists over a degree order `kind` and a
+    prime below 2^31; zero generators are allowed.
+    """
+    var trace = _Trace[W]()
+    return _f4_run[W, False](generators^, kind, ring, trace, budget)
+
+
+def _f4_learn[W: Int](var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
+    """As `_f4_packed`, recording the run in `trace` for `_f4_replay`."""
+    trace = _Trace[W]()
+    return _f4_run[W, True](generators^, kind, ring, trace, budget)
+
+
+def _replay_rows(found: _Rows, results: List[Int], supports: List[List[Int32]], mut values: List[List[UInt32]], mut budget: Budget) raises PolyError -> Bool:
+    """Append each result's residues on its recorded support; False if a result leaves it."""
+    for t in range(len(results)):
+        var i = results[t]
+        ref support = supports[t]
+        _allocation[UInt32](len(support), budget)
+        var residues = List[UInt32](length=len(support), fill=0)
+        var j = 0
+        for k in range(found.starts[i], found.starts[i + 1]):
+            budget.charge(1)
+            while j < len(support) and support[j] < found.columns[k]:
+                j += 1
+            if j == len(support) or support[j] != found.columns[k]:
+                return False
+            residues[j] = found.values[k]
+        if residues[0] == 0:
+            return False
+        values.append(residues^)
+    return True
+
+
+def _f4_replay[W: Int](trace: _Trace[W], var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ModInt, W]]]]:
+    """The reduced basis modulo another prime by the recorded matrices, or None where this prime departs from them.
+
+    Only the recorded rows are reduced: no pairs, symbolic preprocessing, or
+    rows that reduced to zero. Every row must reduce to a pivot in its
+    recorded column and every result must stay within its recorded support;
+    the result is then a basis inside the ideal modulo this prime with the
+    recorded leading monomials, and the reduced basis whenever this prime
+    reduces no recorded nonzero to zero.
+    """
+    var prime = ring.value
+    var engine = _Engine[ModInt, W, False](kind, ring)
+    engine.start(generators^, budget)
+    if len(engine.polys) != len(trace.inputs):
+        return None
+    var values = List[List[UInt32]]()
+    for i in range(len(engine.polys)):
+        ref p = engine.polys[i]
+        ref monomials = trace.inputs[i]
+        if len(p) != len(monomials):
+            return None
+        _allocation[UInt32](len(p), budget)
+        var residues = List[UInt32](capacity=len(p))
+        for k in range(len(p) - 1, -1, -1):
+            budget.charge(1)
+            if not _equal(p[k].monomial, monomials[k]):
+                return None
+            residues.append(UInt32(p[k].coefficient.value))
+        values.append(residues^)
+    for step in trace.steps:
+        budget.charge(1)
+        var matrix = step.matrix()
+        var nrows = len(matrix.sources)
+        for r in range(nrows):
+            if matrix.starts[r + 1] - matrix.starts[r] != len(values[matrix.sources[r]]):
+                return None
+        _allocation[Int](step.ncols, budget)
+        var pivot = List[Int](length=step.ncols, fill=-1)
+        for r in range(step.pivots):
+            pivot[Int(matrix.entries[matrix.starts[r]])] = r
+        var found = _Rows()
+        if not step.final:
+            var reduce = List[Int]()
+            for r in range(step.pivots, nrows):
+                reduce.append(r)
+            var kept = List[Int]()
+            var results = _eliminate(matrix, pivot, reduce, values, prime, ring, found, kept, budget)
+            if len(kept) != len(reduce):
+                return None
+            for i in range(len(kept)):
+                if found.columns[found.starts[i]] != step.leads[i]:
+                    return None
+            if not _replay_rows(found, results, step.supports, values, budget):
+                return None
+            continue
+        _tails(matrix, step.basis, pivot, values, prime, found, budget)
+        var rows = List[Int]()
+        for r in range(step.basis):
+            rows.append(r)
+        var first = len(values)
+        if not _replay_rows(found, rows, step.supports, values, budget):
+            return None
+        var basis = List[List[_Term[ModInt, W]]](capacity=step.basis)
+        for r in range(step.basis):
+            ref residues = values[first + r]
+            ref monomials = step.monomials[r]
+            var terms = List[_Term[ModInt, W]](capacity=len(monomials))
+            for k in range(len(monomials) - 1, -1, -1):
+                if residues[k] != 0:
+                    terms.append(_Term[ModInt, W](monomials[k], ModInt(UInt64(residues[k]), ring)))
+            basis.append(terms^)
+        return basis^
+    return None
 
 
 def _f4_basis[W: Int](generators: List[SparsePoly[ModInt]], order: MonomialOrder, mut budget: Budget) raises PolyError -> List[SparsePoly[ModInt]]:

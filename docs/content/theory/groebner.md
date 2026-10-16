@@ -87,7 +87,10 @@ $J = \langle G \rangle$, and with (d) and monicity $G$ is its reduced basis
 (Theorem B-4). $\square$
 
 The checks (a), (b), and (d) are exact computations over the integers;
-(c) holds by construction. For (b) the S-polynomials of each degree are
+(c) holds by construction. After the first prime, an image replays the
+matrices of the first F4 run, reducing only the rows that gave new elements;
+its elements are still combinations of multiples of the generators modulo
+$p$, so they lie in $J_p$ whether or not the replay found its reduced basis. For (b) the S-polynomials of each degree are
 reduced in one F4 matrix over the integers, fraction-free: reducing an
 S-polynomial to zero by any choice of reducers gives it a standard
 representation. The theorem does not require $p$ to be a lucky prime
