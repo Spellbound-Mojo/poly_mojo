@@ -51,6 +51,16 @@ Uncertified, inhomogeneous inputs are not homogenized: steps 1 and 2 run on
 the input ideal itself, whose reduced basis is often many times smaller than
 that of J, and the first candidate that agrees with the next image is the
 result.
+
+Why certification keeps J. Checks (a), (b), and (d) on an affine candidate
+G show I ⊆ <G> with G reduced, but (c) has no affine analogue: I_{<=d} is
+not spanned by the products m*f of degree at most d, since elements arrive
+through degree falls, so modulo p the affine Hilbert function can exceed
+the rational one even when p divides no leading coefficient. For instance,
+with x > y > z and P a product of many primes, the inputs y^3 + x,
+y^3 + P z^3 + 2x, and x - 1 generate a proper ideal over QQ, yet modulo
+every p dividing P they generate (1). Every image is then {1}, and {1}
+passes (a), (b), and (d).
 """
 from std.math import max
 from apn_mojo import Integer, Rational, div_rem_euclid, gcd as integer_gcd, inverse_mod, isqrt
