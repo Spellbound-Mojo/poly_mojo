@@ -51,6 +51,16 @@ Uncertified, inhomogeneous inputs are not homogenized: steps 1 and 2 run on
 the input ideal itself, whose reduced basis is often many times smaller than
 that of J, and the first candidate that agrees with the next image is the
 result.
+
+Why certification keeps J. Checks (a), (b), and (d) on an affine candidate
+G show I ⊆ <G> with G reduced, but (c) has no affine analogue: I_{<=d} is
+not spanned by the products m*f of degree at most d, since elements arrive
+through degree falls, so modulo p the affine Hilbert function can exceed
+the rational one even when p divides no leading coefficient. For instance,
+with x > y > z and P a product of many primes, the inputs y^3 + x,
+y^3 + P z^3 + 2x, and x - 1 generate a proper ideal over QQ, yet modulo
+every p dividing P they generate (1). Every image is then {1}, and {1}
+passes (a), (b), and (d).
 """
 from std.math import max
 from apn_mojo import Integer, Rational, div_rem_euclid, gcd as integer_gcd, inverse_mod, isqrt
@@ -763,12 +773,11 @@ struct _Images[W: Int](Movable):
                         if abs(candidate) <= bound:
                             numerator = Optional(candidate^)
                 if not numerator:
-                    self._gather(e, k, blocks, unscaled, gathered)
-                    var value = full.value(gathered, budget)
-                    _work(full.modulus.magnitude_bit_length() // 8 + 1, denominator.magnitude_bit_length() // 8 + 1, True, budget)
-                    var exact: Integer
+                    # The coefficient times d modulo M, lifted from the
+                    # residues times d.
+                    self._gather(e, k, blocks, scales, gathered)
+                    var exact = full.value(gathered, budget)
                     try:
-                        exact = div_rem_euclid(value * denominator, full.modulus)[1].copy()
                         if exact > half:
                             exact -= full.modulus
                     except err:
@@ -789,8 +798,7 @@ struct _Images[W: Int](Movable):
                         exact = f.numerator().copy()
                         changes.append(k)
                         denominators.append(denominator.copy())
-                        if use_prefix:
-                            _residues(denominator, self.primes, len(self.primes), scales, budget)
+                        _residues(denominator, self.primes, len(self.primes), scales, budget)
                     numerator = Optional(exact^)
                 numerators.append(numerator.take())
             # Over the final denominator: numerators before a change lack the

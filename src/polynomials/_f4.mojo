@@ -55,6 +55,10 @@ comptime _F4_PRIME_LIMIT = UInt64(1) << 31
 comptime _COLUMN_LIMIT = Int(Int32.MAX)
 comptime _TAG = UInt64(0xFFFFFFFF00000000)
 """The bits of a hash slot that hold the high half of the monomial's mixed hash."""
+comptime _WIDE = UInt64(0x80000000)
+"""The bit of a hash slot that marks a monomial with an exponent of 256 or more."""
+comptime _NUMBER = UInt64(0x7FFFFFFF)
+"""The bits of a hash slot that hold one more than the monomial's number."""
 
 
 comptime _MULTIPLIERS = SIMD[DType.uint64, 16](
@@ -88,14 +92,17 @@ def _times[W: Int](a: _Packed[W], b: _Packed[W]) -> _Packed[W]:
 
 
 struct _Store[W: Int](Movable):
-    """Each basis element's term hashes and, over a prime field, residues, leading term first."""
+    """Each basis element's term hashes, exponent bytes, and, over a prime field, residues, leading term first."""
     var hashes: List[List[UInt64]]
+    var keys: List[List[SIMD[DType.uint8, Self.W]]]
+    """Each term's exponents truncated to bytes, exact when its element's `tops` are below 256."""
     var values: List[List[UInt32]]
     var tops: List[_Packed[Self.W]]
     """The greatest exponent of each variable among each element's terms."""
 
     def __init__(out self):
         self.hashes = List[List[UInt64]]()
+        self.keys = List[List[SIMD[DType.uint8, Self.W]]]()
         self.values = List[List[UInt32]]()
         self.tops = List[_Packed[Self.W]]()
 
@@ -106,33 +113,47 @@ struct _Store[W: Int](Movable):
             var n = len(p)
             budget.charge(UInt64(n))
             _allocation[UInt64](n, budget)
+            _allocation[SIMD[DType.uint8, Self.W]](n, budget)
             _allocation[UInt32](n, budget)
             var h = List[UInt64](capacity=n)
+            var e = List[SIMD[DType.uint8, Self.W]](capacity=n)
             var v = List[UInt32](capacity=n)
             var top = SIMD[DType.uint32, Self.W](0)
             for k in range(n - 1, -1, -1):
                 ref t = p[k]
                 h.append(_raw_hash(t.monomial))
+                e.append(t.monomial.exponents().cast[DType.uint8]())
                 comptime if C == ModInt:
                     v.append(UInt32(rebind[ModInt](t.coefficient).value))
                 top = max(top, t.monomial.exponents())
             self.hashes.append(h^)
+            self.keys.append(e^)
             self.values.append(v^)
             self.tops.append(_packed(top))
 
 
 struct _Columns[W: Int](Movable):
-    """Distinct monomials, numbered in order of first appearance, with a hash index."""
+    """Distinct monomials, numbered in order of first appearance, with a hash index.
+
+    A monomial whose exponents are all below 256 is narrow: its exponent
+    bytes (`keys`), a sixth of its record, decide equality with another
+    narrow one. The table is probed for every term of every row, and the
+    keys, unlike the records, stay in cache.
+    """
     var monomials: List[_Packed[Self.W]]
+    var keys: List[SIMD[DType.uint8, Self.W]]
+    """Each monomial's exponents truncated to bytes."""
     var covered: List[Bool]
     """Whether some row leads with the monomial."""
     var slots: List[UInt64]
     """Open addressing: 0 is empty, otherwise the high half of the monomial's
-    mixed hash over one more than its number."""
+    mixed hash, over `_WIDE` unless it is narrow, over one more than its
+    number."""
     var mask: Int
 
     def __init__(out self):
         self.monomials = List[_Packed[Self.W]]()
+        self.keys = List[SIMD[DType.uint8, Self.W]]()
         self.covered = List[Bool]()
         self.slots = List[UInt64](length=1024, fill=0)
         self.mask = 1023
@@ -143,6 +164,7 @@ struct _Columns[W: Int](Movable):
         if total > _COLUMN_LIMIT:
             raise PolyError(PolyErrorKind.CAPACITY, "F4 matrix column count overflow")
         _allocation[_Packed[Self.W]](count, budget)
+        _allocation[SIMD[DType.uint8, Self.W]](count, budget)
         if 2 * total <= len(self.slots):
             return
         var size = len(self.slots)
@@ -153,30 +175,62 @@ struct _Columns[W: Int](Movable):
         self.slots = List[UInt64](length=size, fill=0)
         self.mask = size - 1
         for i in range(len(self.monomials)):
-            var mixed = _mix(_raw_hash(self.monomials[i]))
+            ref m = self.monomials[i]
+            var mixed = _mix(_raw_hash(m))
             var h = Int(mixed & UInt64(self.mask))
             while self.slots[h] != 0:
                 h = (h + 1) & self.mask
-            self.slots[h] = (mixed & _TAG) | UInt64(i + 1)
+            self.slots[h] = (mixed & _TAG) | _wide(m) | UInt64(i + 1)
 
     @always_inline
     def find(mut self, m: _Packed[Self.W], raw: UInt64) -> Int32:
         """The number of m, whose raw hash is `raw`, added when new; `reserve` must have made room."""
+        var mixed = _mix(raw)
+        var tag = (mixed & _TAG) | _wide(m)
+        var key = m.exponents().cast[DType.uint8]()
+        var h = Int(mixed & UInt64(self.mask))
+        while True:
+            var slot = self.slots.unsafe_get(h)
+            if slot == 0:
+                return self._add(h, m, key, tag)
+            if slot & ~_NUMBER == tag:
+                var c = Int(slot & _NUMBER) - 1
+                if tag & _WIDE == 0:
+                    if not self.keys.unsafe_get(c).ne(key).reduce_or():
+                        return Int32(c)
+                elif _equal(self.monomials.unsafe_get(c), m):
+                    return Int32(c)
+            h = (h + 1) & self.mask
+
+    @always_inline
+    def find_narrow(mut self, key: SIMD[DType.uint8, Self.W], raw: UInt64) -> Int32:
+        """As `find` for the narrow monomial whose exponent bytes are `key`."""
         var mixed = _mix(raw)
         var tag = mixed & _TAG
         var h = Int(mixed & UInt64(self.mask))
         while True:
             var slot = self.slots.unsafe_get(h)
             if slot == 0:
-                self.monomials.append(m)
-                self.covered.append(False)
-                self.slots.unsafe_get(h) = tag | UInt64(len(self.monomials))
-                return Int32(len(self.monomials) - 1)
-            if slot & _TAG == tag:
-                var c = Int(slot & ~_TAG) - 1
-                if _equal(self.monomials.unsafe_get(c), m):
+                return self._add(h, _packed(key.cast[DType.uint32]()), key, tag)
+            if slot & ~_NUMBER == tag:
+                var c = Int(slot & _NUMBER) - 1
+                if not self.keys.unsafe_get(c).ne(key).reduce_or():
                     return Int32(c)
             h = (h + 1) & self.mask
+
+    @always_inline
+    def _add(mut self, h: Int, m: _Packed[Self.W], key: SIMD[DType.uint8, Self.W], tag: UInt64) -> Int32:
+        self.monomials.append(m)
+        self.keys.append(key)
+        self.covered.append(False)
+        self.slots.unsafe_get(h) = tag | UInt64(len(self.monomials))
+        return Int32(len(self.monomials) - 1)
+
+
+@always_inline
+def _wide[W: Int](m: _Packed[W]) -> UInt64:
+    """`_WIDE` when some exponent of m is 256 or more, else zero."""
+    return UInt64(0) if m.exponents().reduce_max() < 256 else _WIDE
 
 
 def _sort_descending[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) raises PolyError -> List[Int]:
@@ -271,10 +325,28 @@ def _keys[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) 
 
 
 def _sort_keys(var keys: List[UInt128], mut budget: Budget) raises PolyError -> List[Int]:
-    """The indices in the low 32 bits of distinct keys, by decreasing key."""
+    """The indices in the low 32 bits of distinct keys, by decreasing key.
+
+    Long lists go by radix sort, 11 bits at a time above the index, which
+    distinct keys need not be sorted by.
+    """
     var n = len(keys)
     _allocation[UInt128](n, budget)
     var scratch = List[UInt128](length=n, fill=0)
+    if n < 2048:
+        _merge_keys(keys, scratch, budget)
+    else:
+        _radix_keys(keys, scratch, budget)
+    _allocation[Int](n, budget)
+    var order = List[Int](capacity=n)
+    for k in range(n):
+        order.append(Int(keys.unsafe_get(k) & UInt128(0xFFFFFFFF)))
+    return order^
+
+
+def _merge_keys(mut keys: List[UInt128], mut scratch: List[UInt128], mut budget: Budget) raises PolyError:
+    """Sort distinct keys decreasingly, by bottom-up merge sort."""
+    var n = len(keys)
     var width = 1
     while width < n:
         budget.charge(UInt64(n))
@@ -306,11 +378,40 @@ def _sort_keys(var keys: List[UInt128], mut budget: Budget) raises PolyError -> 
             start = end
         swap(keys, scratch)
         width *= 2
-    _allocation[Int](n, budget)
-    var order = List[Int](capacity=n)
+
+
+def _radix_keys(mut keys: List[UInt128], mut scratch: List[UInt128], mut budget: Budget) raises PolyError:
+    """Sort distinct keys decreasingly, least significant digit first above the index; charged as the merge sort."""
+    var n = len(keys)
+    var width = 1
+    while width < n:
+        budget.charge(UInt64(n))
+        width *= 2
+    var top = UInt128(0)
     for k in range(n):
-        order.append(Int(keys.unsafe_get(k) & UInt128(0xFFFFFFFF)))
-    return order^
+        top = max(top, keys.unsafe_get(k))
+    var bits = 128 - Int(count_leading_zeros(top >> 32))
+    comptime DIGIT = 11
+    var counts = List[Int](length=1 << DIGIT, fill=0)
+    var shift = 32
+    while shift < 32 + bits:
+        for d in range(1 << DIGIT):
+            counts.unsafe_get(d) = 0
+        for k in range(n):
+            counts.unsafe_get(Int((keys.unsafe_get(k) >> UInt128(shift)) & UInt128((1 << DIGIT) - 1))) += 1
+        # Decreasing digits first, so the pass is stable for a descending order.
+        var at = 0
+        for d in range((1 << DIGIT) - 1, -1, -1):
+            var c = counts.unsafe_get(d)
+            counts.unsafe_get(d) = at
+            at += c
+        for k in range(n):
+            var key = keys.unsafe_get(k)
+            var d = Int((key >> UInt128(shift)) & UInt128((1 << DIGIT) - 1))
+            scratch.unsafe_get(counts.unsafe_get(d)) = key
+            counts.unsafe_get(d) += 1
+        swap(keys, scratch)
+        shift += DIGIT
 
 
 @always_inline
@@ -346,14 +447,21 @@ struct _Matrix[W: Int](Movable):
         ref h = store.hashes[source]
         var n = len(p)
         # Some product's exponent overflows exactly when the greatest exponents' does.
-        _ = _mul(store.tops[source], shift)
+        var top = _mul(store.tops[source], shift)
         budget.charge(UInt64(n))
         _allocation[Int32](n, budget)
         self.columns.reserve(n, budget)
         var base = _raw_hash(shift)
         var first = len(self.entries)
-        for k in range(n):
-            self.entries.append(self.columns.find(_times(p.unsafe_get(n - 1 - k).monomial, shift), base + h.unsafe_get(k)))
+        if top.exponents().reduce_max() < 256:
+            # Every product is narrow: its bytes are the sum of its factors'.
+            ref keys = store.keys[source]
+            var offset = shift.exponents().cast[DType.uint8]()
+            for k in range(n):
+                self.entries.append(self.columns.find_narrow(keys.unsafe_get(k) + offset, base + h.unsafe_get(k)))
+        else:
+            for k in range(n):
+                self.entries.append(self.columns.find(_times(p.unsafe_get(n - 1 - k).monomial, shift), base + h.unsafe_get(k)))
         self.columns.covered[Int(self.entries[first])] = True
         self.sources.append(source)
         self.starts.append(len(self.entries))
@@ -549,7 +657,7 @@ def _reduce_row_in[small: Bool, W: Int](mut dense: List[UInt64], start: Int, piv
         c += 1
 
 
-comptime _BLOCK = 8
+comptime _BLOCK = 16
 """Rows `_eliminate` reduces at once, one per SIMD lane."""
 
 comptime _Block = SIMD[DType.uint64, _BLOCK]
