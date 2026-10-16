@@ -7,7 +7,9 @@ Arguments: input, answer, result, order, mode, modulus, min_seconds, min_reps.
 The input holds a polynomial count and then, for each generator, a byte length
 followed by its canonical `sparse.dumps` record. Reading it, and writing the
 answer, stay outside the timed region. Mode `comparable` computes without
-witnesses; mode `certified` keeps witnesses and also times `check_groebner`.
+witnesses; mode `certified` keeps witnesses and also times `check_groebner`;
+mode `uncertified` computes without witnesses and without the exact
+certificate of a rational basis (`certify=False`).
 """
 from apn_mojo import Rational
 from poly import sparse
@@ -61,6 +63,7 @@ def run[T: Copyable & Deinitable](args: List[String]) raises:
     var min_reps = Int(args[8])
     var order = args[4]
     var certified = args[5] == "certified"
+    var certify = args[5] != "uncertified"
     var records = read_records(args[1])
     var generators = List[type_of(sparse.loads[T, ndim=NVARS](records[0], modulus=modulus))](capacity=len(records))
     for record in records:
@@ -69,7 +72,7 @@ def run[T: Copyable & Deinitable](args: List[String]) raises:
     var rss_before = status_kb("VmRSS")
     reset_peak()
     var start = perf_counter_ns()
-    var basis = sparse.groebner(generators, order=order, witnesses=certified)
+    var basis = sparse.groebner(generators, order=order, witnesses=certified, certify=certify)
     var elapsed = perf_counter_ns() - start
     var peak = status_kb("VmHWM")
     var times: List[Int] = [elapsed]
@@ -79,7 +82,7 @@ def run[T: Copyable & Deinitable](args: List[String]) raises:
     if Float64(elapsed) < limit:
         while len(times) < min_reps or Float64(total) < limit:
             start = perf_counter_ns()
-            var again = sparse.groebner(generators, order=order, witnesses=certified)
+            var again = sparse.groebner(generators, order=order, witnesses=certified, certify=certify)
             var lap = perf_counter_ns() - start
             times.append(lap)
             total += lap

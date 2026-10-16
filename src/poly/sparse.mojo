@@ -3250,13 +3250,13 @@ def _monomial_order[P: Copyable & Deinitable](order: String, axes: List[Int], mu
     return MonomialOrder(kind, _axes[P](axes, budget), budget)
 
 
-def _basis[P: Copyable & Deinitable, k: Int](prepared: List[Array[P, k]], ctx: _Ring[k].Context, order: String, axes: List[Int], witnesses: Bool, mut budget: Budget) raises PolyError -> Basis[P, k]:
+def _basis[P: Copyable & Deinitable, k: Int](prepared: List[Array[P, k]], ctx: _Ring[k].Context, order: String, axes: List[Int], witnesses: Bool, certify: Bool, mut budget: Budget) raises PolyError -> Basis[P, k]:
     var monomial_order = _monomial_order[P](order, axes, budget)
     _allocation[SparsePoly[_Field[k]]](len(prepared), budget)
     var generators = List[SparsePoly[_Field[k]]](capacity=len(prepared))
     for p in prepared:
         generators.append(rebind_var[SparsePoly[_Field[k]]](p._core[].reorder(monomial_order, budget)))
-    var result = _groebner(generators, monomial_order, budget, track_cofactors=witnesses)
+    var result = _groebner(generators, monomial_order, budget, track_cofactors=witnesses, certify=certify)
     _allocation[Array[P, k]](len(result.basis), budget)
     var values = List[Array[P, k]](capacity=len(result.basis))
     var canonical = _order[P](budget)
@@ -3269,7 +3269,7 @@ def _basis[P: Copyable & Deinitable, k: Int](prepared: List[Array[P, k]], ctx: _
     return Basis[P, k](ArcPointer(_BasisData[k](generators^, result^, ctx.copy())), Values[Array[P, k], k](values^, modulus, budget))
 
 
-def groebner[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable](generators: I, mut budget: Budget, *, order: String = "grevlex", axes: List[Int] = List[Int](), witnesses: Bool = True) raises PolyError -> Basis[P, _FieldKind[_Kind[C]]] where _Element[_Nested[I]] == Tuple[P, C]:
+def groebner[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable](generators: I, mut budget: Budget, *, order: String = "grevlex", axes: List[Int] = List[Int](), witnesses: Bool = True, certify: Bool = True) raises PolyError -> Basis[P, _FieldKind[_Kind[C]]] where _Element[_Nested[I]] == Tuple[P, C]:
     """Compute a reusable reduced monic Groebner basis from sparse polynomials.
 
     Integer coefficients promote to QQ. QQi and prime fields remain in their
@@ -3286,6 +3286,7 @@ def groebner[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable](ge
         order: One of lex, grlex, or grevlex; defaults to grevlex.
         axes: Variable priority, highest first; defaults to increasing axis order.
         witnesses: Retain cofactor rows for membership witnesses and basis verification.
+        certify: Over QQ without witnesses, prove the basis computed from modular images exactly; False skips the proof, and the result is then the reduced basis with high probability.
 
     Returns:
         The computed result, with its evidence retained.
@@ -3295,10 +3296,10 @@ def groebner[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable](ge
     """
     comptime k = _FieldKind[_Kind[C]]
     var prepared = _system[k, I, P, C](generators, budget)
-    return _basis(prepared[0], prepared[1], order, axes, witnesses, budget)
+    return _basis(prepared[0], prepared[1], order, axes, witnesses, certify, budget)
 
 
-def groebner[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable](generators: I, *, max_steps: UInt64 = UInt64.MAX, order: String = "grevlex", axes: List[Int] = List[Int](), witnesses: Bool = True) raises PolyError -> Basis[P, _FieldKind[_Kind[C]]] where _Element[_Nested[I]] == Tuple[P, C]:
+def groebner[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable](generators: I, *, max_steps: UInt64 = UInt64.MAX, order: String = "grevlex", axes: List[Int] = List[Int](), witnesses: Bool = True, certify: Bool = True) raises PolyError -> Basis[P, _FieldKind[_Kind[C]]] where _Element[_Nested[I]] == Tuple[P, C]:
     """Compute a reusable reduced monic Groebner basis from sparse polynomials.
 
     Integer coefficients promote to QQ. QQi and prime fields remain in their
@@ -3315,6 +3316,7 @@ def groebner[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable](ge
         order: One of lex, grlex, or grevlex; defaults to grevlex.
         axes: Variable priority, highest first; defaults to increasing axis order.
         witnesses: Retain cofactor rows for membership witnesses and basis verification.
+        certify: Over QQ without witnesses, prove the basis computed from modular images exactly; False skips the proof, and the result is then the reduced basis with high probability.
 
     Returns:
         The computed result, with its evidence retained.
@@ -3323,7 +3325,7 @@ def groebner[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable](ge
         PolyError: DOMAIN for incompatible input, UNSUPPORTED for an unavailable operation, or LIMIT/CAPACITY on resource limits.
     """
     var budget = Budget(max_steps)
-    return groebner[I, P, C](generators, budget, order=order, axes=axes, witnesses=witnesses)
+    return groebner[I, P, C](generators, budget, order=order, axes=axes, witnesses=witnesses, certify=certify)
 
 
 def _basis_input[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable, k: Int](values: I, basis: Basis[P, k], mut budget: Budget) raises PolyError -> Array[P, k] where _Element[I] == Tuple[P, C]:
@@ -3695,7 +3697,7 @@ def _system_tuple[P: Copyable & Deinitable, k: Int, *Ts: Copyable & Deinitable](
     return result^, ctx^
 
 
-def groebner[P: Copyable & Deinitable, C: Copyable & Deinitable, *Ts: Copyable & Deinitable](generators: Tuple[*Ts], mut budget: Budget, *, order: String = "grevlex", axes: List[Int] = List[Int](), witnesses: Bool = True) raises PolyError -> Basis[P, _SystemKind[P, Tuple[*Ts]]] where _PolynomialElement[Tuple[*Ts].Ts[0]] == Tuple[P, C]:
+def groebner[P: Copyable & Deinitable, C: Copyable & Deinitable, *Ts: Copyable & Deinitable](generators: Tuple[*Ts], mut budget: Budget, *, order: String = "grevlex", axes: List[Int] = List[Int](), witnesses: Bool = True, certify: Bool = True) raises PolyError -> Basis[P, _SystemKind[P, Tuple[*Ts]]] where _PolynomialElement[Tuple[*Ts].Ts[0]] == Tuple[P, C]:
     """Infer a common field across a tuple of differently typed polynomials.
 
     Parameters:
@@ -3709,6 +3711,7 @@ def groebner[P: Copyable & Deinitable, C: Copyable & Deinitable, *Ts: Copyable &
         order: One of lex, grlex, or grevlex.
         axes: Variable priority, highest first.
         witnesses: Retain original-generator cofactors for independent checking.
+        certify: Over QQ without witnesses, prove the basis computed from modular images exactly; False skips the proof, and the result is then the reduced basis with high probability.
 
     Returns:
         The computed result, with its evidence retained.
@@ -3718,10 +3721,10 @@ def groebner[P: Copyable & Deinitable, C: Copyable & Deinitable, *Ts: Copyable &
     """
     comptime k = _SystemKind[P, Tuple[*Ts]]
     var prepared = _system_tuple[P, k](generators, budget)
-    return _basis(prepared[0], prepared[1], order, axes, witnesses, budget)
+    return _basis(prepared[0], prepared[1], order, axes, witnesses, certify, budget)
 
 
-def groebner[P: Copyable & Deinitable, C: Copyable & Deinitable, *Ts: Copyable & Deinitable](generators: Tuple[*Ts], *, max_steps: UInt64 = UInt64.MAX, order: String = "grevlex", axes: List[Int] = List[Int](), witnesses: Bool = True) raises PolyError -> Basis[P, _SystemKind[P, Tuple[*Ts]]] where _PolynomialElement[Tuple[*Ts].Ts[0]] == Tuple[P, C]:
+def groebner[P: Copyable & Deinitable, C: Copyable & Deinitable, *Ts: Copyable & Deinitable](generators: Tuple[*Ts], *, max_steps: UInt64 = UInt64.MAX, order: String = "grevlex", axes: List[Int] = List[Int](), witnesses: Bool = True, certify: Bool = True) raises PolyError -> Basis[P, _SystemKind[P, Tuple[*Ts]]] where _PolynomialElement[Tuple[*Ts].Ts[0]] == Tuple[P, C]:
     """Infer a common field across a tuple of differently typed polynomials.
 
     Parameters:
@@ -3735,6 +3738,7 @@ def groebner[P: Copyable & Deinitable, C: Copyable & Deinitable, *Ts: Copyable &
         order: One of lex, grlex, or grevlex.
         axes: Variable priority, highest first.
         witnesses: Retain original-generator cofactors for independent checking.
+        certify: Over QQ without witnesses, prove the basis computed from modular images exactly; False skips the proof, and the result is then the reduced basis with high probability.
 
     Returns:
         The computed result, with its evidence retained.
@@ -3743,7 +3747,7 @@ def groebner[P: Copyable & Deinitable, C: Copyable & Deinitable, *Ts: Copyable &
         PolyError: DOMAIN for incompatible input, UNSUPPORTED for an unavailable operation, or LIMIT/CAPACITY on resource limits.
     """
     var budget = Budget(max_steps)
-    return groebner[P, C, *Ts](generators, budget, order=order, axes=axes, witnesses=witnesses)
+    return groebner[P, C, *Ts](generators, budget, order=order, axes=axes, witnesses=witnesses, certify=certify)
 
 
 # Numerical operations keep output precision explicit.

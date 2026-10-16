@@ -81,9 +81,13 @@ class PolyMojo(Tool):
     algorithm = 'Buchberger'
     driver = HERE / 'drivers' / 'poly_mojo' / 'groebner.mojo'
 
-    def __init__(self, certified=False):
-        self.certified = certified
-        self.name = 'polymojo-certified' if certified else 'polymojo'
+    def __init__(self, certified=False, mode=None):
+        # Modes: comparable (no witnesses), certified (witnesses and check),
+        # uncertified (no witnesses, rational bases not certified).
+        self.mode = mode or ('certified' if certified else 'comparable')
+        self.certified = self.mode == 'certified'
+        self.name = {'comparable': 'polymojo', 'certified': 'polymojo-certified',
+                     'uncertified': 'polymojo-uncertified'}[self.mode]
 
     def version(self):
         return git_revision()
@@ -119,7 +123,7 @@ class PolyMojo(Tool):
         (work / 'input.txt').write_text(write_records(polys, len(case['variables']), field))
         binary = self.binary(len(case['variables']), field is not None)
         cmd = [str(binary), 'input.txt', 'answer.txt', 'result.json', case['order'],
-               'certified' if self.certified else 'comparable', str(field or 0),
+               self.mode, str(field or 0),
                str(settings['min_seconds']), str(settings['min_reps'])]
         return cmd, os.environ.copy()
 
@@ -315,7 +319,7 @@ class PolyMojoStream(PolyMojo):
 
 
 TOOLS = {t.name: t for t in [
-    PolyMojo(), PolyMojo(certified=True),
+    PolyMojo(), PolyMojo(certified=True), PolyMojo(mode='uncertified'),
     PolyMojoStream('decompose'), PolyMojoStream('materialized'), PolyMojoStream('streaming'),
     SymPy('buchberger', 'gmpy'), SymPy('f5b', 'gmpy'), SymPy('buchberger', 'flint'),
     Singular('std'), Singular('slimgb'), Singular('modStd'),

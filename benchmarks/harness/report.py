@@ -20,10 +20,11 @@ BASE = 'polymojo'
 RATIO_FLOOR_S = 0.01      # a ratio needs the slower tool to take at least this long
 MEMORY_FLOOR_KIB = 1024   # and, for memory, at least this much incremental peak
 
-TOOL_ORDER = ['polymojo', 'polymojo-certified', 'sympy-buchberger', 'sympy-f5b', 'sympy-buchberger-flint',
+TOOL_ORDER = ['polymojo', 'polymojo-certified', 'polymojo-uncertified', 'sympy-buchberger', 'sympy-f5b', 'sympy-buchberger-flint',
               'singular-std', 'singular-slimgb', 'singular-modstd', 'msolve']
 LABEL = {
     'polymojo': 'Poly Mojo', 'polymojo-certified': 'Poly Mojo (certified)',
+    'polymojo-uncertified': 'Poly Mojo (uncertified)',
     'sympy-buchberger': 'SymPy Buchberger', 'sympy-f5b': 'SymPy F5B',
     'sympy-buchberger-flint': 'SymPy Buchberger (flint types)',
     'singular-std': 'Singular std', 'singular-slimgb': 'Singular slimgb',
@@ -132,7 +133,7 @@ def ratios(records, tools, floor_key, floor):
 
 def summary_table(records, tools, key, floor, title):
     groups, solved, totals = ratios(records, tools, key, floor)
-    competitors = [t for t in tools if t not in (BASE, 'polymojo-certified')]
+    competitors = [t for t in tools if t not in (BASE, 'polymojo-certified', 'polymojo-uncertified')]
     lines = [f'**{title}** (geometric mean of competitor ÷ Poly Mojo; above 1 means Poly Mojo used less; *n* = cases compared)', '',
              '| Field, order | ' + ' | '.join(LABEL[t] for t in competitors) + ' |',
              '|---|' + '---|' * len(competitors)]

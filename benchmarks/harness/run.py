@@ -35,7 +35,7 @@ from .polys import canonical_basis, digest
 
 HERE = Path(__file__).resolve().parent.parent
 FAMILY_TOOLS = {
-    'groebner': ['polymojo', 'polymojo-certified', 'sympy-buchberger', 'sympy-f5b', 'sympy-buchberger-flint',
+    'groebner': ['polymojo', 'polymojo-certified', 'polymojo-uncertified', 'sympy-buchberger', 'sympy-f5b', 'sympy-buchberger-flint',
                  'singular-std', 'singular-slimgb', 'singular-modstd', 'msolve'],
     'streaming': ['polymojo-decompose', 'polymojo-materialized', 'polymojo-streaming'],
 }

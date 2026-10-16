@@ -225,7 +225,7 @@ def _insert[C: CoefficientField](var p: SparsePoly[C], var row: List[SparsePoly[
     _heapify_pairs(pairs, arena[len(arena) - 1].order, budget)
 
 
-def groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: MonomialOrder, mut budget: Budget, track_cofactors: Bool = False) raises PolyError -> GroebnerBasis[C]:
+def groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: MonomialOrder, mut budget: Budget, track_cofactors: Bool = False, certify: Bool = True) raises PolyError -> GroebnerBasis[C]:
     """Compute the reduced monic basis with deterministic Gebauer–Möller pruning.
 
     Parameters:
@@ -236,6 +236,7 @@ def groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: Monomi
         order: LEX, GRLEX, or GREVLEX with every input variable listed.
         budget: The shared work allowance.
         track_cofactors: Whether to retain combinations of the original generators.
+        certify: Whether a basis over QQ computed from modular images is certified exactly; without it the result is the reduced basis with high probability, and is not proved.
 
     Returns:
         The reduced basis and optional cofactor rows in generator order.
@@ -260,7 +261,7 @@ def groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: Monomi
             # integer coefficients.
             ref inputs = rebind[List[SparsePoly[QQ]]](generators)
             if _grevlex_supported(order):
-                var homogenized = _grevlex_groebner_rational(inputs, order, budget)
+                var homogenized = _grevlex_groebner_rational(inputs, order, budget, certify=certify)
                 return GroebnerBasis[C](order.copy(), rebind_var[List[SparsePoly[C]]](homogenized^), Optional[List[List[SparsePoly[C]]]](None))
             var rational = _packed_groebner_rational(inputs, order, budget)
             return GroebnerBasis[C](order.copy(), rebind_var[List[SparsePoly[C]]](rational^), Optional[List[List[SparsePoly[C]]]](None))

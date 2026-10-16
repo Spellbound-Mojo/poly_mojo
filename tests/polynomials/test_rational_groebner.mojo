@@ -89,8 +89,10 @@ def agree(generators: List[SparsePoly[QQ]], order: MonomialOrder, name: String, 
     var chosen = groebner(generators, order, work)
     var exact = _grevlex_groebner_rational(generators, order, work, exact=True)
     var sparse = groebner(generators, order, work, track_cofactors=True)
+    var uncertified = groebner(generators, order, work, certify=False)
     c.check(chosen.basis == sparse.basis, name + ": reconstruction")
     c.check(exact == sparse.basis, name + ": exact computation")
+    c.check(uncertified.basis == sparse.basis, name + ": uncertified reconstruction")
     verify_basis(chosen, generators, c, work)
 
 

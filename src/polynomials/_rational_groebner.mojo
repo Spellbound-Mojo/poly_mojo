@@ -651,8 +651,12 @@ def _exact[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut budget: Bu
     return engine.finish(budget)
 
 
-def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ZZ, W]]]]:
-    """The certified reduced basis of homogeneous inputs, or None when reconstruction gives up."""
+def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify: Bool, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ZZ, W]]]]:
+    """The certified reduced basis of homogeneous inputs, or None when reconstruction gives up.
+
+    Without `certify`, the first candidate that agrees with the next image is
+    returned uncertified.
+    """
     # Leading coefficients, which an admissible prime must not divide.
     var leads = List[Integer]()
     for f in inputs:
@@ -710,7 +714,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut bud
         if candidate:
             if _agrees(kind, candidate.value(), basis, p, budget):
                 certifications += 1
-                if _certify(kind, inputs, candidate.value(), budget):
+                if not certify or _certify(kind, inputs, candidate.value(), budget):
                     return candidate.take()
                 if certifications >= _CERTIFY_LIMIT:
                     return None
@@ -731,7 +735,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut bud
 
 
 
-def _rational_basis[W: Int](generators: List[SparsePoly[QQ]], order: MonomialOrder, exact: Bool, mut budget: Budget) raises PolyError -> List[SparsePoly[QQ]]:
+def _rational_basis[W: Int](generators: List[SparsePoly[QQ]], order: MonomialOrder, exact: Bool, certify: Bool, mut budget: Budget) raises PolyError -> List[SparsePoly[QQ]]:
     var n = len(order.variables)
     var kind = order.kind
     # Primitive integer inputs, in the order's lanes; h, if needed, is lane n.
@@ -762,7 +766,7 @@ def _rational_basis[W: Int](generators: List[SparsePoly[QQ]], order: MonomialOrd
                 inputs[f][k].monomial = _packed(exponents)
     # By certified reconstruction, and exactly if that gives up.
     if not exact:
-        var modular = _multimodular[W](inputs, kind, budget)
+        var modular = _multimodular[W](inputs, kind, certify, budget)
         if modular:
             return _finish(modular.take(), homogeneous, n, order, budget)
     return _finish(_exact[W](inputs, kind, budget), homogeneous, n, order, budget)
@@ -813,12 +817,13 @@ def _grevlex_supported(order: MonomialOrder) -> Bool:
     return order.kind == MonomialOrder.GREVLEX and len(order.variables) + 1 <= 16
 
 
-def _grevlex_groebner_rational(generators: List[SparsePoly[QQ]], order: MonomialOrder, mut budget: Budget, exact: Bool = False) raises PolyError -> List[SparsePoly[QQ]]:
+def _grevlex_groebner_rational(generators: List[SparsePoly[QQ]], order: MonomialOrder, mut budget: Budget, exact: Bool = False, certify: Bool = True) raises PolyError -> List[SparsePoly[QQ]]:
     """The reduced monic basis over QQ under a supported GREVLEX order.
 
     By certified reconstruction unless `exact`, which tests use to exercise
-    the exact computation that reconstruction falls back on.
+    the exact computation that reconstruction falls back on. Without
+    `certify` the reconstruction is not certified.
     """
     if len(order.variables) + 1 <= 8:
-        return _rational_basis[8](generators, order, exact, budget)
-    return _rational_basis[16](generators, order, exact, budget)
+        return _rational_basis[8](generators, order, exact, certify, budget)
+    return _rational_basis[16](generators, order, exact, certify, budget)

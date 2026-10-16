@@ -51,6 +51,12 @@ Cofactor rows can be much larger than the basis. Set `witnesses=False` if you
 only need normal forms or Boolean membership. Witness extraction and basis
 checking then raise `DOMAIN`; they do not silently recompute the basis.
 
+Over rationals under `grevlex` without witnesses, the basis is reconstructed
+from modular images and then certified exactly, which is most of the work for
+large coefficients. `certify=False` skips the certificate: the result is still
+checked against one more modular image, so it is the reduced basis with high
+probability, but it is no longer proved.
+
 An empty, typed generator iterable represents the zero ideal. Zero generators
 are allowed, and a basis copy shares the prepared storage. All input preparation,
 computation, and output wrapping use the same budget. An exhausted budget
