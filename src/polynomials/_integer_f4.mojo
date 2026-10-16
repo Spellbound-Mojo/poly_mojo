@@ -55,7 +55,7 @@ comptime _IFMA_MIN = 12
 comptime _ADX = CompilationTarget._has_feature["adx"]() and CompilationTarget._has_feature["bmi2"]()
 """Whether the target has mulx, adcx and adox, for multiply-add chains in two carry flags."""
 
-comptime _ROWS = 8
+comptime _ROWS = 4
 """With mulx, adcx and adox, products whose longer factor has at least this many limbs go a row at a time."""
 
 comptime _PAD = 32
