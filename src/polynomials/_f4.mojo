@@ -467,7 +467,9 @@ struct _Step[W: Int](Copyable, Movable):
     pivots are then reduced by one another from the right; in the final
     matrix every row is a pivot and the first `basis` rows have their tails
     reduced. `supports` lists each result's columns, leading column first, in
-    the order the results come; the final matrix also keeps their monomials.
+    the order the results are inserted, which `inserted` gives as positions
+    in the order they come when it is not empty; the final matrix also keeps
+    their monomials.
     """
     var final: Bool
     var ncols: Int
@@ -478,6 +480,7 @@ struct _Step[W: Int](Copyable, Movable):
     var basis: Int
     var leads: List[Int32]
     var supports: List[List[Int32]]
+    var inserted: List[Int]
     var monomials: List[List[_Packed[Self.W]]]
 
     def __init__(out self, final: Bool, ncols: Int):
@@ -490,6 +493,7 @@ struct _Step[W: Int](Copyable, Movable):
         self.basis = 0
         self.leads = List[Int32]()
         self.supports = List[List[Int32]]()
+        self.inserted = List[Int]()
         self.monomials = List[List[_Packed[Self.W]]]()
 
     def keep(mut self, matrix: _Matrix[Self.W], r: Int, mut budget: Budget) raises PolyError:
@@ -516,13 +520,10 @@ struct _Trace[W: Int](Movable):
     var inputs: List[List[_Packed[Self.W]]]
     """Each element's monomials after the start, in increasing order."""
     var steps: List[_Step[Self.W]]
-    var usable: Bool
-    """False when the run inserted an element outside its matrices."""
 
     def __init__(out self):
         self.inputs = List[List[_Packed[Self.W]]]()
         self.steps = List[_Step[Self.W]]()
-        self.usable = True
 
 
 def _eliminate[W: Int](matrix: _Matrix[W], mut pivot: List[Int], reduce: List[Int], values: List[List[UInt32]], prime: UInt64, ring: Modulus, mut found: _Rows, mut kept: List[Int], mut budget: Budget) raises PolyError -> List[Int]:
@@ -602,8 +603,50 @@ def _supports(found: _Rows, rows: List[Int], mut budget: Budget) raises PolyErro
     return supports^
 
 
+def _insertion[W: Int](found: _Rows, results: List[Int], monomials: List[_Packed[W]], order: List[Int], mut budget: Budget) raises PolyError -> List[Int]:
+    """The order to insert a round's new elements in, as positions in `results`; empty for their own order, smallest leading monomial first.
+
+    Under an inhomogeneous run, a new element's leading monomial may be one
+    that a smaller new element's divides. Such elements go first, by
+    decreasing leading monomial: inserting the divisor then retires each from
+    the active elements and installs their pair, which a later matrix
+    reduces, so the whole run stays in its matrices.
+    """
+    _allocation[Bool](len(results), budget)
+    var divided = List[Bool](length=len(results), fill=False)
+    var some = False
+    for k in range(len(results)):
+        var lead = monomials[order[Int(found.columns[found.starts[results[k]]])]]
+        for j in range(k):
+            budget.charge(1)
+            if _divides(monomials[order[Int(found.columns[found.starts[results[j]]])]], lead):
+                divided[k] = True
+                some = True
+                break
+    var inserted = List[Int]()
+    if not some:
+        return inserted^
+    for k in range(len(results) - 1, -1, -1):
+        if divided[k]:
+            inserted.append(k)
+    for k in range(len(results)):
+        if not divided[k]:
+            inserted.append(k)
+    return inserted^
+
+
+def _inserted(results: List[Int], inserted: List[Int]) -> List[Int]:
+    """`results` in the recorded insertion order."""
+    if len(inserted) == 0:
+        return results.copy()
+    var permuted = List[Int](capacity=len(results))
+    for k in inserted:
+        permuted.append(results[k])
+    return permuted^
+
+
 def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _Store[W], prime: UInt64, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
-    """Run one F4 round on the pairs of least LCM degree; return the new elements, monic."""
+    """Run one F4 round on the pairs of least LCM degree; return the new elements, monic, in the order to insert them."""
     var degree = engine.pairs[0].lcm.degree
     var matrix = _Matrix[W]()
     # Both halves of every selected pair. A half is fixed by its element and
@@ -644,6 +687,8 @@ def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _
     var found = _Rows()
     var kept = List[Int]()
     var results = _eliminate(matrix, pivot, reduce, store.values, prime, ring, found, kept, budget)
+    var inserted = _insertion(found, results, matrix.columns.monomials, order, budget)
+    results = _inserted(results, inserted)
     comptime if record:
         # The replay keeps the pivots and the rows that gave new ones.
         var step = _Step[W](False, ncols)
@@ -654,8 +699,9 @@ def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _
             step.keep(matrix, kept[i], budget)
             step.leads.append(found.columns[found.starts[i]])
         step.supports = _supports(found, results, budget)
+        step.inserted = inserted^
         trace.steps.append(step^)
-    # The new elements, smallest leading monomial first, as increasing term lists.
+    # The new elements in the order to insert them, as increasing term lists.
     var fresh = List[List[_Term[ModInt, W]]]()
     for i in results:
         var n = found.starts[i + 1] - found.starts[i]
@@ -738,20 +784,6 @@ def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], 
         for k in range(len(fresh)):
             var p = List[_Term[ModInt, W]]()
             swap(p, fresh[k])
-            # An element found earlier in this round may divide this one's leading monomial.
-            var divided = False
-            for g in engine.active:
-                budget.charge(1)
-                if _divides(engine.leads[g], p[len(p) - 1].monomial):
-                    divided = True
-                    break
-            if divided:
-                # Reduced outside the matrices, so a replay could not follow.
-                trace.usable = False
-                engine.sort_active(budget)
-                p = engine.reduce_base(p^, engine.active, budget)
-                if len(p) == 0:
-                    continue
             engine.insert(p^, budget)
     store.extend(engine, budget)
     return _interreduce[W, record](engine, store, prime, ring, trace, budget)
@@ -846,7 +878,7 @@ def _f4_replay[W: Int](trace: _Trace[W], var generators: List[List[_Term[ModInt,
             for i in range(len(kept)):
                 if found.columns[found.starts[i]] != step.leads[i]:
                     return None
-            if not _replay_rows(found, results, step.supports, values, budget):
+            if not _replay_rows(found, _inserted(results, step.inserted), step.supports, values, budget):
                 return None
             continue
         _tails(matrix, step.basis, pivot, values, prime, found, budget)
@@ -1158,7 +1190,7 @@ def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_T
             var results = _eliminate_lanes(step, dense, pivot, values, found, lanes, budget)
             if lanes.live == 0:
                 return bases^
-            _replay_rows_lanes(found, results, step.supports, values, lanes, budget)
+            _replay_rows_lanes(found, _inserted(results, step.inserted), step.supports, values, lanes, budget)
             if lanes.live == 0:
                 return bases^
             continue

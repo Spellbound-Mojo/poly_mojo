@@ -713,7 +713,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
             continue
         var ring = Modulus(_prime_value=p)
         var replayed = Optional[List[List[_Term[ModInt, W]]]](None)
-        if learned and trace.usable:
+        if learned:
             if len(ahead_primes) > 0 and ahead_primes[0] == p:
                 replayed = ahead.pop(0)
                 _ = ahead_primes.pop(0)
