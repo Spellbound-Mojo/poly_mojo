@@ -628,12 +628,12 @@ def _add_mul_1[whole: Bool = False, extend: Bool = False](data: Pointer[mut=True
     var l = 0
     comptime if _ADX:
         if m >= _ROWS:
-            # Whole groups of four limbs in assembly, the value filled in first.
-            l = m & ~3
+            # In assembly, the value filled in first.
+            l = m
             comptime if extend:
                 for k in range(valid, l):
                     data.unsafe_offset(k).unsafe_store(fill)
-            carry = _adx_add_mul_4(data, f, other, l)
+            carry = _adx_add_mul(data, f, other, l)
     while l < m:
         var p = g * UInt128(other.unsafe_offset(l).unsafe_load())
         var low = UInt64(p & UInt128(UInt64.MAX))
@@ -660,11 +660,11 @@ def _sub_mul_1[whole: Bool = False, extend: Bool = False](data: Pointer[mut=True
     var l = 0
     comptime if _ADX:
         if m >= _ROWS:
-            l = m & ~3
+            l = m
             comptime if extend:
                 for k in range(valid, l):
                     data.unsafe_offset(k).unsafe_store(fill)
-            borrow = _adx_sub_mul_4(data, f, other, l)
+            borrow = _adx_sub_mul(data, f, other, l)
     while l < m:
         var p = g * UInt128(other.unsafe_offset(l).unsafe_load())
         var low = UInt64(p & UInt128(UInt64.MAX))
@@ -681,11 +681,12 @@ def _sub_mul_1[whole: Bool = False, extend: Bool = False](data: Pointer[mut=True
 
 
 @always_inline
-def _adx_add_mul_4(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int) -> UInt64:
-    """data[0:n] += f * other[0:n] for n a positive multiple of four; return the carry out, below 2^64.
+def _adx_add_mul(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int) -> UInt64:
+    """data[0:n] += f * other[0:n] for n >= 1; return the carry out, below 2^64.
 
     The products' high words go in by adcx (the carry flag) and the data by
     adox (the overflow flag): two carry chains that do not wait on each other.
+    The n mod 4 odd limbs go one at a time, the rest four at a time.
     """
     return inlined_assembly[
         """
@@ -693,45 +694,62 @@ def _adx_add_mul_4(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer
         mov $2, %rsi
         mov $3, %rcx
         mov $4, %rdx
-        lea (%rdi,%rcx,8), %rdi
-        lea (%rsi,%rcx,8), %rsi
-        neg %rcx
+        mov %rcx, %r11
+        shr $$2, %r11
+        and $$3, %rcx
         xor %r8d, %r8d
+        jrcxz 3f
         1:
-        mulx (%rsi,%rcx,8), %r9, %r10
+        mulx (%rsi), %r9, %r10
         adcx %r8, %r9
-        adox (%rdi,%rcx,8), %r9
-        mov %r9, (%rdi,%rcx,8)
-        mulx 8(%rsi,%rcx,8), %r9, %r8
-        adcx %r10, %r9
-        adox 8(%rdi,%rcx,8), %r9
-        mov %r9, 8(%rdi,%rcx,8)
-        mulx 16(%rsi,%rcx,8), %r9, %r10
-        adcx %r8, %r9
-        adox 16(%rdi,%rcx,8), %r9
-        mov %r9, 16(%rdi,%rcx,8)
-        mulx 24(%rsi,%rcx,8), %r9, %r8
-        adcx %r10, %r9
-        adox 24(%rdi,%rcx,8), %r9
-        mov %r9, 24(%rdi,%rcx,8)
-        lea 4(%rcx), %rcx
-        jrcxz 2f
+        adox (%rdi), %r9
+        mov %r9, (%rdi)
+        mov %r10, %r8
+        lea 8(%rsi), %rsi
+        lea 8(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 3f
         jmp 1b
+        3:
+        mov %r11, %rcx
+        jrcxz 4f
         2:
+        mulx (%rsi), %r9, %r10
+        adcx %r8, %r9
+        adox (%rdi), %r9
+        mov %r9, (%rdi)
+        mulx 8(%rsi), %r9, %r8
+        adcx %r10, %r9
+        adox 8(%rdi), %r9
+        mov %r9, 8(%rdi)
+        mulx 16(%rsi), %r9, %r10
+        adcx %r8, %r9
+        adox 16(%rdi), %r9
+        mov %r9, 16(%rdi)
+        mulx 24(%rsi), %r9, %r8
+        adcx %r10, %r9
+        adox 24(%rdi), %r9
+        mov %r9, 24(%rdi)
+        lea 32(%rsi), %rsi
+        lea 32(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 4f
+        jmp 2b
+        4:
         mov $$0, %r9
         adcx %r9, %r8
         adox %r9, %r8
         mov %r8, $0
         """,
         UInt64,
-        constraints="=&r,r,r,r,r,~{rdi},~{rsi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{memory},~{cc}",
+        constraints="=&r,r,r,r,r,~{rdi},~{rsi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{r11},~{memory},~{cc}",
     ](data, other, n, f)
 
 @always_inline
-def _adx_sub_mul_4(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int) -> UInt64:
-    """data[0:n] -= f * other[0:n] for n a positive multiple of four; return the borrow out.
+def _adx_sub_mul(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int) -> UInt64:
+    """data[0:n] -= f * other[0:n] for n >= 1; return the borrow out.
 
-    As `_adx_add_mul_4`, adding the complement of the product with the
+    As `_adx_add_mul`, adding the complement of the product with the
     overflow flag set first, so the overflow out is one minus the borrow.
     """
     return inlined_assembly[
@@ -740,37 +758,55 @@ def _adx_sub_mul_4(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer
         mov $2, %rsi
         mov $3, %rcx
         mov $4, %rdx
-        lea (%rdi,%rcx,8), %rdi
-        lea (%rsi,%rcx,8), %rsi
-        neg %rcx
+        mov %rcx, %r11
+        shr $$2, %r11
+        and $$3, %rcx
         mov $$0x7fffffffffffffff, %r8
         add $$1, %r8
         mov $$0, %r8
+        jrcxz 3f
         1:
-        mulx (%rsi,%rcx,8), %r9, %r10
+        mulx (%rsi), %r9, %r10
         adcx %r8, %r9
         not %r9
-        adox (%rdi,%rcx,8), %r9
-        mov %r9, (%rdi,%rcx,8)
-        mulx 8(%rsi,%rcx,8), %r9, %r8
-        adcx %r10, %r9
-        not %r9
-        adox 8(%rdi,%rcx,8), %r9
-        mov %r9, 8(%rdi,%rcx,8)
-        mulx 16(%rsi,%rcx,8), %r9, %r10
-        adcx %r8, %r9
-        not %r9
-        adox 16(%rdi,%rcx,8), %r9
-        mov %r9, 16(%rdi,%rcx,8)
-        mulx 24(%rsi,%rcx,8), %r9, %r8
-        adcx %r10, %r9
-        not %r9
-        adox 24(%rdi,%rcx,8), %r9
-        mov %r9, 24(%rdi,%rcx,8)
-        lea 4(%rcx), %rcx
-        jrcxz 2f
+        adox (%rdi), %r9
+        mov %r9, (%rdi)
+        mov %r10, %r8
+        lea 8(%rsi), %rsi
+        lea 8(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 3f
         jmp 1b
+        3:
+        mov %r11, %rcx
+        jrcxz 4f
         2:
+        mulx (%rsi), %r9, %r10
+        adcx %r8, %r9
+        not %r9
+        adox (%rdi), %r9
+        mov %r9, (%rdi)
+        mulx 8(%rsi), %r9, %r8
+        adcx %r10, %r9
+        not %r9
+        adox 8(%rdi), %r9
+        mov %r9, 8(%rdi)
+        mulx 16(%rsi), %r9, %r10
+        adcx %r8, %r9
+        not %r9
+        adox 16(%rdi), %r9
+        mov %r9, 16(%rdi)
+        mulx 24(%rsi), %r9, %r8
+        adcx %r10, %r9
+        not %r9
+        adox 24(%rdi), %r9
+        mov %r9, 24(%rdi)
+        lea 32(%rsi), %rsi
+        lea 32(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 4f
+        jmp 2b
+        4:
         mov $$0, %r9
         adcx %r9, %r8
         adox %r9, %r9
@@ -779,41 +815,18 @@ def _adx_sub_mul_4(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer
         mov %r8, $0
         """,
         UInt64,
-        constraints="=&r,r,r,r,r,~{rdi},~{rsi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{memory},~{cc}",
+        constraints="=&r,r,r,r,r,~{rdi},~{rsi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{r11},~{memory},~{cc}",
     ](data, other, n, f)
+
 
 @always_inline
 def _mul_row[subtract: Bool](data: Pointer[mut=True, UInt64, _], f: UInt64, b: Pointer[mut=False, UInt64, _], n: Int) -> UInt64:
-    """data[0:n] += f * b[0:n], or -= when `subtract`; return the carry or borrow out, below 2^64.
+    """data[0:n] += f * b[0:n], or -= when `subtract`, for n >= 1; return the carry or borrow out, below 2^64."""
+    comptime if subtract:
+        return _adx_sub_mul(data, f, b, n)
+    else:
+        return _adx_add_mul(data, f, b, n)
 
-    Whole groups of four limbs go through mulx, adcx and adox.
-    """
-    var q = n & ~3
-    var carry = UInt64(0)
-    if q > 0:
-        comptime if subtract:
-            carry = _adx_sub_mul_4(data, f, b, q)
-        else:
-            carry = _adx_add_mul_4(data, f, b, q)
-    var g = UInt128(f)
-    for l in range(q, n):
-        var p = g * UInt128(b.unsafe_offset(l).unsafe_load())
-        var low = UInt64(p & UInt128(UInt64.MAX))
-        var high = UInt64(p >> 64)
-        var e = data.unsafe_offset(l).unsafe_load()
-        comptime if subtract:
-            low += carry
-            high += UInt64(1) if low < carry else UInt64(0)
-            data.unsafe_offset(l).unsafe_store(e - low)
-            carry = high + (UInt64(1) if e < low else UInt64(0))
-        else:
-            low += e
-            high += UInt64(1) if low < e else UInt64(0)
-            low += carry
-            high += UInt64(1) if low < carry else UInt64(0)
-            data.unsafe_offset(l).unsafe_store(low)
-            carry = high
-    return carry
 
 def _rows[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int):
     """`_accumulate` with mulx, adcx and adox, a row per limb of a.
