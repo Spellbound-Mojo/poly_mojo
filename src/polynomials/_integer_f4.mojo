@@ -1,4 +1,4 @@
-"""Exact checks that S-polynomials reduce to zero, by F4 matrices over the integers.
+"""Exact reduction by F4 matrices over the integers: zero-reduction checks and tails.
 
 Certifying a reconstructed basis G (see `_rational_groebner`) needs every
 S-pair the Gebauer–Möller criteria keep to reduce to zero modulo G, exactly.
@@ -16,6 +16,10 @@ no leading monomial divides is a nonzero remainder, since later reducers
 touch only later columns. Reducing to zero by some choice of reducers gives a
 standard representation, which is all Buchberger's criterion needs.
 
+The same rows reduce the tails of a Gröbner basis by one another, for the
+reduced basis of the dehomogenized ideal: there an entry in a column no
+leading monomial divides is part of the result.
+
 Row entries are fixed-width two's complement integers in 64-bit limbs,
 widened when a bound on their size requires it, so a reduction step is an
 in-place multiply-subtract with no allocation.
@@ -26,7 +30,7 @@ from apn_mojo import Integer, div_rem_trunc, gcd as integer_gcd
 from .coefficients import ZZ
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product
 from ._f4 import _Matrix, _Store
-from ._packed_groebner import _Engine, _div
+from ._packed_groebner import _Engine, _Packed, _Term, _div
 
 comptime _SLACK = 16
 """Bits of growth a widened row leaves room for before it is measured again."""
@@ -343,10 +347,14 @@ struct _Row(Movable):
 def _multiply(result: Pointer[mut=True, UInt64, _], a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int):
     """result[0 : na + nb] = a[0:na] * b[0:nb], magnitudes in 64-bit limbs.
 
-    A short factor goes row by row. Otherwise each output limb sums its
-    column of products first, in a 192-bit accumulator: the products of a
-    column are independent, so they do not wait on one another's carries.
+    With a short factor, either one, the product goes row by row, one row
+    per limb of the short factor. Otherwise each output limb sums its column
+    of products first, in a 192-bit accumulator: the products of a column are
+    independent, so they do not wait on one another's carries.
     """
+    if nb <= 2 and na > nb:
+        _multiply(result, b, nb, a, na)
+        return
     if na <= 2:
         for l in range(na + nb):
             result.unsafe_offset(l).unsafe_store(0)
@@ -471,46 +479,104 @@ def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coeffi
         var q = pivot[c]
         if q < 0:
             return False
-        var g = matrix.sources[q]
-        var d = coefficients.words[g]
-        if d != 0:
-            # A word-sized leading coefficient: divide in limbs.
-            var negative = row.negative(c)
-            var f = row.magnitude(c)
-            budget.charge(UInt64(2 * len(f)))
-            var r = _remainder(f, d)
-            if r == 0:
-                _divide(f, d)
-            else:
-                var common = _word_gcd(d, r)
-                var s: List[UInt64] = [d // common]
-                _divide(f, common)
-                row.room_for_scale(_bits(s), budget)
-                budget.charge(UInt64(_product(row.ncols - c, row.width)))
-                row.scale(c, s, _bits(s))
-            _load(row, matrix, coefficients, q, f, negative, True, budget)
-            row.set_zero(c)
-            continue
-        var v = row.value(c)
-        var factor: Integer
-        try:
-            var qr = div_rem_trunc(v, coefficients.leads[g])
-            if qr[1].sign() == 0:
-                factor = qr[0].copy()
-            else:
-                # Leading coefficients are positive, so the scale is.
-                var common = integer_gcd(coefficients.leads[g], v)
-                var s = _limbs_of(div_rem_trunc(coefficients.leads[g], common)[0])
-                factor = div_rem_trunc(v, common)[0].copy()
-                row.room_for_scale(_bits(s), budget)
-                budget.charge(UInt64(_product(row.ncols - c, row.width * len(s))))
-                row.scale(c, s, _bits(s))
-        except e:
-            raise PolyError(PolyErrorKind.CAPACITY, String(e))
-        # The entry is v * scale = factor * d, cancelled by factor times the reducer.
-        _load(row, matrix, coefficients, q, _limbs_of(factor), factor.sign() < 0, True, budget)
-        row.set_zero(c)
+        _cancel(row, matrix, coefficients, c, q, c, budget)
     return True
+
+
+def _cancel[W: Int](mut row: _Row, matrix: _Matrix[W], coefficients: _Coefficients, c: Int, q: Int, first: Int, mut budget: Budget) raises PolyError:
+    """Make entry c zero with matrix row q, which leads in column c.
+
+    The row is scaled first, from column `first` on, when the leading
+    coefficient d of row q does not divide the entry v: by d / gcd(d, v),
+    which is positive since leading coefficients are.
+    """
+    var g = matrix.sources[q]
+    var d = coefficients.words[g]
+    if d != 0:
+        # A word-sized leading coefficient: divide in limbs.
+        var negative = row.negative(c)
+        var f = row.magnitude(c)
+        budget.charge(UInt64(2 * len(f)))
+        var r = _remainder(f, d)
+        if r == 0:
+            _divide(f, d)
+        else:
+            var common = _word_gcd(d, r)
+            var s: List[UInt64] = [d // common]
+            _divide(f, common)
+            row.room_for_scale(_bits(s), budget)
+            budget.charge(UInt64(_product(row.ncols - first, row.width)))
+            row.scale(first, s, _bits(s))
+        _load(row, matrix, coefficients, q, f, negative, True, budget)
+        row.set_zero(c)
+        return
+    var v = row.value(c)
+    var factor: Integer
+    try:
+        var qr = div_rem_trunc(v, coefficients.leads[g])
+        if qr[1].sign() == 0:
+            factor = qr[0].copy()
+        else:
+            var common = integer_gcd(coefficients.leads[g], v)
+            var s = _limbs_of(div_rem_trunc(coefficients.leads[g], common)[0])
+            factor = div_rem_trunc(v, common)[0].copy()
+            row.room_for_scale(_bits(s), budget)
+            budget.charge(UInt64(_product(row.ncols - first, row.width * len(s))))
+            row.scale(first, s, _bits(s))
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    # The entry is v * scale = factor * d, cancelled by factor times the reducer.
+    _load(row, matrix, coefficients, q, _limbs_of(factor), factor.sign() < 0, True, budget)
+    row.set_zero(c)
+
+
+def _reduced_tails[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget) raises PolyError -> List[List[_Term[ZZ, W]]]:
+    """The active elements with their tails reduced by one another, in decreasing leading-monomial order.
+
+    The active elements must form a Gröbner basis with positive leading
+    coefficients and mutually nondividing leading monomials, so the reduced
+    tails are their normal forms. Each element is one row, a multiple of
+    itself; entries in columns no leading monomial divides stay.
+    """
+    engine.sort_active(budget)
+    var store = _Store[W]()
+    store.extend(engine, budget)
+    var coefficients = _Coefficients(engine, budget)
+    var matrix = _Matrix[W]()
+    var one = _Packed[W](SIMD[DType.uint32, W](0), 0, 0)
+    for position in range(len(engine.active) - 1, -1, -1):
+        matrix.add_row(engine, store, engine.active[position], one, budget)
+    var basis_rows = len(matrix.sources)
+    matrix.preprocess(engine, store, budget)
+    var order = matrix.number(engine.kind, budget)
+    var ncols = len(order)
+    var nrows = len(matrix.sources)
+    _allocation[Int](ncols, budget)
+    var pivot = List[Int](length=ncols, fill=-1)
+    for r in range(nrows - 1, -1, -1):
+        pivot[Int(matrix.entries[matrix.starts[r]])] = r
+    var row = _Row(ncols)
+    var unit: List[UInt64] = [1]
+    var result = List[List[_Term[ZZ, W]]](capacity=basis_rows)
+    for r in range(basis_rows):
+        row.prepare(coefficients.bits[matrix.sources[r]] + 1, budget)
+        _load(row, matrix, coefficients, r, unit, False, False, budget)
+        var first = Int(matrix.entries[matrix.starts[r]])
+        for c in range(first + 1, ncols):
+            budget.charge(UInt64(row.width))
+            if row.is_zero(c) or pivot[c] < 0:
+                continue
+            _cancel(row, matrix, coefficients, c, pivot[c], first, budget)
+        # The remaining entries, as an increasing term list; the row is zero again after.
+        var terms = List[_Term[ZZ, W]]()
+        for c in range(ncols - 1, first - 1, -1):
+            if row.is_zero(c):
+                continue
+            _allocation[_Term[ZZ, W]](1, budget)
+            terms.append(_Term[ZZ, W](matrix.columns.monomials[order[c]], ZZ(row.value(c))))
+            row.set_zero(c)
+        result.append(terms^)
+    return result^
 
 
 def _load[W: Int](mut row: _Row, matrix: _Matrix[W], coefficients: _Coefficients, r: Int, factor: List[UInt64], negative: Bool, subtract: Bool, mut budget: Budget) raises PolyError:

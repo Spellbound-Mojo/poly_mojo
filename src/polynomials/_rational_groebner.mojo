@@ -51,7 +51,7 @@ from .primes import _residue
 from ._images import _denominator, _scaled_integer
 from ._packed_groebner import _Buckets, _Engine, _Packed, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
 from ._f4 import _Trace, _f4_learn, _f4_replay
-from ._integer_f4 import _pairs_reduce_to_zero
+from ._integer_f4 import _pairs_reduce_to_zero, _reduced_tails
 
 comptime _PRIME_LIMIT = 4096
 """Primes tried before giving up on reconstruction."""
@@ -59,6 +59,8 @@ comptime _CERTIFY_LIMIT = 4
 """Certification attempts before giving up."""
 comptime _MISMATCH_LIMIT = 3
 """Consecutive images with other leading monomials before they replace the first."""
+comptime _PROBES = 16
+"""Elements whose least coefficient is tried before a full reconstruction."""
 comptime _BATCH = 32
 """Primes whose residues are combined in word arithmetic before joining the accumulated values."""
 
@@ -134,6 +136,34 @@ def _reconstruct(value: Integer, modulus: Integer, bound: Integer, mut budget: B
         return Rational(a^, b^)
     except e:
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+@always_inline
+def _quotient(w: UInt64, p: UInt64) -> UInt64:
+    """floor(w * 2^64 / p), for products by w modulo p."""
+    return UInt64((UInt128(w) << 64) // UInt128(p))
+
+
+@always_inline
+def _times(x: UInt64, w: UInt64, quotient: UInt64, p: UInt64) -> UInt64:
+    """x * w modulo p by the precomputed quotient, for x, w < p < 2^62."""
+    var r = x * w - UInt64((UInt128(x) * UInt128(quotient)) >> 64) * p
+    return r - p if r >= p else r
+
+
+struct _Garner(Movable):
+    """For a batch of primes p_0, p_1, ...: p_i modulo p_j for i < j, the
+    inverse modulo p_j of p_0 ... p_(j-1), and their precomputed quotients."""
+    var factors: List[UInt64]
+    var quotients: List[UInt64]
+    var inverses: List[UInt64]
+    var inverse_quotients: List[UInt64]
+
+    def __init__(out self, b: Int):
+        self.factors = List[UInt64](length=b * b, fill=0)
+        self.quotients = List[UInt64](length=b * b, fill=0)
+        self.inverses = List[UInt64](length=b, fill=1)
+        self.inverse_quotients = List[UInt64](length=b, fill=0)
 
 
 struct _Images[W: Int](Movable):
@@ -272,24 +302,29 @@ struct _Images[W: Int](Movable):
                 raise PolyError(PolyErrorKind.CAPACITY, String(e))
         return q^
 
-    def _garner_inverses(self, mut budget: Budget) raises PolyError -> List[UInt64]:
-        """For each batch prime, the inverse modulo it of the product of the primes before it."""
+    def _garner_tables(self, mut budget: Budget) raises PolyError -> _Garner:
         var b = len(self.batch)
-        var inverses = List[UInt64](length=b, fill=1)
-        for j in range(1, b):
+        _allocation[UInt64](2 * b * b + 2 * b, budget)
+        var tables = _Garner(b)
+        for j in range(b):
             var prime = self.batch[j]
             var product = UInt64(1)
             for i in range(j):
                 budget.charge(1)
-                product = (product * (self.batch[i] % prime)) % prime
-            inverses[j] = ModInt(product, Modulus(_prime_value=prime)).inverse(budget).value
-        return inverses^
+                var factor = self.batch[i] % prime
+                tables.factors[j * b + i] = factor
+                tables.quotients[j * b + i] = _quotient(factor, prime)
+                product = (product * factor) % prime
+            var inverse = ModInt(product, Modulus(_prime_value=prime)).inverse(budget).value
+            tables.inverses[j] = inverse
+            tables.inverse_quotients[j] = _quotient(inverse, prime)
+        return tables^
 
-    def _garner(self, e: Int, k: Int, inverses: List[UInt64], mut budget: Budget) raises PolyError -> Integer:
+    def _garner(self, e: Int, k: Int, tables: _Garner, mut budget: Budget) raises PolyError -> Integer:
         """The waiting residues of coefficient k of element e, combined modulo the batch's product.
 
         The mixed-radix digits d_j, with value d_0 + p_0 (d_1 + p_1 (d_2 + ...)),
-        need only word arithmetic: every product is below 2^62.
+        need only word arithmetic, with products by precomputed quotients.
         """
         var b = len(self.batch)
         budget.charge(UInt64(b * b))
@@ -298,9 +333,13 @@ struct _Images[W: Int](Movable):
             var prime = self.batch[j]
             var known = UInt64(0)
             for i in range(j - 1, -1, -1):
-                known = (known * (self.batch[i] % prime) + digits[i]) % prime
-            var residue = UInt64(self.residues[e][k * _BATCH + j])
-            digits[j] = ((residue + prime - known) % prime) * inverses[j] % prime
+                known = _times(known, tables.factors.unsafe_get(j * b + i), tables.quotients.unsafe_get(j * b + i), prime) + digits.unsafe_get(i)
+                if known >= prime:
+                    known -= prime
+            var difference = UInt64(self.residues[e][k * _BATCH + j]) + prime - known
+            if difference >= prime:
+                difference -= prime
+            digits[j] = _times(difference, tables.inverses[j], tables.inverse_quotients[j], prime)
         # Horner in 64-bit limbs, least significant first.
         var limbs = List[UInt64](length=b // 2 + 2, fill=0)
         limbs[0] = digits[b - 1]
@@ -341,12 +380,16 @@ struct _Images[W: Int](Movable):
         if len(self.batch) == 0:
             return
         var q = self._batch_modulus(budget)
-        var inverses = self._garner_inverses(budget)
-        var inverse = self._inverse(q)
+        var tables = self._garner_tables(budget)
+        var first = self.modulus == Integer(1)
+        var inverse = Integer(1) if first else self._inverse(q)
         for e in range(len(self.values)):
             for k in range(len(self.values[e])):
-                var waiting = self._garner(e, k, inverses, budget)
-                self.values[e][k] = self._joined(self.values[e][k], waiting, q, inverse, budget)
+                var waiting = self._garner(e, k, tables, budget)
+                if first:
+                    self.values[e][k] = waiting^
+                else:
+                    self.values[e][k] = self._joined(self.values[e][k], waiting, q, inverse, budget)
             for i in range(len(self.residues[e])):
                 self.residues[e][i] = 0
         try:
@@ -355,16 +398,16 @@ struct _Images[W: Int](Movable):
             raise PolyError(PolyErrorKind.CAPACITY, String(e))
         self.batch.clear()
 
-    def _probe_ready(self, mut budget: Budget) raises PolyError -> Bool:
-        """Whether the probe coefficient, with the waiting residues, has a small enough fraction."""
-        var pe = self.probe[0]
-        var pk = self.probe[1]
-        if pe >= len(self.values) or pk >= len(self.values[pe]):
-            return True
+    def _probe_ready(mut self, mut budget: Budget) raises PolyError -> Bool:
+        """Whether some probe coefficients, with the waiting residues, have small enough fractions.
+
+        The probes are the coefficient that failed last time and the least
+        term of a spread of elements; one that fails becomes the next probe.
+        """
+        var waiting = len(self.batch) > 0
         var q = self._batch_modulus(budget)
-        var value = self.values[pe][pk].copy()
-        if len(self.batch):
-            value = self._joined(value, self._garner(pe, pk, self._garner_inverses(budget), budget), q, self._inverse(q), budget)
+        var tables = self._garner_tables(budget)
+        var inverse = self._inverse(q) if waiting else Integer(1)
         var total: Integer
         var bound: Integer
         try:
@@ -372,14 +415,27 @@ struct _Images[W: Int](Movable):
             bound = isqrt(total // 2)
         except e:
             raise PolyError(PolyErrorKind.CAPACITY, String(e))
-        return Bool(_reconstruct(value, total, bound, budget))
+        var probes: List[Tuple[Int, Int]] = [self.probe]
+        for e in range(0, len(self.values), max(1, len(self.values) // _PROBES)):
+            probes.append((e, 0))
+        for probe in probes:
+            var pe = probe[0]
+            var pk = probe[1]
+            if pe >= len(self.values) or pk >= len(self.values[pe]):
+                continue
+            var value = self.values[pe][pk].copy()
+            if waiting:
+                value = self._joined(value, self._garner(pe, pk, tables, budget), q, inverse, budget)
+            if not _reconstruct(value, total, bound, budget):
+                self.probe = (pe, pk)
+                return False
+        return True
 
-    def reconstruct(mut self, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[QQ, Self.W]]]]:
-        """Every coefficient as a fraction, or None when one has no small enough fraction yet.
+    def reconstruct(mut self, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ZZ, Self.W]]]]:
+        """Every element, as fractions, times the least common denominator of its coefficients; None when a coefficient has no small enough fraction yet.
 
-        The coefficient that failed last time is tried first, so an attempt
-        that is still too early costs one reconstruction and leaves the batch
-        waiting.
+        Probe coefficients are tried first, so an attempt that is still too
+        early costs a few reconstructions and leaves the batch waiting.
         """
         if not self._probe_ready(budget):
             return None
@@ -394,12 +450,16 @@ struct _Images[W: Int](Movable):
             half = self.modulus // 2
         except e:
             raise PolyError(PolyErrorKind.CAPACITY, String(e))
-        var result = List[List[_Term[QQ, Self.W]]](capacity=len(self.leads))
+        var result = List[List[_Term[ZZ, Self.W]]](capacity=len(self.leads))
         for e in range(len(self.leads)):
             # A running common denominator: a coefficient whose value times it
-            # is small needs no Euclidean reconstruction of its own.
+            # is small needs no Euclidean reconstruction of its own. Each
+            # numerator is over the denominator of its time; `changes` marks
+            # where the denominator grew, and to what.
             var denominator = Integer(1)
-            var terms = List[_Term[QQ, Self.W]]()
+            var numerators = List[Integer](capacity=len(self.monomials[e]))
+            var changes = List[Int]()
+            var denominators = List[Integer]()
             for k in range(len(self.monomials[e])):
                 budget.charge(1)
                 _work(self.modulus.magnitude_bit_length() // 8 + 1, denominator.magnitude_bit_length() // 8 + 1, True, budget)
@@ -424,25 +484,47 @@ struct _Images[W: Int](Movable):
                         self.probe = (e, k)
                         return None
                     numerator = f.numerator().copy()
-                if numerator.sign() != 0:
-                    var value: Rational
+                    changes.append(k)
+                    denominators.append(denominator.copy())
+                numerators.append(numerator^)
+            # Over the final denominator: numerators before a change lack the
+            # factors that came later.
+            _allocation[_Term[ZZ, Self.W]](len(numerators), budget)
+            var terms = List[_Term[ZZ, Self.W]](capacity=len(numerators))
+            var segment = -1
+            var factor = Integer(1)
+            for k in range(len(numerators)):
+                budget.charge(1)
+                if segment + 1 < len(changes) and changes[segment + 1] == k:
+                    segment += 1
                     try:
-                        value = Rational(numerator^, denominator.copy())
+                        factor = denominator // denominators[segment]
                     except err:
                         raise PolyError(PolyErrorKind.CAPACITY, String(err))
-                    _allocation[_Term[QQ, Self.W]](1, budget)
-                    terms.append(_Term[QQ, Self.W](self.monomials[e][k], QQ(value^)))
+                elif segment < 0 and k == 0:
+                    factor = denominator.copy()
+                if numerators[k].sign() == 0:
+                    continue
+                var value: Integer
+                try:
+                    value = numerators[k] * factor
+                except err:
+                    raise PolyError(PolyErrorKind.CAPACITY, String(err))
+                terms.append(_Term[ZZ, Self.W](self.monomials[e][k], ZZ(value^)))
             result.append(terms^)
         return result^
 
 
-def _agrees[W: Int](kind: UInt8, candidate: List[List[_Term[QQ, W]]], basis: List[List[_Term[ModInt, W]]], p: UInt64, mut budget: Budget) raises PolyError -> Bool:
-    """Whether the candidate reduces modulo p to the image, coefficient by coefficient."""
+def _agrees[W: Int](kind: UInt8, candidate: List[List[_Term[ZZ, W]]], basis: List[List[_Term[ModInt, W]]], p: UInt64, mut budget: Budget) raises PolyError -> Bool:
+    """Whether the integral candidate is, modulo p, its leading coefficient times the monic image, coefficient by coefficient."""
     if len(candidate) != len(basis):
         return False
     for e in range(len(basis)):
         ref c = candidate[e]
         ref image = basis[e]
+        var lead = _residue(c[len(c) - 1].coefficient.value, p, budget)
+        if lead == 0:
+            return False
         var i = 0
         var j = 0
         while i < len(c) or j < len(image):
@@ -460,12 +542,7 @@ def _agrees[W: Int](kind: UInt8, candidate: List[List[_Term[QQ, W]]], basis: Lis
             if comparison == 0:
                 residue = image[j].coefficient.value
                 j += 1
-            ref fraction = c[i].coefficient.value
-            var numerator = _residue(fraction.numerator(), p, budget)
-            var denominator = _residue(fraction.denominator(), p, budget)
-            if denominator == 0:
-                return False
-            if numerator != UInt64((UInt128(denominator) * UInt128(residue)) % UInt128(p)):
+            if _residue(c[i].coefficient.value, p, budget) != UInt64((UInt128(lead) * UInt128(residue)) % UInt128(p)):
                 return False
             i += 1
     return True
@@ -569,7 +646,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut bud
     for f in inputs:
         leads.append(f[len(f) - 1].coefficient.value.copy())
     var images = _Images[W](kind)
-    var candidate = Optional[List[List[_Term[QQ, W]]]](None)
+    var candidate = Optional[List[List[_Term[ZZ, W]]]](None)
     var mismatches = 0
     var certifications = 0
     var attempt = 1
@@ -621,11 +698,8 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut bud
         if candidate:
             if _agrees(kind, candidate.value(), basis, p, budget):
                 certifications += 1
-                var proposal = List[List[_Term[ZZ, W]]]()
-                for g in candidate.value():
-                    proposal.append(_integral(g, budget))
-                if _certify(kind, inputs, proposal, budget):
-                    return proposal^
+                if _certify(kind, inputs, candidate.value(), budget):
+                    return candidate.take()
                 if certifications >= _CERTIFY_LIMIT:
                     return None
                 # The images may follow an unlucky recorded run: record anew,
@@ -715,7 +789,7 @@ def _finish[W: Int](var basis: List[List[_Term[ZZ, W]]], homogeneous: Bool, n: I
         engine.leads.append(lead)
         engine.active.append(len(engine.polys))
         engine.polys.append(_copy(basis[e], budget))
-    var reduced = engine.finish(budget)
+    var reduced = _reduced_tails(engine, budget)
     for p in reduced:
         budget.charge(1)
         result.append(_monic(p, order, by_index, budget))
