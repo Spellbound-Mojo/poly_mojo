@@ -1058,6 +1058,7 @@ def _pairs_reduce_to_zero[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: 
     var routes = _pair_routes(engine, budget, _PAIR_PRIMES)
     comptime if _CERT_STATS:
         print("CERT pass_ms", routes.counts[0] // 1000000, "prove_ms", routes.counts[1] // 1000000, "attempts", routes.counts[2], "fractions", routes.counts[3], "slots combined", routes.counts[4], "fraction_ms", routes.counts[5] // 1000000)
+        print("CERT modular units", routes.counts[6], "ns", routes.counts[7], "exact units", routes.counts[8], "ns", routes.counts[9])
         print("CERT pairs", routes.modular + routes.exact, "modular", routes.modular, "exact", routes.exact, "primes/modular pair", Float64(routes.primes) / Float64(max(routes.modular, 1)))
     return routes.zero
 
@@ -1086,7 +1087,7 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
     store.extend(engine, budget)
     var coefficients = _Coefficients(engine, budget)
     var images = _PairPrimes(coefficients, primes, budget)
-    var counts = List[Int](length=6, fill=0)
+    var counts = List[Int](length=10, fill=0)
     # With `_CERT_STATS`: nanoseconds in passes and in proofs, attempts, fractions, slots combined.
     var quotient = List[UInt64]()
     var modular = 0
@@ -1111,24 +1112,70 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
             pivot[Int(matrix.entries[matrix.starts[r]])] = r
         var row = _Row(ncols)
         var lanes = _LaneRow(ncols, budget)
-        # Once most of a degree's pairs need the exact check, its other pairs go there directly.
+        # Costs of this degree's long pairs, those reaching `_LONG` primes, in
+        # nanoseconds: a few, and then one in `_EVERY`, are also checked
+        # exactly, which compares the routes on the same pairs. A modular
+        # attempt stops once it costs as much as an average exact check; the
+        # degree turns to the exact check alone once most attempts fail, or
+        # once the sampled pairs cost more than `_RATIO` percent modularly,
+        # counting the exact checks of those the modular route left.
         var tried = 0
         var failed = 0
-        # The primes the last pair needed: the next attempts start a batch below.
+        var sampled = 0
+        var sample_modular = 0
+        var sample_exact = 0
         var hint = 0
+        var degree_start = Int(perf_counter_ns())
+        var degree_exact = 0
         for a in halves:
-            if images.limit > 0 and (failed < _GIVE_UP or 2 * failed <= tried):
+            var cheaper = sampled < _TIMED or 100 * sample_modular <= _RATIO * sample_exact
+            var exactly = True
+            var attempted = False
+            var spent = 0
+            var k = 0
+            if images.limit > 0 and cheaper and (failed < _GIVE_UP or 2 * failed <= tried):
                 tried += 1
-                var k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, max(_FIRST_PRIMES, hint - _LANES), counts, budget)
+                attempted = True
+                var allowance = 0
+                if sampled > 0:
+                    allowance = sample_exact // sampled
+                var setup = images.setup
+                var before = budget.remaining()
+                var t0 = Int(perf_counter_ns())
+                # The primes the last pair needed: attempts start a batch below.
+                k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, max(_FIRST_PRIMES, hint - _LANES), allowance, counts, budget)
+                spent = _weighted(Int(before - budget.remaining()) - (images.setup - setup))
+                comptime if _CERT_STATS:
+                    counts[6] += Int(before - budget.remaining()) - (images.setup - setup)
+                    counts[7] += Int(perf_counter_ns()) - t0
                 if k > 0:
                     modular += 1
                     used += k
                     hint = k
-                    continue
-                failed += 1
-            exact += 1
+                    exactly = False
+                else:
+                    failed += 1
+            var sample = attempted and (k == 0 or k >= _LONG) and (sampled < _TIMED or tried % _EVERY == 0)
+            if not exactly and not sample:
+                continue
+            if exactly:
+                exact += 1
+            var before = budget.remaining()
+            var t = Int(perf_counter_ns())
             if not _reduces(row, matrix, pivot, coefficients, a, quotient, budget):
                 return _Routes(False, modular, exact, used, counts.copy())
+            var e = Int(before - budget.remaining())
+            comptime if _CERT_STATS:
+                counts[8] += e
+                counts[9] += Int(perf_counter_ns()) - t
+                degree_exact += Int(perf_counter_ns()) - t
+            if sample:
+                sampled += 1
+                sample_exact += e
+                # The modular route's cost: its attempt, and the exact check after a failure.
+                sample_modular += spent + (e if exactly else 0)
+        comptime if _CERT_STATS:
+            print("DEG", degree, "pairs", len(halves), "tried", tried, "failed", failed, "sampled", sampled, sample_modular, sample_exact, "exact_ms", degree_exact // 1000000, "total_ms", (Int(perf_counter_ns()) - degree_start) // 1000000)
     return _Routes(True, modular, exact, used, counts.copy())
 
 
@@ -1363,8 +1410,28 @@ comptime _FIRST_PRIMES = _LANES
 comptime _GIVE_UP = 4
 """Pairs of a degree that must fail modularly, and be most of those tried, before the rest skip the modular attempt."""
 
+comptime _TIMED = 3
+"""Long pairs a degree samples before comparing the routes' costs."""
+
+comptime _RATIO = 75
+"""Percent of the exact cost above which a degree leaves the modular route."""
+
+comptime _LONG = 48
+"""Primes from which a pair counts as long, and may be sampled (see `_pair_routes`)."""
+
+comptime _EVERY = 32
+"""After the first `_TIMED`, one long pair in this many is sampled."""
+
+comptime _WEIGHT = 100
+"""Percent: what a budget unit of the modular route costs against one of the exact check."""
+
 comptime _CERT_STATS = False
 """Whether certification prints how many pairs each route proved."""
+
+
+def _weighted(units: Int) -> Int:
+    """Budget units of the modular route in exact-route units (`_WEIGHT`)."""
+    return units * _WEIGHT // 100
 
 
 def _remainder_of(limbs: Pointer[mut=False, UInt64, _], n: Int, d: UInt64) -> UInt64:
@@ -1495,6 +1562,8 @@ struct _PairPrimes(Movable):
     """Per batch, each element's leading coefficient inverse, `_LANES` per element."""
     var bases: List[_Basis]
     """The CRT basis of the first `_LANES` * (i + 1) primes."""
+    var setup: Int
+    """Budget units charged preparing batches and bases, left out of the routes' costs."""
 
     def __init__(out self, coefficients: _Coefficients, limit: Int, mut budget: Budget) raises PolyError:
         self.limit = (limit // _LANES) * _LANES
@@ -1503,6 +1572,7 @@ struct _PairPrimes(Movable):
         self.values = List[List[List[UInt32]]]()
         self.inverses = List[List[UInt64]]()
         self.bases = List[_Basis]()
+        self.setup = 0
         var candidate = UInt64(1) << 31
         while len(self.primes) < self.limit:
             candidate -= 1
@@ -1519,6 +1589,9 @@ struct _PairPrimes(Movable):
 
     def ensure(mut self, batch: Int, coefficients: _Coefficients, mut budget: Budget) raises PolyError:
         """Prepare the residues of batches up to `batch`."""
+        if len(self.batches) > batch:
+            return
+        var start = budget.remaining()
         while len(self.batches) <= batch:
             var b = len(self.batches)
             var rings = List[Modulus]()
@@ -1548,11 +1621,14 @@ struct _PairPrimes(Movable):
             self.batches.append(lanes^)
             self.values.append(values^)
             self.inverses.append(inverses^)
+        self.setup += Int(start - budget.remaining())
 
     def basis(mut self, attempt: Int, mut budget: Budget) raises PolyError:
         """Prepare the CRT basis of attempt `attempt`."""
+        var start = budget.remaining()
         while len(self.bases) <= attempt:
             self.bases.append(_Basis(self.primes, _LANES * (len(self.bases) + 1), budget))
+        self.setup += Int(start - budget.remaining())
 
 
 struct _LaneRow(Movable):
@@ -1568,9 +1644,9 @@ struct _LaneRow(Movable):
     """Per slot, `limit` residues of the entry the reducer met, prime by prime."""
 
     def __init__(out self, ncols: Int, mut budget: Budget) raises PolyError:
-        _allocation[UInt64](_product(_LANES + 1, ncols), budget)
+        _allocation[UInt64](_product(2 * _LANES + 1, ncols), budget)
         self.ncols = ncols
-        self.data = List[UInt64](length=_LANES * ncols, fill=0)
+        self.data = List[UInt64](length=2 * _LANES * ncols, fill=0)
         self.marks = List[UInt64](length=ncols // 64 + 1, fill=0)
         self.slot = List[Int](length=ncols, fill=-1)
         self.columns = List[Int]()
@@ -1592,13 +1668,14 @@ struct _LaneRow(Movable):
             word = self.marks.unsafe_get(w)
         return min(64 * w + Int(count_trailing_zeros(word)), self.ncols)
 
-    def clear(mut self):
-        """Zero every marked column and forget the slots."""
+    def clear(mut self, stride: Int):
+        """Zero every marked column, `stride` lanes apart, and forget the slots."""
         for w in range(len(self.marks)):
             var word = self.marks.unsafe_get(w)
             while word != 0:
                 var c = 64 * w + Int(count_trailing_zeros(word))
-                self.data.unsafe_ptr().unsafe_offset(_LANES * c).unsafe_store[width=_LANES](_Lanes(0))
+                for l in range(0, stride, _LANES):
+                    self.data.unsafe_ptr().unsafe_offset(stride * c + l).unsafe_store[width=_LANES](_Lanes(0))
                 word &= word - 1
             self.marks.unsafe_get(w) = 0
         for c in self.columns:
@@ -1617,6 +1694,79 @@ struct _LaneRow(Movable):
             at.unsafe_store[width=_LANES](x.ge(squares).select(x - squares, x))
             var word = marks.unsafe_offset(c >> 6)
             word.unsafe_store(word.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
+
+
+def _lane_pass_two[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], values: List[List[UInt32]], others: List[List[UInt32]], primes: _Primes, more: _Primes, a: Int, batch: Int, limit: Int, mut budget: Budget) raises PolyError -> Bool:
+    """As `_lane_pass` for batches `batch` and `batch` + 1 in one sweep, two `_LANES` apart in each column."""
+    comptime S = 2 * _LANES
+    var data = lanes.data.unsafe_ptr()
+    var marks = lanes.marks.unsafe_ptr()
+    var b = a + 1
+    var first = Int(matrix.entries[matrix.starts[a]])
+    for half in range(2):
+        var r = a + half
+        var s = matrix.starts[r]
+        var n = matrix.starts[r + 1] - s
+        var columns = matrix.entries.unsafe_ptr().unsafe_offset(s)
+        var v0 = values[matrix.sources[r]].unsafe_ptr()
+        var v1 = others[matrix.sources[r]].unsafe_ptr()
+        var f0 = _Lanes(1) if half == 0 else primes.primes - 1
+        var f1 = _Lanes(1) if half == 0 else more.primes - 1
+        for k in range(n):
+            var c = Int(columns.unsafe_offset(k).unsafe_load())
+            var at = data.unsafe_offset(S * c)
+            at.unsafe_store[width=_LANES](at.unsafe_load[width=_LANES]() + f0 * v0.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]())
+            var at1 = at.unsafe_offset(_LANES)
+            at1.unsafe_store[width=_LANES](at1.unsafe_load[width=_LANES]() + f1 * v1.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]())
+            var word = marks.unsafe_offset(c >> 6)
+            word.unsafe_store(word.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
+    budget.charge(UInt64(S * (matrix.starts[b + 1] - matrix.starts[a])))
+    data.unsafe_offset(S * first).unsafe_store[width=_LANES](_Lanes(0))
+    data.unsafe_offset(S * first + _LANES).unsafe_store[width=_LANES](_Lanes(0))
+    lanes.marks.unsafe_get(first // 64) &= ~(UInt64(1) << UInt64(first % 64))
+    var c = lanes.next_marked(first + 1)
+    while c < lanes.ncols:
+        lanes.marks.unsafe_get(c // 64) &= ~(UInt64(1) << UInt64(c % 64))
+        var at = data.unsafe_offset(S * c)
+        var u = _mod_lanes(at.unsafe_load[width=_LANES](), primes)
+        var w = _mod_lanes(at.unsafe_offset(_LANES).unsafe_load[width=_LANES](), more)
+        at.unsafe_store[width=_LANES](_Lanes(0))
+        at.unsafe_offset(_LANES).unsafe_store[width=_LANES](_Lanes(0))
+        if u.ne(0).reduce_or() or w.ne(0).reduce_or():
+            var q = pivot.unsafe_get(c)
+            if q < 0:
+                lanes.clear(S)
+                return False
+            var slot = lanes.slot.unsafe_get(c)
+            if slot < 0:
+                slot = len(lanes.columns)
+                lanes.slot.unsafe_get(c) = slot
+                lanes.columns.append(c)
+                lanes.residues.resize(len(lanes.residues) + limit, 0)
+            var to = lanes.residues.unsafe_ptr().unsafe_offset(slot * limit + _LANES * batch)
+            to.unsafe_store[width=_LANES](u.cast[DType.uint32]())
+            to.unsafe_offset(_LANES).unsafe_store[width=_LANES](w.cast[DType.uint32]())
+            var s = matrix.starts.unsafe_get(q)
+            var n = matrix.starts.unsafe_get(q + 1) - s
+            budget.charge(UInt64(S * n))
+            var f0 = u.eq(0).select(_Lanes(0), primes.primes - u)
+            var f1 = w.eq(0).select(_Lanes(0), more.primes - w)
+            var columns = matrix.entries.unsafe_ptr().unsafe_offset(s)
+            var g = matrix.sources.unsafe_get(q)
+            var v0 = values[g].unsafe_ptr()
+            var v1 = others[g].unsafe_ptr()
+            for k in range(1, n):
+                var e = Int(columns.unsafe_offset(k).unsafe_load())
+                var to0 = data.unsafe_offset(S * e)
+                var x = to0.unsafe_load[width=_LANES]() + f0 * v0.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
+                to0.unsafe_store[width=_LANES](x.ge(primes.squares).select(x - primes.squares, x))
+                var to1 = to0.unsafe_offset(_LANES)
+                var y = to1.unsafe_load[width=_LANES]() + f1 * v1.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
+                to1.unsafe_store[width=_LANES](y.ge(more.squares).select(y - more.squares, y))
+                var word = marks.unsafe_offset(e >> 6)
+                word.unsafe_store(word.unsafe_load() | (UInt64(1) << UInt64(e & 63)))
+        c = lanes.next_marked(c + 1)
+    return True
 
 
 def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], values: List[List[UInt32]], primes: _Primes, a: Int, batch: Int, limit: Int, mut budget: Budget) raises PolyError -> Bool:
@@ -1646,7 +1796,7 @@ def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int]
         if v.ne(0).reduce_or():
             var q = pivot.unsafe_get(c)
             if q < 0:
-                lanes.clear()
+                lanes.clear(_LANES)
                 return False
             var slot = lanes.slot.unsafe_get(c)
             if slot < 0:
@@ -1665,7 +1815,7 @@ def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int]
     return True
 
 
-def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, mut images: _PairPrimes, a: Int, first: Int, mut counts: List[Int], mut budget: Budget) raises PolyError -> Int:
+def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, mut images: _PairPrimes, a: Int, first: Int, allowance: Int, mut counts: List[Int], mut budget: Budget) raises PolyError -> Int:
     """The number of primes that proved the S-polynomial of rows a and a + 1 reduces to zero, or 0 if they did not.
 
     Modulo each prime p the reduction gives S = sum r_c R_c, R_c the row
@@ -1675,6 +1825,13 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
     difference, zero modulo Q, is zero, so S has the standard representation
     sum (n_c / D) R_c. Nothing else is assumed, so a wrong reconstruction can
     only fail.
+
+    Primes come in batches of `_LANES`, the first alone and later ones two
+    at a time; an attempt follows each batch from `first` primes on. Gives
+    up after `images.limit` primes, or, when `allowance` is positive, after
+    the attempt that brings its cost past it: `_weighted` budget units,
+    besides those preparing primes. Every decision follows budget charges,
+    so a route never depends on timing.
     """
     var b = a + 1
     var ga = matrix.sources[a]
@@ -1692,19 +1849,29 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
     # S = la R_a - lb R_b bounds its coefficients by 2^s.
     var s_bits = max(coefficients.bits[ga] + la.magnitude_bit_length(), coefficients.bits[gb] + lb.magnitude_bit_length()) + 1
     var limit = images.limit
+    var start = budget.remaining()
+    var setup = images.setup
     var batch = 0
     var proved = 0
-    while True:
-        images.ensure(batch, coefficients, budget)
+    while _LANES * batch < limit:
+        # The first batch alone, which often suffices; later ones two at a time.
+        var two = batch > 0 and _LANES * (batch + 2) <= limit
+        images.ensure(batch + 1 if two else batch, coefficients, budget)
         var t0 = perf_counter_ns()
-        var passed = _lane_pass(lanes, matrix, pivot, images.values[batch], images.batches[batch], a, batch, limit, budget)
+        var passed: Bool
+        if two:
+            passed = _lane_pass_two(lanes, matrix, pivot, images.values[batch], images.values[batch + 1], images.batches[batch], images.batches[batch + 1], a, batch, limit, budget)
+        else:
+            passed = _lane_pass(lanes, matrix, pivot, images.values[batch], images.batches[batch], a, batch, limit, budget)
         comptime if _CERT_STATS:
             counts[0] += Int(perf_counter_ns() - t0)
         if not passed:
             return 0
-        batch += 1
-        var k = _LANES * batch
-        if k >= first:
+        for _ in range(2 if two else 1):
+            batch += 1
+            var k = _LANES * batch
+            if k < first:
+                continue
             var attempt = batch - 1
             images.basis(attempt, budget)
             var t1 = perf_counter_ns()
@@ -1715,9 +1882,9 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
             if proves:
                 proved = k
                 break
-        if _LANES * batch >= limit:
+        if proved > 0 or (allowance > 0 and _weighted(Int(start - budget.remaining()) - (images.setup - setup)) > allowance):
             break
-    lanes.clear()
+    lanes.clear(_LANES)
     return proved
 
 
@@ -1772,6 +1939,7 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
             comptime if _CERT_STATS:
                 counts[3] += 1
             var t0 = perf_counter_ns()
+            budget.charge(UInt64(_product(basis.limbs, basis.limbs)))
             var found = _fraction(_limbs_to_integer(work, basis.limbs), basis.modulus, half)
             comptime if _CERT_STATS:
                 counts[5] += Int(perf_counter_ns() - t0)
