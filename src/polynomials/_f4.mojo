@@ -1165,7 +1165,39 @@ def _replay_rows_lanes(found: _LaneRows, results: List[Int], supports: List[List
         values.append(residues^)
 
 
-def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_Term[ModInt, W]]]], kind: UInt8, rings: List[Modulus], mut budget: Budget) raises PolyError -> List[List[List[_Term[ModInt, W]]]]:
+struct _LaneBases(Movable):
+    """The reduced bases a batched replay found, as residues on the recorded final supports: `_LANES` per entry, one per prime.
+
+    Kept this way, a basis costs four bytes a term until `basis` writes it out.
+    """
+    var residues: List[List[UInt32]]
+    """Each basis element's residues, `_LANES` apart, on its support in the recorded final matrix."""
+    var rings: List[Modulus]
+    var count: Int
+    """The lanes 0 to count - 1 hold bases."""
+
+    def __init__(out self):
+        self.residues = List[List[UInt32]]()
+        self.rings = List[Modulus]()
+        self.count = 0
+
+    def basis[W: Int](self, l: Int, trace: _Trace[W]) -> List[List[_Term[ModInt, W]]]:
+        """The basis of lane l, from the run `trace` that the replay followed."""
+        ref step = trace.steps[len(trace.steps) - 1]
+        var basis = List[List[_Term[ModInt, W]]](capacity=len(self.residues))
+        for r in range(len(self.residues)):
+            ref residues = self.residues[r]
+            ref monomials = step.monomials[r]
+            var terms = List[_Term[ModInt, W]](capacity=len(monomials))
+            for k in range(len(monomials) - 1, -1, -1):
+                var residue = residues[_LANES * k + l]
+                if residue != 0:
+                    terms.append(_Term[ModInt, W](monomials[k], ModInt(UInt64(residue), self.rings[l])))
+            basis.append(terms^)
+        return basis^
+
+
+def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_Term[ModInt, W]]]], kind: UInt8, rings: List[Modulus], mut budget: Budget) raises PolyError -> _LaneBases:
     """`_f4_replay` modulo `_LANES` primes below 2^31 at once, one per SIMD lane.
 
     Returns the bases of the primes before the first whose replay declines,
@@ -1202,7 +1234,7 @@ def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_T
         if not follows:
             lanes.depart(l)
             break
-    var bases = List[List[List[_Term[ModInt, W]]]]()
+    var bases = _LaneBases()
     if lanes.live == 0:
         return bases^
     var width = 0
@@ -1244,18 +1276,12 @@ def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_T
             rows.append(r)
         var first = len(values)
         _replay_rows_lanes(found, rows, step.supports, values, lanes, budget)
-        for l in range(lanes.live):
-            var basis = List[List[_Term[ModInt, W]]](capacity=step.basis)
-            for r in range(step.basis):
-                ref residues = values[first + r]
-                ref monomials = step.monomials[r]
-                var terms = List[_Term[ModInt, W]](capacity=len(monomials))
-                for k in range(len(monomials) - 1, -1, -1):
-                    var residue = residues[_LANES * k + l]
-                    if residue != 0:
-                        terms.append(_Term[ModInt, W](monomials[k], ModInt(UInt64(residue), lanes.rings[l])))
-                basis.append(terms^)
-            bases.append(basis^)
+        for r in range(step.basis):
+            var residues = List[UInt32]()
+            swap(residues, values[first + r])
+            bases.residues.append(residues^)
+        bases.rings = rings.copy()
+        bases.count = lanes.live
         return bases^
     return bases^
 

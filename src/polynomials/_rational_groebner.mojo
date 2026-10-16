@@ -52,7 +52,7 @@ from .sparse import SparsePoly, Term
 from .primes import _residue
 from ._images import _denominator, _scaled_integer
 from ._packed_groebner import _Buckets, _Engine, _Packed, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
-from ._f4 import _LANES, _Matrix, _Store, _Trace, _f4_learn, _f4_replay, _f4_replay_lanes
+from ._f4 import _LANES, _LaneBases, _Matrix, _Store, _Trace, _f4_learn, _f4_replay, _f4_replay_lanes
 from ._integer_f4 import _add_mul_1, _divide, _pairs_reduce_to_zero, _reduced_tails, _remainder, _sub_mul_1
 
 comptime _PRIME_LIMIT = 4096
@@ -698,8 +698,9 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
     # Replays run `_LANES` primes at once: the images of the primes after
     # this one wait in `ahead`, computed from the same recorded run, and are
     # dropped whenever the run is recorded anew.
-    var ahead = List[List[List[_Term[ModInt, W]]]]()
+    var ahead = _LaneBases()
     var ahead_primes = List[UInt64]()
+    var ahead_lanes = List[Int]()
     var p = (UInt64(1) << 31) + 1
     for _ in range(_PRIME_LIMIT):
         budget.charge(1)
@@ -710,7 +711,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
         var replayed = Optional[List[List[_Term[ModInt, W]]]](None)
         if learned and trace.usable:
             if len(ahead_primes) > 0 and ahead_primes[0] == p:
-                replayed = ahead.pop(0)
+                replayed = ahead.basis[W](ahead_lanes.pop(0), trace)
                 _ = ahead_primes.pop(0)
             else:
                 # This prime and the next admissible ones, in one batch.
@@ -725,18 +726,23 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
                         batch.append(_images_of(inputs, rings[len(rings) - 1], budget))
                 ahead = _f4_replay_lanes[W](trace, batch^, kind, rings, budget)
                 ahead_primes = List[UInt64]()
-                for i in range(1, len(ahead)):
+                ahead_lanes = List[Int]()
+                for i in range(1, ahead.count):
                     ahead_primes.append(rings[i].value)
-                if len(ahead) > 0:
-                    replayed = ahead.pop(0)
+                    ahead_lanes.append(i)
+                if ahead.count > 0:
+                    replayed = ahead.basis[W](0, trace)
+            if len(ahead_primes) == 0:
+                ahead = _LaneBases()
         var basis: List[List[_Term[ModInt, W]]]
         if replayed:
             basis = replayed.take()
         else:
             basis = _f4_learn[W](_images_of(inputs, ring, budget), kind, ring, trace, budget)
             learned = True
-            ahead = List[List[List[_Term[ModInt, W]]]]()
+            ahead = _LaneBases()
             ahead_primes = List[UInt64]()
+            ahead_lanes = List[Int]()
         if images.count > 0 and not images.matches(basis):
             mismatches += 1
             if mismatches < _MISMATCH_LIMIT:
@@ -756,8 +762,9 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
                 # The images may follow an unlucky recorded run: record anew,
                 # so that differing leading monomials can show.
                 learned = False
-                ahead = List[List[List[_Term[ModInt, W]]]]()
+                ahead = _LaneBases()
                 ahead_primes = List[UInt64]()
+                ahead_lanes = List[Int]()
             candidate = None
         images.add(basis, p, budget)
         var count = images.count
