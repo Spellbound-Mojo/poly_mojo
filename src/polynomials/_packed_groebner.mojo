@@ -745,14 +745,19 @@ struct _Engine[C: CoefficientRing, W: Int, integral: Bool](Movable):
             self._sift_pairs(0, budget)
         return selected
 
-    def insert(mut self, var p: List[_Term[Self.C, Self.W]], mut budget: Budget) raises PolyError:
-        """Normalize p, add it to the basis, and install its pairs."""
+    def insert(mut self, var p: List[_Term[Self.C, Self.W]], mut budget: Budget, heap: Bool = True) raises PolyError:
+        """Normalize p, add it to the basis, and install its pairs.
+
+        Without `heap` the pairs are left unordered, for a caller that
+        inserts several elements and then calls `heapify_pairs` once.
+        """
         _normalize[Self.C, Self.W, Self.integral](p, self.ring, budget)
         _allocation[List[_Term[Self.C, Self.W]]](1, budget)
         self.leads.append(p[len(p) - 1].monomial)
         self.polys.append(p^)
         self.install(len(self.polys) - 1, budget)
-        self.heapify_pairs(budget)
+        if heap:
+            self.heapify_pairs(budget)
 
     def start(mut self, var generators: List[List[_Term[Self.C, Self.W]]], mut budget: Budget) raises PolyError:
         """Reduce each generator against the basis so far and insert the nonzero ones."""
