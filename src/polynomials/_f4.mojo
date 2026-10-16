@@ -7,9 +7,7 @@ for every monomial a basis element's leading monomial divides (symbolic
 preprocessing), and row-reduces the resulting sparse matrix. Rows whose
 leading monomial no pivot covers are new basis elements; they are reduced by
 one another too, so each round's new elements are in reduced row echelon
-form, which keeps the rows they later contribute sparse. A new element whose
-leading monomial another new element's divides stays out of the active basis,
-and the next matrix reduces it as the pair of the two. Pairs are still
+form, which keeps the rows they later contribute sparse. Pairs are still
 pruned by the Gebauer–Möller criteria of the packed engine, which also stores
 the basis and computes the final reduced basis; the reduced basis is unique,
 so the result is the one Buchberger's algorithm returns.
@@ -44,13 +42,13 @@ prime in one SIMD vector, and every update is one vector operation.
 GREVLEX, over at most sixteen variables; other cases use Buchberger's
 algorithm in the packed or sparse engine.
 """
+from std.bit import count_leading_zeros
 from std.math import max, min
-from std.sys import size_of
 from .coefficients import CoefficientRing, ModInt, Modulus
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product, _sum
 from .monomial import MonomialOrder
 from .sparse import SparsePoly
-from ._packed_groebner import _Engine, _Packed, _Pair, _Term, _compare, _div, _divides, _equal, _mul, _pack, _packed, _priorities, _unpack
+from ._packed_groebner import _Engine, _Packed, _Term, _compare, _div, _divides, _equal, _mul, _pack, _packed, _priorities, _unpack
 
 comptime _F4_PRIME_LIMIT = UInt64(1) << 31
 comptime _COLUMN_LIMIT = Int(Int32.MAX)
@@ -236,12 +234,10 @@ def _wide[W: Int](m: _Packed[W]) -> UInt64:
 
 def _sort_descending[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) raises PolyError -> List[Int]:
     """Indices of `monomials` from greatest to least, by bottom-up merge sort."""
-    comptime if W <= 16:
-        if len(monomials) < (1 << 32):
-            comptime D = DType.uint128 if W <= 8 else DType.uint256
-            var keys = _keys[D](kind, monomials, budget)
-            if keys:
-                return _sort_keys(keys.take(), budget)
+    if len(monomials) < (1 << 32):
+        var keys = _keys(kind, monomials, budget)
+        if keys:
+            return _sort_keys(keys.take(), budget)
     var n = len(monomials)
     _allocation[Int](2 * n, budget)
     var order = List[Int](capacity=n)
@@ -280,42 +276,58 @@ def _sort_descending[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budge
     return order^
 
 
-def _keys[D: DType, W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) raises PolyError -> Optional[List[Scalar[D]]]:
-    """Keys whose integer order is the monomial order, each with its index in the low 32 bits; None unless every exponent is below 2^8 and every degree below 2^16.
+def _keys[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) raises PolyError -> Optional[List[UInt128]]:
+    """Keys whose integer order is the monomial order, each with its index in the low 32 bits; None unless they fit in 128 bits.
 
-    From the top: the degree (zero under LEX), then one byte per lane in
-    the order that decides, which under GREVLEX is from the last lane up,
-    with the exponent complemented, since a smaller one there is greater.
-    Keys of `D` bits leave 48 bits for the degree and the index; 128 bits
-    hold eight lanes, 256 bits sixteen.
+    From the top: the degree (none under LEX), then a digit of b bits per
+    lane that some monomial uses, in the order that decides, which under
+    GREVLEX is from the last lane up, with the exponent complemented, since a
+    smaller one there is greater. Lanes no monomial uses are equal
+    throughout and get no digit; b and the degree's width are the fewest
+    bits that hold every exponent and degree.
     """
-    comptime bits = 8 * size_of[Scalar[D]]()
-    comptime assert bits - 48 >= 8 * W, "one byte per lane"
-    comptime top = bits - 16
     var n = len(monomials)
-    _allocation[Scalar[D]](n, budget)
     budget.charge(UInt64(n))
-    var keys = List[Scalar[D]](capacity=n)
+    var top = SIMD[DType.uint32, W](0)
+    var degree = UInt64(0)
+    for i in range(n):
+        ref m = monomials.unsafe_get(i)
+        top = max(top, m.exponents())
+        degree = max(degree, m.degree)
+    var largest = top.reduce_max()
+    var b = 32 - Int(count_leading_zeros(largest))
+    var degree_bits = 0 if kind == MonomialOrder.LEX else 64 - Int(count_leading_zeros(degree))
+    var used = 0
+    comptime for j in range(W):
+        if top[j] != 0:
+            used += 1
+    if degree_bits + used * b > 96:
+        return None
+    _allocation[UInt128](n, budget)
+    budget.charge(UInt64(n))
+    var keys = List[UInt128](capacity=n)
+    var mask = UInt128((1 << b) - 1)
     for i in range(n):
         ref m = monomials.unsafe_get(i)
         var e = m.exponents()
-        if m.degree >= (1 << 16) or e.reduce_max() >= 256:
-            return None
-        var digits = Scalar[D](0)
-        comptime for j in range(W):
-            var lane = Scalar[D](e[W - 1 - j]) if kind == MonomialOrder.GREVLEX else Scalar[D](e[j])
-            var digit = Scalar[D](255) - lane if kind == MonomialOrder.GREVLEX else lane
-            digits |= digit << Scalar[D](top - 8 * (j + 1))
-        var degree = Scalar[D](0) if kind == MonomialOrder.LEX else Scalar[D](m.degree)
-        keys.append((degree << Scalar[D](top)) | digits | Scalar[D](i))
+        var key = UInt128(0) if kind == MonomialOrder.LEX else UInt128(m.degree)
+        if kind == MonomialOrder.GREVLEX:
+            comptime for j in range(W - 1, -1, -1):
+                if top[j] != 0:
+                    key = (key << UInt128(b)) | (mask - UInt128(e[j]))
+        else:
+            comptime for j in range(W):
+                if top[j] != 0:
+                    key = (key << UInt128(b)) | UInt128(e[j])
+        keys.append((key << 32) | UInt128(i))
     return keys^
 
 
-def _sort_keys[D: DType](var keys: List[Scalar[D]], mut budget: Budget) raises PolyError -> List[Int]:
+def _sort_keys(var keys: List[UInt128], mut budget: Budget) raises PolyError -> List[Int]:
     """The indices in the low 32 bits of distinct keys, by decreasing key."""
     var n = len(keys)
-    _allocation[Scalar[D]](n, budget)
-    var scratch = List[Scalar[D]](length=n, fill=0)
+    _allocation[UInt128](n, budget)
+    var scratch = List[UInt128](length=n, fill=0)
     var width = 1
     while width < n:
         budget.charge(UInt64(n))
@@ -350,7 +362,7 @@ def _sort_keys[D: DType](var keys: List[Scalar[D]], mut budget: Budget) raises P
     _allocation[Int](n, budget)
     var order = List[Int](capacity=n)
     for k in range(n):
-        order.append(Int(keys.unsafe_get(k) & Scalar[D](0xFFFFFFFF)))
+        order.append(Int(keys.unsafe_get(k) & UInt128(0xFFFFFFFF)))
     return order^
 
 
@@ -402,10 +414,20 @@ struct _Matrix[W: Int](Movable):
         `engine.active` must be sorted, and the order graded, so the search
         stops at the first leading monomial of greater degree.
         """
-        _allocation[_Packed[Self.W]](len(engine.active), budget)
-        var leads = List[_Packed[Self.W]](capacity=len(engine.active))
+        var count = len(engine.active)
+        _allocation[_Packed[Self.W]](count, budget)
+        _allocation[UInt32](count + 16, budget)
+        var leads = List[_Packed[Self.W]](capacity=count)
+        # The supports apart, padded with full masks, to rule out most leading monomials 16 at a time.
+        var supports = List[UInt32](capacity=count + 16)
         for g in engine.active:
             leads.append(engine.leads[g])
+            supports.append(engine.leads[g].support)
+        for _ in range(16):
+            supports.append(UInt32.MAX)
+        # The leading monomials of degree at most `degree` are the first `limit`.
+        var degree = UInt64.MAX
+        var limit = 0
         var next = 0
         while next < len(self.columns.monomials):
             var c = next
@@ -413,17 +435,27 @@ struct _Matrix[W: Int](Movable):
             if self.columns.covered[c]:
                 continue
             var u = self.columns.monomials[c]
+            if u.degree != degree:
+                degree = u.degree
+                limit = 0
+                while limit < count and leads[limit].degree <= degree:
+                    limit += 1
+            var outside = ~u.support
+            var exponents = u.exponents()
             var found = -1
             var i = 0
-            while i < len(leads):
-                ref lead = leads.unsafe_get(i)
-                if lead.degree > u.degree:
-                    break
-                if _divides(lead, u):
-                    found = i
-                    break
-                i += 1
-            budget.charge(UInt64(i + 1))
+            while i < limit:
+                var block = supports.unsafe_ptr().unsafe_offset(i).unsafe_load[width=16]()
+                var candidates = (block & outside).eq(0)
+                if candidates.reduce_or():
+                    for k in range(min(16, limit - i)):
+                        if candidates[k] and leads.unsafe_get(i + k).exponents().le(exponents).reduce_and():
+                            found = i + k
+                            break
+                    if found >= 0:
+                        break
+                i += 16
+            budget.charge(UInt64((found if found >= 0 else limit) + 1))
             if found >= 0:
                 self.add_row(engine, store, engine.active[found], _div(u, leads[found]), budget)
 
@@ -727,7 +759,9 @@ struct _Step[W: Int](Copyable, Movable):
     pivots are then reduced by one another from the right; in the final
     matrix every row is a pivot and the first `basis` rows have their tails
     reduced. `supports` lists each result's columns, leading column first, in
-    the order the results come; the final matrix also keeps their monomials.
+    the order the results are inserted, which `inserted` gives as positions
+    in the order they come when it is not empty; the final matrix also keeps
+    their monomials.
     """
     var final: Bool
     var ncols: Int
@@ -738,6 +772,7 @@ struct _Step[W: Int](Copyable, Movable):
     var basis: Int
     var leads: List[Int32]
     var supports: List[List[Int32]]
+    var inserted: List[Int]
     var monomials: List[List[_Packed[Self.W]]]
 
     def __init__(out self, final: Bool, ncols: Int):
@@ -750,6 +785,7 @@ struct _Step[W: Int](Copyable, Movable):
         self.basis = 0
         self.leads = List[Int32]()
         self.supports = List[List[Int32]]()
+        self.inserted = List[Int]()
         self.monomials = List[List[_Packed[Self.W]]]()
 
     def keep(mut self, matrix: _Matrix[Self.W], r: Int, mut budget: Budget) raises PolyError:
@@ -874,20 +910,58 @@ def _supports(found: _Rows, rows: List[Int], mut budget: Budget) raises PolyErro
     return supports^
 
 
-def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _Store[W], var pairs: List[_Pair[W]], prime: UInt64, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
-    """Run one F4 round on `pairs`, then the pairs of least LCM degree; return the new elements, monic."""
-    if len(engine.pairs):
-        var degree = engine.pairs[0].lcm.degree
-        while len(engine.pairs) and engine.pairs[0].lcm.degree == degree:
-            _allocation[_Pair[W]](1, budget)
-            pairs.append(engine.select(budget))
+def _insertion[W: Int](found: _Rows, results: List[Int], monomials: List[_Packed[W]], order: List[Int], mut budget: Budget) raises PolyError -> List[Int]:
+    """The order to insert a round's new elements in, as positions in `results`; empty for their own order, smallest leading monomial first.
+
+    Under an inhomogeneous run, a new element's leading monomial may be one
+    that a smaller new element's divides. Such elements go first, by
+    decreasing leading monomial: inserting the divisor then retires each from
+    the active elements and installs their pair, which a later matrix
+    reduces, so the whole run stays in its matrices.
+    """
+    _allocation[Bool](len(results), budget)
+    var divided = List[Bool](length=len(results), fill=False)
+    var some = False
+    for k in range(len(results)):
+        var lead = monomials[order[Int(found.columns[found.starts[results[k]]])]]
+        for j in range(k):
+            budget.charge(1)
+            if _divides(monomials[order[Int(found.columns[found.starts[results[j]]])]], lead):
+                divided[k] = True
+                some = True
+                break
+    var inserted = List[Int]()
+    if not some:
+        return inserted^
+    for k in range(len(results) - 1, -1, -1):
+        if divided[k]:
+            inserted.append(k)
+    for k in range(len(results)):
+        if not divided[k]:
+            inserted.append(k)
+    return inserted^
+
+
+def _inserted(results: List[Int], inserted: List[Int]) -> List[Int]:
+    """`results` in the recorded insertion order."""
+    if len(inserted) == 0:
+        return results.copy()
+    var permuted = List[Int](capacity=len(results))
+    for k in inserted:
+        permuted.append(results[k])
+    return permuted^
+
+
+def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _Store[W], prime: UInt64, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
+    """Run one F4 round on the pairs of least LCM degree; return the new elements, monic, in the order to insert them."""
+    var degree = engine.pairs[0].lcm.degree
     var matrix = _Matrix[W]()
-    # Both halves of every pair. A half is fixed by its element and its
-    # leading monomial, the pair's LCM, so equal halves are added once; the
-    # first half added for a leading monomial is a pivot.
+    # Both halves of every selected pair. A half is fixed by its element and
+    # its leading monomial, the pair's LCM, so equal halves are added once.
     var seen = Dict[Int, Bool]()
     var stride = len(engine.polys)
-    for pair in pairs:
+    while len(engine.pairs) and engine.pairs[0].lcm.degree == degree:
+        var pair = engine.select(budget)
         matrix.columns.reserve(1, budget)
         var lead = Int(matrix.columns.find(pair.lcm, _raw_hash(pair.lcm)))
         for source in [pair.first, pair.second]:
@@ -920,6 +994,8 @@ def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _
     var found = _Rows()
     var kept = List[Int]()
     var results = _eliminate(matrix, pivot, reduce, store.values, prime, ring, found, kept, budget)
+    var inserted = _insertion(found, results, matrix.columns.monomials, order, budget)
+    results = _inserted(results, inserted)
     comptime if record:
         # The replay keeps the pivots and the rows that gave new ones.
         var step = _Step[W](False, ncols)
@@ -930,8 +1006,9 @@ def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _
             step.keep(matrix, kept[i], budget)
             step.leads.append(found.columns[found.starts[i]])
         step.supports = _supports(found, results, budget)
+        step.inserted = inserted^
         trace.steps.append(step^)
-    # The new elements, smallest leading monomial first, as increasing term lists.
+    # The new elements in the order to insert them, as increasing term lists.
     var fresh = List[List[_Term[ModInt, W]]]()
     for i in results:
         var n = found.starts[i + 1] - found.starts[i]
@@ -1006,36 +1083,17 @@ def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], 
                 monomials.append(t.monomial)
             trace.inputs.append(monomials^)
     var store = _Store[W]()
-    var pending = List[_Pair[W]]()
-    while len(engine.pairs) or len(pending):
+    while len(engine.pairs):
         budget.charge(1)
         engine.sort_active(budget)
         store.extend(engine, budget)
-        var fresh = _round[W, record](engine, store, pending^, prime, ring, trace, budget)
-        pending = List[_Pair[W]]()
+        var fresh = _round[W, record](engine, store, prime, ring, trace, budget)
         for k in range(len(fresh)):
             var p = List[_Term[ModInt, W]]()
             swap(p, fresh[k])
-            # An element found earlier in this round may divide this one's
-            # leading monomial. The element then joins the basis outside the
-            # active ones, and the next matrix reduces it as the pair of the
-            # two, whose remainder holds what it adds; its own pairs would
-            # add nothing more.
-            var divisor = -1
-            for g in engine.active:
-                budget.charge(1)
-                if _divides(engine.leads[g], p[len(p) - 1].monomial):
-                    divisor = g
-                    break
-            if divisor >= 0:
-                var lead = p[len(p) - 1].monomial
-                _allocation[List[_Term[ModInt, W]]](1, budget)
-                engine.leads.append(lead)
-                engine.polys.append(p^)
-                _allocation[_Pair[W]](1, budget)
-                pending.append(_Pair[W](divisor, len(engine.polys) - 1, lead))
-                continue
-            engine.insert(p^, budget)
+            engine.insert(p^, budget, heap=False)
+        # The pairs are ordered once the round's elements are all in.
+        engine.heapify_pairs(budget)
     store.extend(engine, budget)
     return _interreduce[W, record](engine, store, prime, ring, trace, budget)
 
@@ -1129,7 +1187,7 @@ def _f4_replay[W: Int](trace: _Trace[W], var generators: List[List[_Term[ModInt,
             for i in range(len(kept)):
                 if found.columns[found.starts[i]] != step.leads[i]:
                     return None
-            if not _replay_rows(found, results, step.supports, values, budget):
+            if not _replay_rows(found, _inserted(results, step.inserted), step.supports, values, budget):
                 return None
             continue
         _tails(matrix, step.basis, pivot, values, prime, found, budget)
@@ -1441,7 +1499,7 @@ def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_T
             var results = _eliminate_lanes(step, dense, pivot, values, found, lanes, budget)
             if lanes.live == 0:
                 return bases^
-            _replay_rows_lanes(found, results, step.supports, values, lanes, budget)
+            _replay_rows_lanes(found, _inserted(results, step.inserted), step.supports, values, lanes, budget)
             if lanes.live == 0:
                 return bases^
             continue
