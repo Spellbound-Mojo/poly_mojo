@@ -1138,8 +1138,6 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
         var sample_modular = 0
         var sample_exact = 0
         var hint = 0
-        var degree_start = Int(perf_counter_ns())
-        var degree_exact = 0
         for a in halves:
             var cheaper = sampled < _TIMED or 100 * sample_modular <= _RATIO * sample_exact
             var exactly = True
@@ -1154,13 +1152,12 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
                     allowance = sample_exact // sampled
                 var setup = images.setup
                 var before = budget.remaining()
-                var t0 = Int(perf_counter_ns())
+                var t0 = _clock()
                 # The primes the last pair needed: attempts start a batch below.
                 k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, max(_FIRST_PRIMES, hint - _LANES), allowance, counts, budget)
                 spent = _weighted(Int(before - budget.remaining()) - (images.setup - setup))
-                comptime if _CERT_STATS:
-                    counts[6] += Int(before - budget.remaining()) - (images.setup - setup)
-                    counts[7] += Int(perf_counter_ns()) - t0
+                counts[6] += Int(before - budget.remaining()) - (images.setup - setup)
+                counts[7] += _clock() - t0
                 if k > 0:
                     modular += 1
                     used += k
@@ -1174,21 +1171,17 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
             if exactly:
                 exact += 1
             var before = budget.remaining()
-            var t = Int(perf_counter_ns())
+            var t = _clock()
             if not _reduces(row, matrix, pivot, coefficients, a, quotient, budget):
                 return _Routes(False, modular, exact, used, counts.copy())
             var e = Int(before - budget.remaining())
-            comptime if _CERT_STATS:
-                counts[8] += e
-                counts[9] += Int(perf_counter_ns()) - t
-                degree_exact += Int(perf_counter_ns()) - t
+            counts[8] += e
+            counts[9] += _clock() - t
             if sample:
                 sampled += 1
                 sample_exact += e
                 # The modular route's cost: its attempt, and the exact check after a failure.
                 sample_modular += spent + (e if exactly else 0)
-        comptime if _CERT_STATS:
-            print("DEG", degree, "pairs", len(halves), "tried", tried, "failed", failed, "sampled", sampled, sample_modular, sample_exact, "exact_ms", degree_exact // 1000000, "total_ms", (Int(perf_counter_ns()) - degree_start) // 1000000)
     return _Routes(True, modular, exact, used, counts.copy())
 
 
@@ -1440,6 +1433,13 @@ comptime _WEIGHT = 100
 
 comptime _CERT_STATS = False
 """Whether certification prints how many pairs each route proved."""
+
+
+def _clock() -> Int:
+    """Nanoseconds for the statistics of `_CERT_STATS`, and zero without them; nothing decides by it."""
+    comptime if _CERT_STATS:
+        return Int(perf_counter_ns())
+    return 0
 
 
 def _weighted(units: Int) -> Int:
@@ -1870,14 +1870,13 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
         # The first batch alone, which often suffices; later ones two at a time.
         var two = batch > 0 and _LANES * (batch + 2) <= limit
         images.ensure(batch + 1 if two else batch, coefficients, budget)
-        var t0 = perf_counter_ns()
+        var t0 = _clock()
         var passed: Bool
         if two:
             passed = _lane_pass_two(lanes, matrix, pivot, images.values[batch], images.values[batch + 1], images.batches[batch], images.batches[batch + 1], a, batch, limit, budget)
         else:
             passed = _lane_pass(lanes, matrix, pivot, images.values[batch], images.batches[batch], a, batch, limit, budget)
-        comptime if _CERT_STATS:
-            counts[0] += Int(perf_counter_ns() - t0)
+        counts[0] += _clock() - t0
         if not passed:
             return 0
         for _ in range(2 if two else 1):
@@ -1887,11 +1886,10 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
                 continue
             var attempt = batch - 1
             images.basis(attempt, budget)
-            var t1 = perf_counter_ns()
+            var t1 = _clock()
             var proves = _proves(lanes, matrix, pivot, coefficients, images, attempt, multiple, s_bits, counts, budget)
-            comptime if _CERT_STATS:
-                counts[1] += Int(perf_counter_ns() - t1)
-                counts[2] += 1
+            counts[1] += _clock() - t1
+            counts[2] += 1
             if proves:
                 proved = k
                 break
@@ -1936,8 +1934,7 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
             var x = _mod_lanes(v * factors.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_load[width=_LANES](), primes)
             scaled.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_store[width=_LANES](_mod_lanes(x * inverse, primes))
         basis.value(scaled, work, budget)
-        comptime if _CERT_STATS:
-            counts[4] += 1
+        counts[4] += 1
         # The symmetric representative: x or x - Q, whichever is smaller.
         for l in range(basis.limbs + 2):
             other[l] = basis.product[l] if l < basis.limbs else UInt64(0)
@@ -1949,13 +1946,11 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
             n_bits = size
         else:
             # A new denominator: a / b = x modulo Q with |a|, b below 2^half.
-            comptime if _CERT_STATS:
-                counts[3] += 1
-            var t0 = perf_counter_ns()
+            counts[3] += 1
+            var t0 = _clock()
             budget.charge(UInt64(_product(basis.limbs, basis.limbs)))
             var found = _fraction(_limbs_to_integer(work, basis.limbs), basis.modulus, half)
-            comptime if _CERT_STATS:
-                counts[5] += Int(perf_counter_ns() - t0)
+            counts[5] += _clock() - t0
             if not found:
                 return False
             var b = found.value()[1].copy()
