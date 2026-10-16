@@ -42,6 +42,7 @@ from .certificates import ListDivision, MembershipCertificate
 from ._sparse_ops import _subtract_multiples
 from ._packed_groebner import _packed_groebner, _packed_groebner_rational, _packed_supported
 from ._f4 import _f4_groebner, _f4_supported
+from ._rational_groebner import _grevlex_groebner_rational, _grevlex_supported
 
 
 @fieldwise_init
@@ -254,8 +255,14 @@ def groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: Monomi
             if generators[i].ring != generators[0].ring:
                 raise PolyError(PolyErrorKind.DOMAIN, "Groebner generators in different fields")
         comptime if C == QQ:
-            # Over QQ the packed engine runs fraction-free on integer coefficients.
-            var rational = _packed_groebner_rational(rebind[List[SparsePoly[QQ]]](generators), order, budget)
+            # Over QQ under GREVLEX, the homogenized computation (exact, or by
+            # certified reconstruction when coefficients grow); otherwise the
+            # packed engine fraction-free on integer coefficients.
+            ref inputs = rebind[List[SparsePoly[QQ]]](generators)
+            if _grevlex_supported(order):
+                var homogenized = _grevlex_groebner_rational(inputs, order, budget)
+                return GroebnerBasis[C](order.copy(), rebind_var[List[SparsePoly[C]]](homogenized^), Optional[List[List[SparsePoly[C]]]](None))
+            var rational = _packed_groebner_rational(inputs, order, budget)
             return GroebnerBasis[C](order.copy(), rebind_var[List[SparsePoly[C]]](rational^), Optional[List[List[SparsePoly[C]]]](None))
         elif C == ModInt:
             ref modular = rebind[List[SparsePoly[ModInt]]](generators)

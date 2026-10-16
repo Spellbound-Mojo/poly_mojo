@@ -426,16 +426,15 @@ def _extend_hashes[W: Int](engine: _Engine[ModInt, W, False], mut hashes: List[L
         hashes.append(h^)
 
 
-def _f4_basis[W: Int](generators: List[SparsePoly[ModInt]], order: MonomialOrder, mut budget: Budget) raises PolyError -> List[SparsePoly[ModInt]]:
-    var ring = generators[0].ring.copy()
+def _f4_packed[W: Int](var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
+    """The reduced monic basis of packed generators, in decreasing leading-monomial order.
+
+    Generators are increasing term lists over a degree order `kind` and a
+    prime below 2^31; zero generators are allowed.
+    """
     var prime = ring.value
-    _allocation[List[_Term[ModInt, W]]](len(generators), budget)
-    var packed = List[List[_Term[ModInt, W]]](capacity=len(generators))
-    for g in generators:
-        budget.charge(1)
-        packed.append(_pack[ModInt, W](g.reorder(order, budget), order, budget))
-    var engine = _Engine[ModInt, W, False](order.kind, ring)
-    engine.start(packed^, budget)
+    var engine = _Engine[ModInt, W, False](kind, ring)
+    engine.start(generators^, budget)
     var hashes = List[List[UInt64]]()
     while len(engine.pairs):
         budget.charge(1)
@@ -459,7 +458,17 @@ def _f4_basis[W: Int](generators: List[SparsePoly[ModInt]], order: MonomialOrder
                     continue
             engine.insert(p^, budget)
     _extend_hashes(engine, hashes, budget)
-    var basis = _interreduce(engine, hashes, prime, ring, budget)
+    return _interreduce(engine, hashes, prime, ring, budget)
+
+
+def _f4_basis[W: Int](generators: List[SparsePoly[ModInt]], order: MonomialOrder, mut budget: Budget) raises PolyError -> List[SparsePoly[ModInt]]:
+    var ring = generators[0].ring.copy()
+    _allocation[List[_Term[ModInt, W]]](len(generators), budget)
+    var packed = List[List[_Term[ModInt, W]]](capacity=len(generators))
+    for g in generators:
+        budget.charge(1)
+        packed.append(_pack[ModInt, W](g.reorder(order, budget), order, budget))
+    var basis = _f4_packed[W](packed^, order.kind, ring, budget)
     var by_index = _priorities(order, budget)
     _allocation[SparsePoly[ModInt]](len(basis), budget)
     var result = List[SparsePoly[ModInt]](capacity=len(basis))

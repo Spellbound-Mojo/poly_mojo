@@ -587,6 +587,66 @@ struct _Engine[C: CoefficientRing, W: Int, integral: Bool](Movable):
         remainder.reverse()
         return remainder^
 
+    def reduces_to_zero(self, var pending: _Buckets[Self.C, Self.W, Self.integral], indices: List[Int], mut budget: Budget) raises PolyError -> Bool:
+        """Whether the pending polynomial reduces to zero against `indices`.
+
+        Stops at the first term no leading monomial divides, with no remainder
+        to keep. In integral mode the pending polynomial is scaled as in
+        `reduce`; a nonzero multiple reduces to zero exactly when it does.
+        """
+        while True:
+            var next = pending.leading(budget)
+            if not next:
+                return True
+            var top = next.take()
+            var reducer = -1
+            var checked = 0
+            for i in indices:
+                checked += 1
+                if _divides(self.leads[i], top.monomial):
+                    reducer = i
+                    break
+            budget.charge(UInt64(checked))
+            if reducer < 0:
+                return False
+            var factor: Self.C
+            comptime if Self.integral:
+                ref lead = self.polys[reducer][len(self.polys[reducer]) - 1].coefficient
+                var common = _gcd_coefficient(lead, top.coefficient, budget)
+                var scale = _exact(lead, common, budget)
+                factor = _exact(top.coefficient, common, budget).neg(budget)
+                if scale != Self.C.one(self.ring):
+                    pending.scale(scale, budget)
+            else:
+                factor = top.coefficient.neg(budget)
+            var shift = _div(top.monomial, self.leads[reducer])
+            comptime if Self.C == ModInt:
+                pending.add_multiple(self.polys[reducer], shift, rebind[ModInt](factor), budget)
+            else:
+                pending.add(self._multiple(reducer, shift, factor, budget), budget)
+
+    def pair_reduces_to_zero(self, pair: _Pair[Self.W], mut budget: Budget) raises PolyError -> Bool:
+        """Whether the S-polynomial of a pair reduces to zero against the active elements."""
+        var left: Self.C
+        var right: Self.C
+        comptime if Self.integral:
+            ref a = self.polys[pair.first][len(self.polys[pair.first]) - 1].coefficient
+            ref b = self.polys[pair.second][len(self.polys[pair.second]) - 1].coefficient
+            var common = _gcd_coefficient(a, b, budget)
+            left = _exact(b, common, budget)
+            right = _exact(a, common, budget).neg(budget)
+        else:
+            left = Self.C.one(self.ring)
+            right = left.neg(budget)
+        var pending = _Buckets[Self.C, Self.W, Self.integral](self.kind, self.ring)
+        comptime if Self.C == ModInt:
+            pending.add_multiple(self.polys[pair.first], _div(pair.lcm, self.leads[pair.first]), rebind[ModInt](left), budget)
+            pending.add_multiple(self.polys[pair.second], _div(pair.lcm, self.leads[pair.second]), rebind[ModInt](right), budget)
+        else:
+            pending.add(self._multiple(pair.first, _div(pair.lcm, self.leads[pair.first]), left, budget), budget)
+            pending.add(self._multiple(pair.second, _div(pair.lcm, self.leads[pair.second]), right, budget), budget)
+        return self.reduces_to_zero(pending^, self.active, budget)
+
     def reduce_base(self, var base: List[_Term[Self.C, Self.W]], indices: List[Int], mut budget: Budget) raises PolyError -> List[_Term[Self.C, Self.W]]:
         var pending = _Buckets[Self.C, Self.W, Self.integral](self.kind, self.ring)
         pending.add(base^, budget)

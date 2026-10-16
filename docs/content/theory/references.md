@@ -2,6 +2,7 @@
 
 | Key | Work |
 |---|---|
+| Arnold 2003 | E. A. Arnold, "Modular algorithms for computing Gröbner bases", *Journal of Symbolic Computation* 35 (2003), 403–419. |
 | Basu, Pollack and Roy 2006 | S. Basu, R. Pollack, and M.-F. Roy, *Algorithms in Real Algebraic Geometry*, 2nd edition, Springer, 2006. |
 | Berlekamp 1967 | E. R. Berlekamp, "Factoring polynomials over finite fields", *Bell System Technical Journal* 46 (1967), 1853–1859. |
 | Brown 1971 | W. S. Brown, "On Euclid's algorithm and the computation of polynomial greatest common divisors", *Journal of the ACM* 18 (1971), 478–504. |

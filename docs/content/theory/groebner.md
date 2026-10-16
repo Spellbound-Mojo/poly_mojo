@@ -48,6 +48,51 @@ is Buchberger's criterion. The final interreduction is one more matrix. The
 reduced basis is unique (Theorem B-4), so F4 returns exactly the basis
 Buchberger's algorithm returns.
 
+**Rational bases under GREVLEX.** Without cofactor tracking, a basis over
+$\mathbb Q$ under GREVLEX is computed through the homogenized inputs. The
+generators become primitive integer polynomials $F$ and, unless already
+homogeneous, are homogenized with a new variable $h$, least in GREVLEX. Let
+$J$ be the ideal of the homogenized generators $F^h$ and $I$ that of $F$.
+
+*Dehomogenization.* Let $H$ be the reduced GREVLEX basis of $J$. For $f \in I$,
+some $h^k f^h$ lies in $J$; its leading monomial is that of $f^h$ times $h^k$,
+and under GREVLEX the leading monomial of $f^h$ carries no $h$. A leading
+monomial in $H$ divides it, and setting $h = 1$ in a homogeneous polynomial
+maps its leading monomial to the leading monomial of the image. So
+$H|_{h=1}$ is a Gröbner basis of $I$; dropping elements whose leading
+monomial another's divides and reducing the tails gives the reduced basis.
+
+$J$ is computed exactly by fraction-free Buchberger, which proceeds degree by
+degree on homogeneous input and so avoids most intermediate coefficient
+growth. When coefficients still grow large, the library instead reconstructs
+$H$ from the reduced bases $H_p$ of the images $J_p$ modulo primes below
+$2^{31}$, computed by F4, by Chinese remaindering and rational
+reconstruction, and accepts a candidate $G$ only with a certificate:
+
+**Theorem B-4a (certified reconstruction).** Let $G$ be a set of homogeneous
+monic polynomials with rational coefficients such that (a) every element of
+$F^h$ reduces to zero modulo $G$; (b) every S-pair of $G$ kept by the
+Gebauer–Möller criteria reduces to zero modulo $G$; (c) the leading monomials
+of $G$ are those of some set $H_p \subseteq J_p$ for a prime $p$; and (d) no
+tail monomial of an element of $G$ is divisible by a leading monomial of
+$G$. Then $G$ is the reduced basis of $J$.
+
+*Proof.* By (b), $G$ is a Gröbner basis of $\langle G\rangle$, so
+$\dim \langle G \rangle_d = c_d$, the number of degree-$d$ monomials in the
+ideal of its leading monomials. By (a), $J \subseteq \langle G \rangle$.
+By (c), $c_d$ monomials of degree $d$ are leading monomials of elements of
+$J_p$, so $\dim (J_p)_d \ge c_d$. And $(J_p)_d$ is spanned by the rows of
+the Macaulay matrix of $J_d$ reduced modulo $p$, and reducing an integer
+matrix modulo $p$ cannot raise its rank, so $\dim (J_p)_d \le \dim J_d$. Hence
+$c_d \le \dim J_d \le \dim \langle G\rangle_d = c_d$ in every degree, so
+$J = \langle G \rangle$, and with (d) and monicity $G$ is its reduced basis
+(Theorem B-4). $\square$
+
+The checks (a), (b), and (d) are exact computations over the integers;
+(c) holds by construction. The theorem does not require $p$ to be a lucky
+prime [Arnold 2003]: an unlucky image can only delay certification. If
+certification does not succeed, the exact computation completes instead.
+
 **Theorem B-4 (reduced bases, cited).** Every ideal has exactly one
 reduced Gröbner basis for a given order: monic, and with no monomial of
 any element divisible by the leading monomial of another [Cox, Little and
