@@ -1396,9 +1396,16 @@ def _residue_of(value: Integer, p: UInt64) -> UInt64:
 struct _Basis(Movable):
     """The CRT basis of the first k primes, as `_Crt` in `_rational_groebner`: for
     product Q, Q_i = Q / p_i and c_i = Q_i^-1 modulo p_i, residues r_i give
-    x = sum r_i e_i - m Q with e_i = c_i Q_i and m = floor(sum r_i c_i / p_i)."""
+    x = sum r_i e_i - m Q with e_i = c_i Q_i and m = floor(sum r_i c_i / p_i).
+
+    `values` forms `_LANES` values at once, one per SIMD lane, from the
+    32-bit digits of the e_i: each digit's products with the residues stay
+    below 2^63, and their low and high halves go into columns that carry
+    once all of them are in."""
     var product: List[UInt64]
     var basis: List[UInt64]
+    var digits: List[UInt64]
+    """The e_i in 32-bit digits, 2 `limbs` each."""
     var weights: List[Float64]
     var limbs: Int
     var modulus: Integer
@@ -1433,6 +1440,11 @@ struct _Basis(Movable):
                 self.basis[i * self.limbs + l] = UInt64(x & UInt128(UInt64.MAX))
                 carry = x >> 64
             self.weights.append(Float64(c) / Float64(prime))
+        _allocation[UInt64](_product(2 * k, self.limbs), budget)
+        self.digits = List[UInt64](capacity=2 * k * self.limbs)
+        for limb in self.basis:
+            self.digits.append(limb & 0xFFFFFFFF)
+            self.digits.append(limb >> 32)
         var bytes = List[UInt8](length=8 * self.limbs, fill=0)
         for l in range(self.limbs):
             comptime for shift in range(8):
@@ -1461,6 +1473,61 @@ struct _Basis(Movable):
             _add_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
         while _compare_limbs(work, self.product) >= 0:
             _sub_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
+
+
+    def values(self, residues: List[UInt64], mut work: List[UInt64], mut sums: List[UInt64]):
+        """`value` for `_LANES` residue vectors at once, uncharged: residues[i _LANES + j] is the j-th's residue modulo the i-th prime, and its value goes to work[j (limbs + 2) :], limbs + 2 limbs. `sums` is scratch of `_LANES` (2 limbs + 2)."""
+        var k = len(self.weights)
+        var digits = 2 * self.limbs
+        var columns = sums.unsafe_ptr()
+        var mask = _Lanes(0xFFFFFFFF)
+        for d in range(digits + 2):
+            columns.unsafe_offset(_LANES * d).unsafe_store[width=_LANES](_Lanes(0))
+        var estimate = SIMD[DType.float64, _LANES](0)
+        for i in range(k):
+            var r = residues.unsafe_ptr().unsafe_offset(_LANES * i).unsafe_load[width=_LANES]()
+            estimate += r.cast[DType.float64]() * self.weights.unsafe_get(i)
+            var e = self.digits.unsafe_ptr().unsafe_offset(i * digits)
+            var high = _Lanes(0)
+            for d in range(digits):
+                # Both factors are below 2^32, which the masks make plain.
+                var x = (r & mask) * (_Lanes(e.unsafe_offset(d).unsafe_load()) & mask)
+                var column = columns.unsafe_offset(_LANES * d)
+                column.unsafe_store[width=_LANES](column.unsafe_load[width=_LANES]() + (x & mask) + high)
+                high = x >> 32
+            var column = columns.unsafe_offset(_LANES * digits)
+            column.unsafe_store[width=_LANES](column.unsafe_load[width=_LANES]() + high)
+        var carry = _Lanes(0)
+        for d in range(digits + 2):
+            var x = columns.unsafe_offset(_LANES * d).unsafe_load[width=_LANES]() + carry
+            columns.unsafe_offset(_LANES * d).unsafe_store[width=_LANES](x & mask)
+            carry = x >> 32
+        var n = self.limbs + 2
+        for lane in range(_LANES):
+            var data = work.unsafe_ptr().unsafe_offset(lane * n)
+            for l in range(self.limbs + 1):
+                var low = columns.unsafe_offset(_LANES * 2 * l + lane).unsafe_load()
+                var high = columns.unsafe_offset(_LANES * (2 * l + 1) + lane).unsafe_load()
+                data.unsafe_offset(l).unsafe_store(low | (high << 32))
+            data.unsafe_offset(self.limbs + 1).unsafe_store(0)
+            var m = UInt64(estimate[lane])
+            if m:
+                _sub_mul_1(data, n, m, self.product.unsafe_ptr(), self.limbs)
+            while (data.unsafe_offset(n - 1).unsafe_load() >> 63) != 0:
+                _add_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
+            while not self._below(data):
+                _sub_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
+
+    def _below(self, data: Pointer[mut=False, UInt64, _]) -> Bool:
+        """Whether the nonnegative limbs + 2 limbs at data are below Q."""
+        if data.unsafe_offset(self.limbs).unsafe_load() != 0 or data.unsafe_offset(self.limbs + 1).unsafe_load() != 0:
+            return False
+        for l in range(self.limbs - 1, -1, -1):
+            var x = data.unsafe_offset(l).unsafe_load()
+            var y = self.product.unsafe_get(l)
+            if x != y:
+                return x < y
+        return False
 
 
 def _compare_limbs(x: List[UInt64], y: List[UInt64]) -> Int:
@@ -1727,9 +1794,8 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
     var k = len(basis.weights)
     var limit = images.limit
     var nslots = len(lanes.columns)
-    # r_c = L v_c / lc(g_c) modulo p, with D folded in: D r_c.
-    var scaled = List[UInt64](length=k, fill=0)
-    # L D modulo each prime, `_LANES` at a time.
+    # r_c = L v_c / lc(g_c) modulo p, with D folded in: D r_c. The factors
+    # are L D modulo each prime, `_LANES` at a time.
     var factors = List[UInt64](length=k, fill=0)
     var multiple_limbs = _limbs_of(multiple)
     for i in range(k):
@@ -1745,17 +1811,37 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
     var log = 0
     while (1 << log) < nslots + 1:
         log += 1
+    # The values of up to `_LANES` slots at a time, slot - j in lane j, under
+    # the factors of their time; a new denominator voids the rest.
+    var n = basis.limbs + 2
+    var block = List[UInt64](length=_LANES * k, fill=0)
+    var block_values = List[UInt64](length=_LANES * n, fill=0)
+    var sums = List[UInt64](length=_LANES * (2 * basis.limbs + 2), fill=0)
+    var top = nslots
+    var ready = 0
     # Later columns first: their denominators tend to contain the earlier ones'.
     for slot in range(nslots - 1, -1, -1):
         var g = matrix.sources[pivot[lanes.columns[slot]]]
-        var from_ = lanes.residues.unsafe_ptr().unsafe_offset(slot * limit)
-        for batch in range(k // _LANES):
-            ref primes = images.batches[batch]
-            var v = from_.unsafe_offset(_LANES * batch).unsafe_load[width=_LANES]().cast[DType.uint64]()
-            var inverse = images.inverses[batch].unsafe_ptr().unsafe_offset(_LANES * g).unsafe_load[width=_LANES]()
-            var x = _mod_lanes(v * factors.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_load[width=_LANES](), primes)
-            scaled.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_store[width=_LANES](_mod_lanes(x * inverse, primes))
-        basis.value(scaled, work, budget)
+        if top - slot >= ready:
+            top = slot
+            ready = min(_LANES, slot + 1)
+            for j in range(ready):
+                var h = matrix.sources[pivot[lanes.columns[slot - j]]]
+                var from_ = lanes.residues.unsafe_ptr().unsafe_offset((slot - j) * limit)
+                for batch in range(k // _LANES):
+                    ref primes = images.batches[batch]
+                    var v = from_.unsafe_offset(_LANES * batch).unsafe_load[width=_LANES]().cast[DType.uint64]()
+                    var inverse = images.inverses[batch].unsafe_ptr().unsafe_offset(_LANES * h).unsafe_load[width=_LANES]()
+                    var x = _mod_lanes(v * factors.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_load[width=_LANES](), primes)
+                    var y = _mod_lanes(x * inverse, primes)
+                    comptime for l in range(_LANES):
+                        block.unsafe_get(_LANES * (_LANES * batch + l) + j) = y[l]
+            basis.values(block, block_values, sums)
+        # Charged per slot, as one `value` each.
+        budget.charge(UInt64(_product(k, basis.limbs)))
+        var lane = top - slot
+        for l in range(n):
+            work.unsafe_get(l) = block_values.unsafe_get(lane * n + l)
         comptime if _CERT_STATS:
             counts[4] += 1
         # The symmetric representative: x or x - Q, whichever is smaller.
@@ -1787,6 +1873,7 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
                 factors[i] = factors[i] * _remainder_of(b_limbs.unsafe_ptr(), len(b_limbs), p) % p
             # Earlier n_c grow by the new factor; account for it in the bound now.
             worst += b.magnitude_bit_length()
+            ready = 0
         # n_c times D / D_now, which is below 2^(bits D - bits D_now + 1) at the end:
         # counted here by charging the later growth to `worst` as it happens.
         worst = max(worst, n_bits + coefficients.bits[g])
