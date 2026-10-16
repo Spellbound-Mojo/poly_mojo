@@ -9,11 +9,12 @@ leading monomial of the reduced basis of <G> is divisible by one of G's, which
 the library's own Gröbner computation decides independently.
 """
 from std.math import max
-from apn_mojo import Integer, Rational, div_rem_euclid, div_rem_trunc
+from apn_mojo import Integer, Rational, div_rem_euclid, div_rem_trunc, inverse_mod
 from polynomials import Budget, QQ, ZZ, NoContext, SparsePoly, Term, Monomial, MonomialOrder, groebner
-from polynomials._integer_f4 import _IFMA, _PAD, _Row, _accumulate, _append_digits, _bits, _divide_exact, _divide_exact_limbs, _ifma, _limbs_of, _pair_routes, _pairs_reduce_to_zero, _Routes, _shift_out
+from polynomials._integer_f4 import _IFMA, _PAD, _Basis, _Euclid, _Row, _accumulate, _append_digits, _bits, _divide_exact, _divide_exact_limbs, _euclid, _ifma, _limbs_of, _pair_routes, _pairs_reduce_to_zero, _Routes, _shift_out
 from polynomials._packed_groebner import _Engine, _Term, _divides, _pack
 from polynomials._rational_groebner import _integral
+from polynomials._f4 import _LANES
 from support.check import Checker
 from support.rng import SplitMix64
 
@@ -223,6 +224,82 @@ def check_exact_division_limbs(mut c: Checker) raises:
             c.check(limbs_value(limbs) == qr[0], "multi-limb quotient at step " + String(step))
 
 
+def check_fractions(mut c: Checker, mut work: Budget) raises:
+    """Limb rational reconstruction against `_euclid`, for random values and for small fractions."""
+    var rng = SplitMix64(43)
+    for step in range(600):
+        var limbs = 1 + rng.below(14)
+        var modulus = random_magnitude(rng, limbs) + Integer(3)
+        var x = div_rem_euclid(random_magnitude(rng, limbs + 1), modulus)[1].copy()
+        var size = modulus.magnitude_bit_length()
+        var bits = (size - 2) // 2
+        if step % 3 == 1:
+            bits = rng.below(size + 1)
+        if step % 3 == 2:
+            # x = a / b modulo the modulus for a short a and b, when b is invertible.
+            var a = random_magnitude(rng, max(1, limbs // 3)) >> Integer(rng.below(60))
+            var b = (random_magnitude(rng, max(1, limbs // 3)) >> Integer(rng.below(60))) + Integer(1)
+            if rng.below(2) == 0:
+                a = Integer(0) - a
+            try:
+                x = div_rem_euclid(a * inverse_mod(b, modulus), modulus)[1].copy()
+            except:
+                pass
+        var limbs_of_modulus = _limbs_of(modulus)
+        var x_limbs = _limbs_of(x)
+        while len(x_limbs) < len(limbs_of_modulus) + 2:
+            x_limbs.append(0)
+        var euclid = _Euclid(len(limbs_of_modulus), work)
+        var fast = euclid.fraction(x_limbs, limbs_of_modulus, bits)
+        var slow = _euclid(x, modulus, bits)
+        var same = Bool(fast) == Bool(slow)
+        if same and fast:
+            same = fast.value()[0] == slow.value()[0] and fast.value()[1] == slow.value()[1]
+        c.check(same, "limb reconstruction at step " + String(step))
+
+
+def check_crt_spread(mut c: Checker, mut work: Budget) raises:
+    """CRT values formed `_LANES` at a time against one at a time."""
+    var rng = SplitMix64(47)
+    var primes = List[UInt64]()
+    var candidate = UInt64(1) << 31
+    while len(primes) < 64:
+        candidate -= 1
+        var prime = True
+        var d = UInt64(2)
+        while d * d <= candidate:
+            if candidate % d == 0:
+                prime = False
+                break
+            d += 1
+        if prime:
+            primes.append(candidate)
+    for k in [8, 16, 40, 64]:
+        var basis = _Basis(primes, k, work)
+        var n = basis.limbs + 2
+        var residues = List[UInt64](length=_LANES * k, fill=0)
+        for i in range(k):
+            for j in range(_LANES):
+                var r = rng.next() % primes[i]
+                if rng.below(5) == 0:
+                    r = primes[i] - 1 if rng.below(2) == 0 else UInt64(0)
+                residues[_LANES * i + j] = r
+        var spread = List[UInt64](length=_LANES * n, fill=0)
+        var sums = List[UInt64](length=_LANES * (2 * basis.limbs + 2), fill=0)
+        basis.values(residues, spread, sums)
+        for j in range(_LANES):
+            var one = List[UInt64](length=k, fill=0)
+            for i in range(k):
+                one[i] = residues[_LANES * i + j]
+            var work_limbs = List[UInt64](length=n, fill=0)
+            basis.value(one, work_limbs, work)
+            var same = True
+            for l in range(n):
+                if spread[j * n + l] != work_limbs[l]:
+                    same = False
+            c.check(same, "spread CRT value, " + String(k) + " primes, lane " + String(j))
+
+
 def packed(polys: List[SparsePoly[QQ]], order: MonomialOrder, mut work: Budget) raises -> List[List[_Term[ZZ, 8]]]:
     var result = List[List[_Term[ZZ, 8]]]()
     for p in polys:
@@ -380,6 +457,8 @@ def main() raises:
     check_digit_products(c)
     check_exact_division(c)
     check_exact_division_limbs(c)
+    check_fractions(c, work)
+    check_crt_spread(c, work)
     check_row(c, work)
     check_bases(c, work)
     c.finish()

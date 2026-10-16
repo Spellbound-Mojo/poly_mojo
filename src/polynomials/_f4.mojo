@@ -1030,7 +1030,9 @@ def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], 
         for k in range(len(fresh)):
             var p = List[_Term[ModInt, W]]()
             swap(p, fresh[k])
-            engine.insert(p^, budget)
+            engine.insert(p^, budget, heap=False)
+        # The pairs are ordered once the round's elements are all in.
+        engine.heapify_pairs(budget)
     store.extend(engine, budget)
     return _interreduce[W, record](engine, store, prime, ring, trace, budget)
 
