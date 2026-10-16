@@ -43,7 +43,7 @@ dehomogenizes to the leading monomial of its image. Dropping elements whose
 leading monomial another's divides and reducing the tails exactly gives the
 reduced basis, which is unique, so every route returns the same result.
 """
-from std.math import max
+from std.math import max, min
 from apn_mojo import Integer, Rational, div_rem_euclid, gcd as integer_gcd, inverse_mod, isqrt
 from .coefficients import ModInt, Modulus, NoContext, QQ, ZZ, _prime, _work
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product
@@ -65,6 +65,8 @@ comptime _PROBES = 16
 """Elements whose least coefficient is tried before a full reconstruction."""
 comptime _BATCH = 32
 """Primes whose residues are combined in word arithmetic before joining the accumulated values."""
+comptime _SLOTS = 2
+"""Residue slots per coefficient at first; they double up to `_BATCH` as a batch fills."""
 
 
 def _next_prime(previous: UInt64, mut budget: Budget) raises PolyError -> UInt64:
@@ -232,7 +234,9 @@ struct _Images[W: Int](Movable):
     Residues wait as words in batches of up to `_BATCH` primes. A batch is
     combined through its CRT basis in word multiples (`_Crt`) and joins the
     accumulated values in one step, so the large values are touched once per
-    batch rather than once per prime.
+    batch rather than once per prime. Each coefficient has room for as many
+    waiting residues as the batch has needed so far, so a basis that a few
+    images settle never pays for a whole batch.
     """
     var kind: UInt8
     var leads: List[_Packed[Self.W]]
@@ -245,7 +249,8 @@ struct _Images[W: Int](Movable):
     var batch: List[UInt64]
     """The primes whose residues still wait."""
     var residues: List[List[UInt32]]
-    """Each element's waiting residues, `_BATCH` slots per coefficient."""
+    """Each element's waiting residues, `slots` per coefficient."""
+    var slots: Int
     var count: Int
     var probe: Tuple[Int, Int]
     """The coefficient that last failed to reconstruct, tried first next time."""
@@ -258,6 +263,7 @@ struct _Images[W: Int](Movable):
         self.modulus = Integer(1)
         self.batch = List[UInt64]()
         self.residues = List[List[UInt32]]()
+        self.slots = _SLOTS
         self.count = 0
         self.probe = (0, 0)
 
@@ -276,6 +282,7 @@ struct _Images[W: Int](Movable):
         self.modulus = Integer(1)
         self.batch = List[UInt64]()
         self.residues = List[List[UInt32]]()
+        self.slots = _SLOTS
         self.count = 0
         self.probe = (0, 0)
 
@@ -295,10 +302,10 @@ struct _Images[W: Int](Movable):
             return
         var n = len(self.monomials[e]) + missing
         _allocation[Integer](n, budget)
-        _allocation[UInt32](n * _BATCH, budget)
+        _allocation[UInt32](n * self.slots, budget)
         var monomials = List[_Packed[Self.W]](capacity=n)
         var values = List[Integer](capacity=n)
-        var residues = List[UInt32](capacity=n * _BATCH)
+        var residues = List[UInt32](capacity=n * self.slots)
         i = 0
         var j = 0
         while i < len(self.monomials[e]) or j < len(image):
@@ -313,15 +320,15 @@ struct _Images[W: Int](Movable):
             if comparison <= 0:
                 monomials.append(self.monomials[e][i])
                 values.append(self.values[e][i].copy())
-                for slot in range(_BATCH):
-                    residues.append(self.residues[e][i * _BATCH + slot])
+                for slot in range(self.slots):
+                    residues.append(self.residues[e][i * self.slots + slot])
                 i += 1
                 if comparison == 0:
                     j += 1
             else:
                 monomials.append(image[j].monomial)
                 values.append(Integer(0))
-                for _ in range(_BATCH):
+                for _ in range(self.slots):
                     residues.append(0)
                 j += 1
         self.monomials[e] = monomials^
@@ -337,6 +344,8 @@ struct _Images[W: Int](Movable):
                 self.values.append(List[Integer]())
                 self.residues.append(List[UInt32]())
         var slot = len(self.batch)
+        if slot == self.slots:
+            self._widen(budget)
         for e in range(len(basis)):
             ref image = basis[e]
             self._cover(e, image, budget)
@@ -346,11 +355,26 @@ struct _Images[W: Int](Movable):
                 while not _equal(self.monomials[e][i], image[j].monomial):
                     budget.charge(1)
                     i += 1
-                self.residues[e][i * _BATCH + slot] = UInt32(image[j].coefficient.value)
+                self.residues[e][i * self.slots + slot] = UInt32(image[j].coefficient.value)
         self.batch.append(p)
         self.count += 1
         if len(self.batch) == _BATCH:
             self._flush(budget)
+
+    def _widen(mut self, mut budget: Budget) raises PolyError:
+        """Double the residue slots of every coefficient, up to `_BATCH`."""
+        var slots = min(2 * self.slots, _BATCH)
+        for e in range(len(self.residues)):
+            ref old = self.residues[e]
+            var n = len(old) // self.slots
+            budget.charge(UInt64(n))
+            _allocation[UInt32](n * slots, budget)
+            var residues = List[UInt32](length=n * slots, fill=0)
+            for k in range(n):
+                for slot in range(self.slots):
+                    residues.unsafe_get(k * slots + slot) = old.unsafe_get(k * self.slots + slot)
+            self.residues[e] = residues^
+        self.slots = slots
 
     def _batch_modulus(self, mut budget: Budget) raises PolyError -> Integer:
         var q = Integer(1)
@@ -389,7 +413,7 @@ struct _Images[W: Int](Movable):
         var b = len(self.batch)
         for e in range(len(self.values)):
             for k in range(len(self.values[e])):
-                var waiting = crt.value(self.residues[e], k * _BATCH, b, budget)
+                var waiting = crt.value(self.residues[e], k * self.slots, b, budget)
                 if first:
                     self.values[e][k] = waiting^
                 else:
@@ -429,7 +453,7 @@ struct _Images[W: Int](Movable):
                 continue
             var value = self.values[pe][pk].copy()
             if waiting:
-                value = self._joined(value, crt.value(self.residues[pe], pk * _BATCH, len(self.batch), budget), q, inverse, budget)
+                value = self._joined(value, crt.value(self.residues[pe], pk * self.slots, len(self.batch), budget), q, inverse, budget)
             if not _reconstruct(value, total, bound, budget):
                 self.probe = (pe, pk)
                 return False
