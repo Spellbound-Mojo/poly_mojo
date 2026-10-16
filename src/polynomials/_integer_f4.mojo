@@ -945,6 +945,31 @@ def _remainder_limbs(u: Pointer[mut=True, UInt64, _], length: Int, d: Pointer[mu
         j -= 1
 
 
+def _divide_limbs(u: Pointer[mut=True, UInt64, _], length: Int, d: Pointer[mut=False, UInt64, _], n: Int, q: Pointer[mut=True, UInt64, _]):
+    """`_remainder_limbs`, also writing the length - n + 1 quotient limbs to q."""
+    var top = UInt128(d.unsafe_offset(n - 1).unsafe_load())
+    var second = UInt128(d.unsafe_offset(n - 2).unsafe_load()) if n >= 2 else UInt128(0)
+    var j = length - n
+    while j >= 0:
+        var window = u.unsafe_offset(j)
+        var numerator = (UInt128(window.unsafe_offset(n).unsafe_load()) << 64) | UInt128(window.unsafe_offset(n - 1).unsafe_load())
+        var digit = numerator // top
+        if digit > UInt128(UInt64.MAX):
+            digit = UInt128(UInt64.MAX)
+        var r = numerator - digit * top
+        if n >= 2:
+            while r <= UInt128(UInt64.MAX) and digit * second > ((r << 64) | UInt128(window.unsafe_offset(n - 2).unsafe_load())):
+                digit -= 1
+                r += top
+        if digit != 0:
+            _sub_mul_1(window, n + 1, UInt64(digit), d, n)
+            if window.unsafe_offset(n).unsafe_load() != 0:
+                _add_mul_1(window, n + 1, 1, d, n)
+                digit -= 1
+        q.unsafe_offset(j).unsafe_store(UInt64(digit))
+        j -= 1
+
+
 def _remainder(limbs: List[UInt64], d: UInt64) -> UInt64:
     var r = UInt128(0)
     for l in range(len(limbs) - 1, -1, -1):
@@ -1136,8 +1161,9 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
             pivot[Int(matrix.entries[matrix.starts[r]])] = r
         var row = _Row(ncols)
         var lanes = _LaneRow(ncols, budget)
-        # Costs of this degree's long pairs, those reaching `_LONG` primes, in
-        # nanoseconds: a few, and then one in `_EVERY`, are also checked
+        # Costs of this degree's long pairs, those reaching `_LONG` primes, by
+        # the cost models `_modular_cost` and `_exact_cost`, which count
+        # operations, never time: a few, and then one in `_EVERY`, are also checked
         # exactly, which compares the routes on the same pairs. A modular
         # attempt stops once it costs as much as an average exact check; the
         # degree turns to the exact check alone once most attempts fail, or
@@ -1163,13 +1189,12 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
                 var allowance = 0
                 if sampled > 0:
                     allowance = sample_exact // sampled
-                var setup = images.setup
-                var before = budget.remaining()
                 var t0 = _clock()
+                var cost = 0
                 # The primes the last pair needed: attempts start a batch below.
-                k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, b, max(_FIRST_PRIMES, hint - _LANES), allowance, counts, budget)
-                spent = _weighted(Int(before - budget.remaining()) - (images.setup - setup))
-                counts[6] += Int(before - budget.remaining()) - (images.setup - setup)
+                k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, b, max(_FIRST_PRIMES, hint - _LANES), allowance, cost, counts, budget)
+                spent = cost
+                counts[6] += cost
                 counts[7] += _clock() - t0
                 if k > 0:
                     modular += 1
@@ -1178,16 +1203,19 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
                     exactly = False
                 else:
                     failed += 1
-            var sample = attempted and (k == 0 or k >= _LONG) and (sampled < _TIMED or tried % _EVERY == 0)
+            # Past the first samples, only a close comparison needs more.
+            var close = 100 * sample_modular > _CLEAR * sample_exact
+            var sample = attempted and (k == 0 or k >= _LONG) and (sampled < _TIMED or (close and tried % _EVERY == 0))
             if not exactly and not sample:
                 continue
             if exactly:
                 exact += 1
             var before = budget.remaining()
+            var terms = 0
             var t = _clock()
-            if not _reduces(row, matrix, pivot, coefficients, a, b, quotient, budget):
+            if not _reduces(row, matrix, pivot, coefficients, a, b, quotient, terms, budget):
                 return _Routes(False, modular, exact, used, counts.copy())
-            var e = Int(before - budget.remaining())
+            var e = _exact_cost(Int(before - budget.remaining()), terms, ncols - Int(matrix.entries[matrix.starts[a]]))
             counts[8] += e
             counts[9] += _clock() - t
             if sample:
@@ -1198,8 +1226,11 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
     return _Routes(True, modular, exact, used, counts.copy())
 
 
-def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, a: Int, b: Int, mut quotient: List[UInt64], mut budget: Budget) raises PolyError -> Bool:
-    """Whether the S-polynomial of matrix rows a and b, which lead in one column, reduces to zero."""
+def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, a: Int, b: Int, mut quotient: List[UInt64], mut terms: Int, mut budget: Budget) raises PolyError -> Bool:
+    """Whether the S-polynomial of matrix rows a and b, which lead in one column, reduces to zero.
+
+    Adds the number of row terms it loads to `terms`, for `_exact_cost`.
+    """
     var ga = matrix.sources[a]
     var gb = matrix.sources[b]
     var lead_a: Integer
@@ -1219,6 +1250,7 @@ def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coeffi
     row.prepare(max(coefficients.bits[ga] + _bits(fa), coefficients.bits[gb] + _bits(fb)) + 1, budget)
     _load(row, matrix, coefficients, a, fa, negative_a, False, budget)
     _load(row, matrix, coefficients, b, fb, negative_b, True, budget)
+    terms += matrix.starts[a + 1] - matrix.starts[a] + matrix.starts[b + 1] - matrix.starts[b]
     var first = Int(matrix.entries[matrix.starts[a]])
     row.set_zero(first)
     var c = row.next_marked(first + 1)
@@ -1230,6 +1262,7 @@ def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coeffi
             var q = pivot[c]
             if q < 0:
                 return False
+            terms += matrix.starts[q + 1] - matrix.starts[q]
             _cancel(row, matrix, coefficients, c, q, c, quotient, budget)
         c = row.next_marked(c + 1)
     return True
@@ -1431,17 +1464,17 @@ comptime _GIVE_UP = 4
 comptime _TIMED = 3
 """Long pairs a degree samples before comparing the routes' costs."""
 
-comptime _RATIO = 75
+comptime _RATIO = 85
 """Percent of the exact cost above which a degree leaves the modular route."""
 
 comptime _LONG = 48
 """Primes from which a pair counts as long, and may be sampled (see `_pair_routes`)."""
 
 comptime _EVERY = 32
-"""After the first `_TIMED`, one long pair in this many is sampled."""
+"""After the first `_TIMED`, one long pair in this many is sampled, while the comparison is close."""
 
-comptime _WEIGHT = 100
-"""Percent: what a budget unit of the modular route costs against one of the exact check."""
+comptime _CLEAR = 60
+"""Percent of the exact cost below which the modular route wins clearly and sampling stops."""
 
 comptime _CERT_STATS = False
 """Whether certification prints how many pairs each route proved."""
@@ -1454,9 +1487,19 @@ def _clock() -> Int:
     return 0
 
 
-def _weighted(units: Int) -> Int:
-    """Budget units of the modular route in exact-route units (`_WEIGHT`)."""
-    return units * _WEIGHT // 100
+def _exact_cost(units: Int, terms: Int, columns: Int) -> Int:
+    """The exact check's cost model, in hundredths of a nanosecond on the
+    calibration machine: from its budget units, the row terms it loaded and
+    the columns after the pair's leading one (fitted over cyclic-7/8,
+    katsura-9/10, eco-10/11 and noon-8 to a few percent)."""
+    return 79 * units + 1030 * terms + 165 * columns
+
+
+def _modular_cost(lane_units: Int, crt_units: Int, slots: Int) -> Int:
+    """The modular route's cost model, in the units of `_exact_cost`: from the
+    budget units of its lane sweeps and of its proofs, and the quotient slots
+    its attempts combine (fitted as `_exact_cost`, to about fifteen percent)."""
+    return 38 * lane_units + 232 * crt_units + 21000 * slots
 
 
 def _remainder_of(limbs: Pointer[mut=False, UInt64, _], n: Int, d: UInt64) -> UInt64:
@@ -1488,9 +1531,16 @@ def _residue_of(value: Integer, p: UInt64) -> UInt64:
 struct _Basis(Movable):
     """The CRT basis of the first k primes, as `_Crt` in `_rational_groebner`: for
     product Q, Q_i = Q / p_i and c_i = Q_i^-1 modulo p_i, residues r_i give
-    x = sum r_i e_i - m Q with e_i = c_i Q_i and m = floor(sum r_i c_i / p_i)."""
+    x = sum r_i e_i - m Q with e_i = c_i Q_i and m = floor(sum r_i c_i / p_i).
+
+    `values` forms `_LANES` values at once, one per SIMD lane, from the
+    32-bit digits of the e_i: each digit's products with the residues stay
+    below 2^63, and their low and high halves go into columns that carry
+    once all of them are in."""
     var product: List[UInt64]
     var basis: List[UInt64]
+    var digits: List[UInt64]
+    """The e_i in 32-bit digits, 2 `limbs` each."""
     var weights: List[Float64]
     var limbs: Int
     var modulus: Integer
@@ -1525,6 +1575,11 @@ struct _Basis(Movable):
                 self.basis[i * self.limbs + l] = UInt64(x & UInt128(UInt64.MAX))
                 carry = x >> 64
             self.weights.append(Float64(c) / Float64(prime))
+        _allocation[UInt64](_product(2 * k, self.limbs), budget)
+        self.digits = List[UInt64](capacity=2 * k * self.limbs)
+        for limb in self.basis:
+            self.digits.append(limb & 0xFFFFFFFF)
+            self.digits.append(limb >> 32)
         var bytes = List[UInt8](length=8 * self.limbs, fill=0)
         for l in range(self.limbs):
             comptime for shift in range(8):
@@ -1553,6 +1608,61 @@ struct _Basis(Movable):
             _add_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
         while _compare_limbs(work, self.product) >= 0:
             _sub_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
+
+
+    def values(self, residues: List[UInt64], mut work: List[UInt64], mut sums: List[UInt64]):
+        """`value` for `_LANES` residue vectors at once, uncharged: residues[i _LANES + j] is the j-th's residue modulo the i-th prime, and its value goes to work[j (limbs + 2) :], limbs + 2 limbs. `sums` is scratch of `_LANES` (2 limbs + 2)."""
+        var k = len(self.weights)
+        var digits = 2 * self.limbs
+        var columns = sums.unsafe_ptr()
+        var mask = _Lanes(0xFFFFFFFF)
+        for d in range(digits + 2):
+            columns.unsafe_offset(_LANES * d).unsafe_store[width=_LANES](_Lanes(0))
+        var estimate = SIMD[DType.float64, _LANES](0)
+        for i in range(k):
+            var r = residues.unsafe_ptr().unsafe_offset(_LANES * i).unsafe_load[width=_LANES]()
+            estimate += r.cast[DType.float64]() * self.weights.unsafe_get(i)
+            var e = self.digits.unsafe_ptr().unsafe_offset(i * digits)
+            var high = _Lanes(0)
+            for d in range(digits):
+                # Both factors are below 2^32, which the masks make plain.
+                var x = (r & mask) * (_Lanes(e.unsafe_offset(d).unsafe_load()) & mask)
+                var column = columns.unsafe_offset(_LANES * d)
+                column.unsafe_store[width=_LANES](column.unsafe_load[width=_LANES]() + (x & mask) + high)
+                high = x >> 32
+            var column = columns.unsafe_offset(_LANES * digits)
+            column.unsafe_store[width=_LANES](column.unsafe_load[width=_LANES]() + high)
+        var carry = _Lanes(0)
+        for d in range(digits + 2):
+            var x = columns.unsafe_offset(_LANES * d).unsafe_load[width=_LANES]() + carry
+            columns.unsafe_offset(_LANES * d).unsafe_store[width=_LANES](x & mask)
+            carry = x >> 32
+        var n = self.limbs + 2
+        for lane in range(_LANES):
+            var data = work.unsafe_ptr().unsafe_offset(lane * n)
+            for l in range(self.limbs + 1):
+                var low = columns.unsafe_offset(_LANES * 2 * l + lane).unsafe_load()
+                var high = columns.unsafe_offset(_LANES * (2 * l + 1) + lane).unsafe_load()
+                data.unsafe_offset(l).unsafe_store(low | (high << 32))
+            data.unsafe_offset(self.limbs + 1).unsafe_store(0)
+            var m = UInt64(estimate[lane])
+            if m:
+                _sub_mul_1(data, n, m, self.product.unsafe_ptr(), self.limbs)
+            while (data.unsafe_offset(n - 1).unsafe_load() >> 63) != 0:
+                _add_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
+            while not self._below(data):
+                _sub_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
+
+    def _below(self, data: Pointer[mut=False, UInt64, _]) -> Bool:
+        """Whether the nonnegative limbs + 2 limbs at data are below Q."""
+        if data.unsafe_offset(self.limbs).unsafe_load() != 0 or data.unsafe_offset(self.limbs + 1).unsafe_load() != 0:
+            return False
+        for l in range(self.limbs - 1, -1, -1):
+            var x = data.unsafe_offset(l).unsafe_load()
+            var y = self.product.unsafe_get(l)
+            if x != y:
+                return x < y
+        return False
 
 
 def _compare_limbs(x: List[UInt64], y: List[UInt64]) -> Int:
@@ -1587,8 +1697,6 @@ struct _PairPrimes(Movable):
     """Per batch, each element's leading coefficient inverse, `_LANES` per element."""
     var bases: List[_Basis]
     """The CRT basis of the first `_LANES` * (i + 1) primes."""
-    var setup: Int
-    """Budget units charged preparing batches and bases, left out of the routes' costs."""
 
     def __init__(out self, coefficients: _Coefficients, limit: Int, mut budget: Budget) raises PolyError:
         self.limit = (limit // _LANES) * _LANES
@@ -1597,7 +1705,6 @@ struct _PairPrimes(Movable):
         self.values = List[List[List[UInt32]]]()
         self.inverses = List[List[UInt64]]()
         self.bases = List[_Basis]()
-        self.setup = 0
         var candidate = UInt64(1) << 31
         while len(self.primes) < self.limit:
             candidate -= 1
@@ -1616,7 +1723,6 @@ struct _PairPrimes(Movable):
         """Prepare the residues of batches up to `batch`."""
         if len(self.batches) > batch:
             return
-        var start = budget.remaining()
         while len(self.batches) <= batch:
             var b = len(self.batches)
             var rings = List[Modulus]()
@@ -1646,14 +1752,11 @@ struct _PairPrimes(Movable):
             self.batches.append(lanes^)
             self.values.append(values^)
             self.inverses.append(inverses^)
-        self.setup += Int(start - budget.remaining())
 
     def basis(mut self, attempt: Int, mut budget: Budget) raises PolyError:
         """Prepare the CRT basis of attempt `attempt`."""
-        var start = budget.remaining()
         while len(self.bases) <= attempt:
             self.bases.append(_Basis(self.primes, _LANES * (len(self.bases) + 1), budget))
-        self.setup += Int(start - budget.remaining())
 
 
 struct _LaneRow(Movable):
@@ -1838,7 +1941,7 @@ def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int]
     return True
 
 
-def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, mut images: _PairPrimes, a: Int, b: Int, first: Int, allowance: Int, mut counts: List[Int], mut budget: Budget) raises PolyError -> Int:
+def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, mut images: _PairPrimes, a: Int, b: Int, first: Int, allowance: Int, mut cost: Int, mut counts: List[Int], mut budget: Budget) raises PolyError -> Int:
     """The number of primes that proved the S-polynomial of rows a and b reduces to zero, or 0 if they did not.
 
     Modulo each prime p the reduction gives S = sum r_c R_c, R_c the row
@@ -1852,9 +1955,9 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
     Primes come in batches of `_LANES`, the first alone and later ones two
     at a time; an attempt follows each batch from `first` primes on. Gives
     up after `images.limit` primes, or, when `allowance` is positive, after
-    the attempt that brings its cost past it: `_weighted` budget units,
-    besides those preparing primes. Every decision follows budget charges,
-    so a route never depends on timing.
+    the attempt that brings its cost past it. Its cost, by `_modular_cost`,
+    is added to `cost`; every decision follows that count, so a route never
+    depends on timing.
     """
     var ga = matrix.sources[a]
     var gb = matrix.sources[b]
@@ -1871,22 +1974,24 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
     # S = la R_a - lb R_b bounds its coefficients by 2^s.
     var s_bits = max(coefficients.bits[ga] + la.magnitude_bit_length(), coefficients.bits[gb] + lb.magnitude_bit_length()) + 1
     var limit = images.limit
-    var start = budget.remaining()
-    var setup = images.setup
     var batch = 0
     var proved = 0
+    var own = 0
     while _LANES * batch < limit:
         # The first batch alone, which often suffices; later ones two at a time.
         var two = batch > 0 and _LANES * (batch + 2) <= limit
         images.ensure(batch + 1 if two else batch, coefficients, budget)
         var t0 = _clock()
+        var units = budget.remaining()
         var passed: Bool
         if two:
             passed = _lane_pass_two(lanes, matrix, pivot, images.values[batch], images.values[batch + 1], images.batches[batch], images.batches[batch + 1], a, b, batch, limit, budget)
         else:
             passed = _lane_pass(lanes, matrix, pivot, images.values[batch], images.batches[batch], a, b, batch, limit, budget)
         counts[0] += _clock() - t0
+        own += _modular_cost(Int(units - budget.remaining()), 0, 0)
         if not passed:
+            cost += own
             return 0
         for _ in range(2 if two else 1):
             batch += 1
@@ -1896,15 +2001,18 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
             var attempt = batch - 1
             images.basis(attempt, budget)
             var t1 = _clock()
+            var crt = budget.remaining()
             var proves = _proves(lanes, matrix, pivot, coefficients, images, attempt, multiple, s_bits, counts, budget)
+            own += _modular_cost(0, Int(crt - budget.remaining()), len(lanes.columns))
             counts[1] += _clock() - t1
             counts[2] += 1
             if proves:
                 proved = k
                 break
-        if proved > 0 or (allowance > 0 and _weighted(Int(start - budget.remaining()) - (images.setup - setup)) > allowance):
+        if proved > 0 or (allowance > 0 and own > allowance):
             break
     lanes.clear(_LANES)
+    cost += own
     return proved
 
 
@@ -1914,9 +2022,8 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
     var k = len(basis.weights)
     var limit = images.limit
     var nslots = len(lanes.columns)
-    # r_c = L v_c / lc(g_c) modulo p, with D folded in: D r_c.
-    var scaled = List[UInt64](length=k, fill=0)
-    # L D modulo each prime, `_LANES` at a time.
+    # r_c = L v_c / lc(g_c) modulo p, with D folded in: D r_c. The factors
+    # are L D modulo each prime, `_LANES` at a time.
     var factors = List[UInt64](length=k, fill=0)
     var multiple_limbs = _limbs_of(multiple)
     for i in range(k):
@@ -1932,23 +2039,51 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
     var log = 0
     while (1 << log) < nslots + 1:
         log += 1
+    # The values of up to `_LANES` slots at a time, slot - j in lane j, under
+    # the factors of their time; a new denominator voids the rest.
+    var n = basis.limbs + 2
+    var block = List[UInt64](length=_LANES * k, fill=0)
+    var block_values = List[UInt64](length=_LANES * n, fill=0)
+    var sums = List[UInt64](length=_LANES * (2 * basis.limbs + 2), fill=0)
+    var euclid = _Euclid(basis.limbs, budget)
+    var half_q = List[UInt64](length=basis.limbs, fill=0)
+    for l in range(basis.limbs):
+        half_q[l] = (basis.product[l] >> 1) | ((basis.product[l + 1] << 63) if l + 1 < basis.limbs else UInt64(0))
+    var top = nslots
+    var ready = 0
     # Later columns first: their denominators tend to contain the earlier ones'.
     for slot in range(nslots - 1, -1, -1):
         var g = matrix.sources[pivot[lanes.columns[slot]]]
-        var from_ = lanes.residues.unsafe_ptr().unsafe_offset(slot * limit)
-        for batch in range(k // _LANES):
-            ref primes = images.batches[batch]
-            var v = from_.unsafe_offset(_LANES * batch).unsafe_load[width=_LANES]().cast[DType.uint64]()
-            var inverse = images.inverses[batch].unsafe_ptr().unsafe_offset(_LANES * g).unsafe_load[width=_LANES]()
-            var x = _mod_lanes(v * factors.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_load[width=_LANES](), primes)
-            scaled.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_store[width=_LANES](_mod_lanes(x * inverse, primes))
-        basis.value(scaled, work, budget)
-        counts[4] += 1
-        # The symmetric representative: x or x - Q, whichever is smaller.
-        for l in range(basis.limbs + 2):
-            other[l] = basis.product[l] if l < basis.limbs else UInt64(0)
-        _ = _subtract_limbs(other.unsafe_ptr(), basis.limbs + 2, work.unsafe_ptr(), basis.limbs + 2)
-        var size = min(_bits(work), _bits(other))
+        if top - slot >= ready:
+            top = slot
+            ready = min(_LANES, slot + 1)
+            for j in range(ready):
+                var h = matrix.sources[pivot[lanes.columns[slot - j]]]
+                var from_ = lanes.residues.unsafe_ptr().unsafe_offset((slot - j) * limit)
+                for batch in range(k // _LANES):
+                    ref primes = images.batches[batch]
+                    var v = from_.unsafe_offset(_LANES * batch).unsafe_load[width=_LANES]().cast[DType.uint64]()
+                    var inverse = images.inverses[batch].unsafe_ptr().unsafe_offset(_LANES * h).unsafe_load[width=_LANES]()
+                    var x = _mod_lanes(v * factors.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_load[width=_LANES](), primes)
+                    var y = _mod_lanes(x * inverse, primes)
+                    comptime for l in range(_LANES):
+                        block.unsafe_get(_LANES * (_LANES * batch + l) + j) = y[l]
+            basis.values(block, block_values, sums)
+        # Charged per slot, as one `value` each.
+        budget.charge(UInt64(_product(k, basis.limbs)))
+        var x = block_values.unsafe_ptr().unsafe_offset((top - slot) * n)
+        comptime if _CERT_STATS:
+            counts[4] += 1
+        # The symmetric representative: x or x - Q, whichever is smaller; x
+        # is the smaller exactly when it is at most floor(Q / 2).
+        var size: Int
+        if _compare_at(x, basis.limbs, half_q.unsafe_ptr()) <= 0:
+            size = _bits_at(x, basis.limbs)
+        else:
+            for l in range(basis.limbs):
+                other.unsafe_get(l) = basis.product.unsafe_get(l)
+            _ = _subtract_limbs(other.unsafe_ptr(), basis.limbs, x, basis.limbs)
+            size = _bits_at(other.unsafe_ptr(), basis.limbs)
         var n_bits: Int
         if max(worst, size + coefficients.bits[g]) + log + 1 < basis.bits - 1:
             # Small enough for the bound as it is: n_c is this value.
@@ -1958,7 +2093,9 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
             counts[3] += 1
             var t0 = _clock()
             budget.charge(UInt64(_product(basis.limbs, basis.limbs)))
-            var found = _fraction(_limbs_to_integer(work, basis.limbs), basis.modulus, half)
+            for l in range(n):
+                work.unsafe_get(l) = x.unsafe_offset(l).unsafe_load()
+            var found = euclid.fraction(work, basis.product, half)
             counts[5] += _clock() - t0
             if not found:
                 return False
@@ -1972,6 +2109,7 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
                 factors[i] = factors[i] * _remainder_of(b_limbs.unsafe_ptr(), len(b_limbs), p) % p
             # Earlier n_c grow by the new factor; account for it in the bound now.
             worst += b.magnitude_bit_length()
+            ready = 0
         # n_c times D / D_now, which is below 2^(bits D - bits D_now + 1) at the end:
         # counted here by charging the later growth to `worst` as it happens.
         worst = max(worst, n_bits + coefficients.bits[g])
@@ -1980,6 +2118,185 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
     worst = max(worst, d_bits + s_bits)
     # |D S - sum n_c R_c| <= (nslots + 1) 2^worst, and must stay below Q / 2.
     return worst + log + 1 < basis.bits - 1
+
+
+def _bits_at(x: Pointer[mut=False, UInt64, _], n: Int) -> Int:
+    """The bit length of the nonnegative x[0:n]."""
+    var l = n - 1
+    while l >= 0 and x.unsafe_offset(l).unsafe_load() == 0:
+        l -= 1
+    if l < 0:
+        return 0
+    return 64 * l + 64 - Int(count_leading_zeros(x.unsafe_offset(l).unsafe_load()))
+
+
+def _compare_at(x: Pointer[mut=False, UInt64, _], n: Int, y: Pointer[mut=False, UInt64, _]) -> Int:
+    """The sign of x[0:n] - y[0:n]."""
+    for l in range(n - 1, -1, -1):
+        var a = x.unsafe_offset(l).unsafe_load()
+        var b = y.unsafe_offset(l).unsafe_load()
+        if a != b:
+            return 1 if a > b else -1
+    return 0
+
+
+def _bits_window(x: Pointer[mut=False, UInt64, _], shift: Int) -> Int:
+    """Bits shift to shift + 61 of the nonnegative x, which has no bit above them."""
+    var w = shift // 64
+    var b = shift % 64
+    var low = x.unsafe_offset(w).unsafe_load() >> UInt64(b)
+    var high = (x.unsafe_offset(w + 1).unsafe_load() << UInt64(64 - b)) if b > 0 and b + 62 > 64 else UInt64(0)
+    return Int((low | high) & ((UInt64(1) << 62) - 1))
+
+
+@always_inline
+def _combine(target: Pointer[mut=True, UInt64, _], n: Int, f: Int, x: Pointer[mut=False, UInt64, _], g: Int, y: Pointer[mut=False, UInt64, _]):
+    """target = f x + g y, all n-limb two's complement, modulo 2^(64 n)."""
+    for l in range(n):
+        target.unsafe_offset(l).unsafe_store(0)
+    if f > 0:
+        _add_mul_1(target, n, UInt64(f), x, n)
+    elif f < 0:
+        _sub_mul_1(target, n, UInt64(-f), x, n)
+    if g > 0:
+        _add_mul_1(target, n, UInt64(g), y, n)
+    elif g < 0:
+        _sub_mul_1(target, n, UInt64(-g), y, n)
+
+
+struct _Euclid(Movable):
+    """`_euclid` in limbs, for values below a modulus of `limbs` limbs.
+
+    The remainders r and cofactors t live in n = limbs + 1 limbs of two's
+    complement; every combination is exact modulo 2^(64 n) and the true
+    values fit. The steps are `_euclid`'s: the same Lehmer matrices from the
+    same leading bits while r1 is long, then one exact division at a time,
+    so the remainder sequence, and where it stops, are the same.
+    """
+    var n: Int
+    var r0: List[UInt64]
+    var r1: List[UInt64]
+    var t0: List[UInt64]
+    var t1: List[UInt64]
+    var next0: List[UInt64]
+    var next1: List[UInt64]
+    var dividend: List[UInt64]
+    var divisor: List[UInt64]
+    var quotient: List[UInt64]
+
+    def __init__(out self, limbs: Int, mut budget: Budget) raises PolyError:
+        self.n = limbs + 1
+        _allocation[UInt64](_product(10, self.n + 2), budget)
+        self.r0 = List[UInt64](length=self.n, fill=0)
+        self.r1 = List[UInt64](length=self.n, fill=0)
+        self.t0 = List[UInt64](length=self.n, fill=0)
+        self.t1 = List[UInt64](length=self.n, fill=0)
+        self.next0 = List[UInt64](length=self.n, fill=0)
+        self.next1 = List[UInt64](length=self.n, fill=0)
+        self.dividend = List[UInt64](length=self.n + 2, fill=0)
+        self.divisor = List[UInt64](length=self.n, fill=0)
+        self.quotient = List[UInt64](length=self.n + 1, fill=0)
+
+    def fraction(mut self, x: List[UInt64], modulus: List[UInt64], bits: Int) -> Optional[Tuple[Integer, Integer]]:
+        """As `_euclid(x, modulus, bits)`, for 0 <= x < modulus, both given in limbs."""
+        var n = self.n
+        for l in range(n):
+            self.r0.unsafe_get(l) = modulus[l] if l < len(modulus) else UInt64(0)
+            self.r1.unsafe_get(l) = x[l] if l < n - 1 else UInt64(0)
+            self.t0.unsafe_get(l) = 0
+            self.t1.unsafe_get(l) = 1 if l == 0 else UInt64(0)
+        var stop = bits + 128
+        while True:
+            var length1 = _bits_at(self.r1.unsafe_ptr(), n)
+            if length1 <= bits:
+                break
+            if length1 > stop:
+                var shift = _bits_at(self.r0.unsafe_ptr(), n) - 62
+                var u = _bits_window(self.r0.unsafe_ptr(), shift)
+                var w = _bits_window(self.r1.unsafe_ptr(), shift)
+                var a = 1
+                var b = 0
+                var c = 0
+                var d = 1
+                while w + c != 0 and w + d != 0:
+                    var q = (u + a) // (w + c)
+                    if q != (u + b) // (w + d):
+                        break
+                    var t = a - q * c
+                    a = c
+                    c = t
+                    t = b - q * d
+                    b = d
+                    d = t
+                    t = u - q * w
+                    u = w
+                    w = t
+                if b != 0:
+                    _combine(self.next0.unsafe_ptr(), n, a, self.r0.unsafe_ptr(), b, self.r1.unsafe_ptr())
+                    _combine(self.next1.unsafe_ptr(), n, c, self.r0.unsafe_ptr(), d, self.r1.unsafe_ptr())
+                    swap(self.r0, self.next0)
+                    swap(self.r1, self.next1)
+                    _combine(self.next0.unsafe_ptr(), n, a, self.t0.unsafe_ptr(), b, self.t1.unsafe_ptr())
+                    _combine(self.next1.unsafe_ptr(), n, c, self.t0.unsafe_ptr(), d, self.t1.unsafe_ptr())
+                    swap(self.t0, self.next0)
+                    swap(self.t1, self.next1)
+                    continue
+            self._step(length1)
+        # r1 is below 2^bits; t1 must be nonzero and as short.
+        var negative = (self.t1.unsafe_get(n - 1) >> 63) != 0
+        if negative:
+            for l in range(n):
+                self.next1.unsafe_get(l) = 0
+            _ = _subtract_limbs(self.next1.unsafe_ptr(), n, self.t1.unsafe_ptr(), n)
+        else:
+            for l in range(n):
+                self.next1.unsafe_get(l) = self.t1.unsafe_get(l)
+        var length = _bits_at(self.next1.unsafe_ptr(), n)
+        if length == 0 or length > bits:
+            return None
+        var bytes = List[UInt8](length=8 * n, fill=0)
+        for l in range(n):
+            comptime for shift in range(8):
+                bytes[8 * l + shift] = UInt8((self.r1.unsafe_get(l) >> UInt64(8 * shift)) & 0xFF)
+        # The sign goes to the numerator, as `_euclid` gives it.
+        return (Integer.from_bytes(bytes, negative=negative), _limbs_to_integer(self.next1, n))
+
+    def _step(mut self, length1: Int):
+        """One Euclidean step: (r0, r1) = (r1, r0 mod r1) and (t0, t1) = (t1, t0 - q t1)."""
+        var n = self.n
+        var m = (length1 + 63) // 64
+        var shift = Int(count_leading_zeros(self.r1.unsafe_get(m - 1)))
+        var length0 = _bits_at(self.r0.unsafe_ptr(), n)
+        var size = max((length0 + shift + 63) // 64, m)
+        # The normalized divisor and dividend, with a zero limb above the dividend.
+        var carry = UInt64(0)
+        for l in range(m):
+            var limb = self.r1.unsafe_get(l)
+            self.divisor.unsafe_get(l) = (limb << UInt64(shift)) | carry
+            carry = limb >> UInt64(64 - shift) if shift > 0 else UInt64(0)
+        carry = 0
+        for l in range(size + 1):
+            var limb = self.r0.unsafe_get(l) if l < n else UInt64(0)
+            self.dividend.unsafe_get(l) = (limb << UInt64(shift)) | carry
+            carry = limb >> UInt64(64 - shift) if shift > 0 else UInt64(0)
+        self.dividend.unsafe_get(size + 1) = 0
+        _divide_limbs(self.dividend.unsafe_ptr(), size, self.divisor.unsafe_ptr(), m, self.quotient.unsafe_ptr())
+        # The remainder, shifted back, becomes r1; r1 becomes r0.
+        for l in range(n):
+            var low = self.dividend.unsafe_get(l) >> UInt64(shift) if l < m else UInt64(0)
+            var high = (self.dividend.unsafe_get(l + 1) << UInt64(64 - shift)) if shift > 0 and l + 1 < m else UInt64(0)
+            self.next1.unsafe_get(l) = low | high
+        swap(self.r0, self.r1)
+        swap(self.r1, self.next1)
+        # t0 - q t1, then the rotation.
+        for l in range(n):
+            self.next0.unsafe_get(l) = self.t0.unsafe_get(l)
+        for j in range(size - m + 1):
+            var digit = self.quotient.unsafe_get(j)
+            if digit != 0 and j < n:
+                _sub_mul_1(self.next0.unsafe_ptr().unsafe_offset(j), n - j, digit, self.t1.unsafe_ptr(), n - j)
+        swap(self.t0, self.t1)
+        swap(self.t1, self.next0)
 
 
 def _times(x: Integer, y: Integer) raises PolyError -> Integer:
