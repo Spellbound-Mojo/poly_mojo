@@ -28,12 +28,13 @@ tells whether the division is exact. Products of long factors go through
 52-bit digits and AVX-512 IFMA where the target has it.
 """
 from std.bit import count_leading_zeros, count_trailing_zeros
+from std.collections import Dict
 from std.math import max, min
 from std.sys import CompilationTarget, llvm_intrinsic
 from apn_mojo import Integer, div_rem_trunc, gcd as integer_gcd
 from .coefficients import ZZ
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product
-from ._f4 import _Matrix, _Store
+from ._f4 import _Matrix, _Store, _raw_hash
 from ._packed_groebner import _Engine, _Packed, _Term, _div
 
 comptime _SLACK = 16
@@ -974,12 +975,26 @@ def _pairs_reduce_to_zero[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: 
     while len(engine.pairs):
         var degree = engine.pairs[0].lcm.degree
         var matrix = _Matrix[W]()
-        var halves = List[Int]()
+        # Both halves of every pair, as rows. A half is fixed by its element
+        # and its leading monomial, the pair's LCM, so equal halves share a row.
+        var halves = List[Tuple[Int, Int]]()
+        var seen = Dict[Int, Int]()
+        var stride = len(engine.polys)
         while len(engine.pairs) and engine.pairs[0].lcm.degree == degree:
             var pair = engine.select(budget)
-            halves.append(len(matrix.sources))
-            matrix.add_row(engine, store, pair.first, _div(pair.lcm, engine.leads[pair.first]), budget)
-            matrix.add_row(engine, store, pair.second, _div(pair.lcm, engine.leads[pair.second]), budget)
+            matrix.columns.reserve(1, budget)
+            var lead = Int(matrix.columns.find(pair.lcm, _raw_hash(pair.lcm)))
+            var rows = List[Int](capacity=2)
+            for source in [pair.first, pair.second]:
+                var key = lead * stride + source
+                var known = seen.get(key)
+                if known:
+                    rows.append(known.value())
+                    continue
+                seen[key] = len(matrix.sources)
+                rows.append(len(matrix.sources))
+                matrix.add_row(engine, store, source, _div(pair.lcm, engine.leads[source]), budget)
+            halves.append((rows[0], rows[1]))
         matrix.preprocess(engine, store, budget)
         var order = matrix.number(engine.kind, budget)
         var ncols = len(order)
@@ -989,15 +1004,14 @@ def _pairs_reduce_to_zero[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: 
         for r in range(nrows - 1, -1, -1):
             pivot[Int(matrix.entries[matrix.starts[r]])] = r
         var row = _Row(ncols)
-        for a in halves:
-            if not _reduces(row, matrix, pivot, coefficients, a, quotient, budget):
+        for half in halves:
+            if not _reduces(row, matrix, pivot, coefficients, half[0], half[1], quotient, budget):
                 return False
     return True
 
 
-def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, a: Int, mut quotient: List[UInt64], mut budget: Budget) raises PolyError -> Bool:
-    """Whether the S-polynomial of matrix rows a and a + 1, which lead in one column, reduces to zero."""
-    var b = a + 1
+def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, a: Int, b: Int, mut quotient: List[UInt64], mut budget: Budget) raises PolyError -> Bool:
+    """Whether the S-polynomial of matrix rows a and b, which lead in one column, reduces to zero."""
     var ga = matrix.sources[a]
     var gb = matrix.sources[b]
     var lead_a: Integer
