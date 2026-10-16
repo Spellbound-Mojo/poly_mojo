@@ -30,6 +30,7 @@ tells whether the division is exact. Products of long factors go through
 from std.bit import count_leading_zeros, count_trailing_zeros
 from std.math import max, min
 from std.sys import CompilationTarget, llvm_intrinsic
+from std.sys._assembly import inlined_assembly
 from apn_mojo import Integer, div_rem_trunc, gcd as integer_gcd
 from .coefficients import ZZ
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product
@@ -47,6 +48,12 @@ comptime _IFMA = CompilationTarget._has_feature["avx512ifma"]()
 
 comptime _IFMA_MIN = 12
 """With IFMA, products whose factors are both at least this many limbs long go through 52-bit digits."""
+
+comptime _ADX = CompilationTarget._has_feature["adx"]() and CompilationTarget._has_feature["bmi2"]()
+"""Whether the target has mulx, adcx and adox, for multiply-add chains in two carry flags."""
+
+comptime _ROWS = 8
+"""With mulx, adcx and adox, products whose longer factor has at least this many limbs go a row at a time."""
 
 comptime _PAD = 32
 """Zero digits on each side of a digit string, for the IFMA loads that run past its ends."""
@@ -565,6 +572,10 @@ def _accumulate[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, 
     if na > nb:
         _accumulate[subtract](data, width, b, nb, a, na)
         return
+    comptime if _ADX:
+        if nb >= _ROWS:
+            _rows[subtract](data, width, a, na, b, nb)
+            return
     if na >= _COMBA:
         _comba[subtract](data, width, a, na, b, nb)
         return
@@ -630,6 +641,176 @@ def _sub_mul_1[whole: Bool = False, extend: Bool = False](data: Pointer[mut=True
         borrow = high + (UInt64(1) if e < low else UInt64(0))
         l += 1
     _borrow_word[whole, extend](data, width, l, borrow, valid, fill)
+
+
+@always_inline
+def _adx_add_mul_4(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int) -> UInt64:
+    """data[0:n] += f * other[0:n] for n a positive multiple of four; return the carry out, below 2^64.
+
+    The products' high words go in by adcx (the carry flag) and the data by
+    adox (the overflow flag): two carry chains that do not wait on each other.
+    """
+    return inlined_assembly[
+        """
+        mov $1, %rdi
+        mov $2, %rsi
+        mov $3, %rcx
+        mov $4, %rdx
+        lea (%rdi,%rcx,8), %rdi
+        lea (%rsi,%rcx,8), %rsi
+        neg %rcx
+        xor %r8d, %r8d
+        1:
+        mulx (%rsi,%rcx,8), %r9, %r10
+        adcx %r8, %r9
+        adox (%rdi,%rcx,8), %r9
+        mov %r9, (%rdi,%rcx,8)
+        mulx 8(%rsi,%rcx,8), %r9, %r8
+        adcx %r10, %r9
+        adox 8(%rdi,%rcx,8), %r9
+        mov %r9, 8(%rdi,%rcx,8)
+        mulx 16(%rsi,%rcx,8), %r9, %r10
+        adcx %r8, %r9
+        adox 16(%rdi,%rcx,8), %r9
+        mov %r9, 16(%rdi,%rcx,8)
+        mulx 24(%rsi,%rcx,8), %r9, %r8
+        adcx %r10, %r9
+        adox 24(%rdi,%rcx,8), %r9
+        mov %r9, 24(%rdi,%rcx,8)
+        lea 4(%rcx), %rcx
+        jrcxz 2f
+        jmp 1b
+        2:
+        mov $$0, %r9
+        adcx %r9, %r8
+        adox %r9, %r8
+        mov %r8, $0
+        """,
+        UInt64,
+        constraints="=&r,r,r,r,r,~{rdi},~{rsi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{memory},~{cc}",
+    ](data, other, n, f)
+
+@always_inline
+def _adx_sub_mul_4(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int) -> UInt64:
+    """data[0:n] -= f * other[0:n] for n a positive multiple of four; return the borrow out.
+
+    As `_adx_add_mul_4`, adding the complement of the product with the
+    overflow flag set first, so the overflow out is one minus the borrow.
+    """
+    return inlined_assembly[
+        """
+        mov $1, %rdi
+        mov $2, %rsi
+        mov $3, %rcx
+        mov $4, %rdx
+        lea (%rdi,%rcx,8), %rdi
+        lea (%rsi,%rcx,8), %rsi
+        neg %rcx
+        mov $$0x7fffffffffffffff, %r8
+        add $$1, %r8
+        mov $$0, %r8
+        1:
+        mulx (%rsi,%rcx,8), %r9, %r10
+        adcx %r8, %r9
+        not %r9
+        adox (%rdi,%rcx,8), %r9
+        mov %r9, (%rdi,%rcx,8)
+        mulx 8(%rsi,%rcx,8), %r9, %r8
+        adcx %r10, %r9
+        not %r9
+        adox 8(%rdi,%rcx,8), %r9
+        mov %r9, 8(%rdi,%rcx,8)
+        mulx 16(%rsi,%rcx,8), %r9, %r10
+        adcx %r8, %r9
+        not %r9
+        adox 16(%rdi,%rcx,8), %r9
+        mov %r9, 16(%rdi,%rcx,8)
+        mulx 24(%rsi,%rcx,8), %r9, %r8
+        adcx %r10, %r9
+        not %r9
+        adox 24(%rdi,%rcx,8), %r9
+        mov %r9, 24(%rdi,%rcx,8)
+        lea 4(%rcx), %rcx
+        jrcxz 2f
+        jmp 1b
+        2:
+        mov $$0, %r9
+        adcx %r9, %r8
+        adox %r9, %r9
+        lea 1(%r8), %r8
+        sub %r9, %r8
+        mov %r8, $0
+        """,
+        UInt64,
+        constraints="=&r,r,r,r,r,~{rdi},~{rsi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{memory},~{cc}",
+    ](data, other, n, f)
+
+@always_inline
+def _mul_row[subtract: Bool](data: Pointer[mut=True, UInt64, _], f: UInt64, b: Pointer[mut=False, UInt64, _], n: Int) -> UInt64:
+    """data[0:n] += f * b[0:n], or -= when `subtract`; return the carry or borrow out, below 2^64.
+
+    Whole groups of four limbs go through mulx, adcx and adox.
+    """
+    var q = n & ~3
+    var carry = UInt64(0)
+    if q > 0:
+        comptime if subtract:
+            carry = _adx_sub_mul_4(data, f, b, q)
+        else:
+            carry = _adx_add_mul_4(data, f, b, q)
+    var g = UInt128(f)
+    for l in range(q, n):
+        var p = g * UInt128(b.unsafe_offset(l).unsafe_load())
+        var low = UInt64(p & UInt128(UInt64.MAX))
+        var high = UInt64(p >> 64)
+        var e = data.unsafe_offset(l).unsafe_load()
+        comptime if subtract:
+            low += carry
+            high += UInt64(1) if low < carry else UInt64(0)
+            data.unsafe_offset(l).unsafe_store(e - low)
+            carry = high + (UInt64(1) if e < low else UInt64(0))
+        else:
+            low += e
+            high += UInt64(1) if low < e else UInt64(0)
+            low += carry
+            high += UInt64(1) if low < carry else UInt64(0)
+            data.unsafe_offset(l).unsafe_store(low)
+            carry = high
+    return carry
+
+def _rows[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int):
+    """`_accumulate` with mulx, adcx and adox, a row per limb of a.
+
+    Row i adds a[i] b at limb i and leaves its carry at limb i + nb, where a
+    bit carried out of that limb waits for the next row's carry.
+    """
+    var pending = UInt64(0)
+    var top = min(na + nb, width)
+    for i in range(min(na, width)):
+        var n = min(nb, width - i)
+        var c = _mul_row[subtract](data.unsafe_offset(i), a.unsafe_offset(i).unsafe_load(), b, n)
+        var at = i + n
+        if at >= width:
+            # The carry is past the width, as are the later rows' carries.
+            pending = 0
+            continue
+        var e = data.unsafe_offset(at).unsafe_load()
+        comptime if subtract:
+            var t = c + pending
+            var over = UInt64(1) if t < c else UInt64(0)
+            data.unsafe_offset(at).unsafe_store(e - t)
+            pending = over + (UInt64(1) if e < t else UInt64(0))
+        else:
+            var t = e + c
+            var over = UInt64(1) if t < c else UInt64(0)
+            var t2 = t + pending
+            over += UInt64(1) if t2 < pending else UInt64(0)
+            data.unsafe_offset(at).unsafe_store(t2)
+            pending = over
+    comptime if subtract:
+        _borrow_word[True](data, width, top, pending)
+    else:
+        _carry_word[True](data, width, top, pending)
 
 
 @always_inline
