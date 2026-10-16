@@ -833,6 +833,37 @@ def _subtract_limbs(x: Pointer[mut=True, UInt64, _], nx: Int, y: Pointer[mut=Fal
     return borrow
 
 
+def _remainder_limbs(u: Pointer[mut=True, UInt64, _], length: Int, d: Pointer[mut=False, UInt64, _], n: Int):
+    """Reduce u[0:length] modulo d[0:n] in place, leaving the remainder in u[0:n].
+
+    Schoolbook division (Knuth's algorithm D) by a normalized divisor: the
+    top limb of d has its high bit set. Needs length >= n >= 1 and a zero
+    limb at u[length]. Each quotient limb is estimated from two limbs over
+    one, refined against the divisor's second limb, and corrected at most
+    once more after the subtraction.
+    """
+    var top = UInt128(d.unsafe_offset(n - 1).unsafe_load())
+    var second = UInt128(d.unsafe_offset(n - 2).unsafe_load()) if n >= 2 else UInt128(0)
+    var j = length - n
+    while j >= 0:
+        var window = u.unsafe_offset(j)
+        var numerator = (UInt128(window.unsafe_offset(n).unsafe_load()) << 64) | UInt128(window.unsafe_offset(n - 1).unsafe_load())
+        var q = numerator // top
+        if q > UInt128(UInt64.MAX):
+            q = UInt128(UInt64.MAX)
+        var r = numerator - q * top
+        if n >= 2:
+            while r <= UInt128(UInt64.MAX) and q * second > ((r << 64) | UInt128(window.unsafe_offset(n - 2).unsafe_load())):
+                q -= 1
+                r += top
+        if q != 0:
+            _sub_mul_1(window, n + 1, UInt64(q), d, n)
+            if window.unsafe_offset(n).unsafe_load() != 0:
+                # One too many: the window went negative, and adding d back clears its top limb.
+                _add_mul_1(window, n + 1, 1, d, n)
+        j -= 1
+
+
 def _remainder(limbs: List[UInt64], d: UInt64) -> UInt64:
     var r = UInt128(0)
     for l in range(len(limbs) - 1, -1, -1):
