@@ -75,7 +75,7 @@ listed source are original to this package.
 
 | Item | Reference | Notes |
 |---|---|---|
-| P4.1 Bases and reduction | `groebnertools.py`: `_buchberger` (:50) with normal selection and the Gebauer–Möller criteria (`update`, :117), `spoly` (:262), `red_groebner` (:699), `is_groebner` (:731), `is_reduced` (:765) | Differs: ties in pair selection break by the pair's indices (G1), cofactors are tracked (Proposition B-6), untracked bases over primes below $2^{31}$ under GRLEX and GREVLEX use F4 [Faugère 1999], and untracked bases over $\mathbb Q$ under GREVLEX are computed on the homogenized inputs, exactly or by certified reconstruction [Arnold 2003]. Corpus: 24 `groebner` cases (Katsura-2 to 4, cyclic-4 and 5, over $\mathbb Q$ and $\mathbb F_p$) |
+| P4.1 Bases and reduction | `groebnertools.py`: `_buchberger` (:50) with normal selection and the Gebauer–Möller criteria (`update`, :117), `spoly` (:262), `red_groebner` (:699), `is_groebner` (:731), `is_reduced` (:765) | Differs: ties in pair selection break by the pair's indices (G1), cofactors are tracked (Proposition B-6), untracked bases over primes below $2^{31}$ under GRLEX and GREVLEX use F4 [Faugère 1999], and untracked bases over $\mathbb Q$ under GREVLEX are computed on the homogenized inputs by certified reconstruction [Arnold 2003], exactly if that gives up. Corpus: 24 `groebner` cases (Katsura-2 to 4, cyclic-4 and 5, over $\mathbb Q$ and $\mathbb F_p$) |
 | P4.2 Membership | the remainder on division by a basis | Corpus: 6 `membership` cases, including $1 \in I$ |
 
 ### P5 Real roots

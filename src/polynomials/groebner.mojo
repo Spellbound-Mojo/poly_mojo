@@ -255,9 +255,9 @@ def groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: Monomi
             if generators[i].ring != generators[0].ring:
                 raise PolyError(PolyErrorKind.DOMAIN, "Groebner generators in different fields")
         comptime if C == QQ:
-            # Over QQ under GREVLEX, the homogenized computation (exact, or by
-            # certified reconstruction when coefficients grow); otherwise the
-            # packed engine fraction-free on integer coefficients.
+            # Over QQ under GREVLEX, the homogenized computation by certified
+            # reconstruction; otherwise the packed engine fraction-free on
+            # integer coefficients.
             ref inputs = rebind[List[SparsePoly[QQ]]](generators)
             if _grevlex_supported(order):
                 var homogenized = _grevlex_groebner_rational(inputs, order, budget)

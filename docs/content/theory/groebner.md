@@ -62,12 +62,10 @@ maps its leading monomial to the leading monomial of the image. So
 $H|_{h=1}$ is a Gröbner basis of $I$; dropping elements whose leading
 monomial another's divides and reducing the tails gives the reduced basis.
 
-$J$ is computed exactly by fraction-free Buchberger, which proceeds degree by
-degree on homogeneous input and so avoids most intermediate coefficient
-growth. When coefficients still grow large, the library instead reconstructs
-$H$ from the reduced bases $H_p$ of the images $J_p$ modulo primes below
-$2^{31}$, computed by F4, by Chinese remaindering and rational
-reconstruction, and accepts a candidate $G$ only with a certificate:
+The library reconstructs $H$ from the reduced bases $H_p$ of the images
+$J_p$ modulo primes below $2^{31}$, computed by F4, by Chinese remaindering
+and rational reconstruction, and accepts a candidate $G$ only with a
+certificate:
 
 **Theorem B-4a (certified reconstruction).** Let $G$ be a set of homogeneous
 monic polynomials with rational coefficients such that (a) every element of
@@ -89,9 +87,14 @@ $J = \langle G \rangle$, and with (d) and monicity $G$ is its reduced basis
 (Theorem B-4). $\square$
 
 The checks (a), (b), and (d) are exact computations over the integers;
-(c) holds by construction. The theorem does not require $p$ to be a lucky
-prime [Arnold 2003]: an unlucky image can only delay certification. If
-certification does not succeed, the exact computation completes instead.
+(c) holds by construction. For (b) the S-polynomials of each degree are
+reduced in one F4 matrix over the integers, fraction-free: reducing an
+S-polynomial to zero by any choice of reducers gives it a standard
+representation. The theorem does not require $p$ to be a lucky prime
+[Arnold 2003]: an unlucky image can only delay certification. If
+reconstruction or certification gives up, $J$ is computed exactly instead,
+by fraction-free Buchberger, which proceeds degree by degree on homogeneous
+input and so avoids most intermediate coefficient growth.
 
 **Theorem B-4 (reduced bases, cited).** Every ideal has exactly one
 reduced Gröbner basis for a given order: monic, and with no monomial of

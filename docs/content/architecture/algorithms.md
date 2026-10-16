@@ -76,10 +76,11 @@ are merged. Over primes below $2^{31}$ under GRLEX and GREVLEX the packed path
 is F4 instead: each round turns every pair of least LCM degree, with the
 reducers symbolic preprocessing finds, into one sparse matrix and reduces its
 rows in a dense 64-bit accumulator that is reduced modulo the prime only when
-read. Over `QQ` under GREVLEX the inputs are homogenized: the packed engine
-computes exactly, and when coefficients grow past a threshold it switches to
-F4 images modulo primes, Chinese remaindering, rational reconstruction, and an
-exact certificate that the result is the reduced basis. Over `QQ` the computation is fraction-free over the integers: each
+read. Over `QQ` under GREVLEX the inputs are homogenized, and the basis comes
+from F4 images modulo primes, Chinese remaindering, rational reconstruction,
+and an exact certificate that the result is the reduced basis, whose S-pairs
+are reduced in F4 matrices over the integers; the packed engine computes the
+basis exactly if reconstruction gives up. Over `QQ` the computation is fraction-free over the integers: each
 remainder is an integer multiple of the rational one, so the monic basis is the
 same. Every path returns exactly the basis of the general engine; only the work
 charged to the budget differs.

@@ -30,7 +30,7 @@ GREVLEX, over at most sixteen variables; other cases use Buchberger's
 algorithm in the packed or sparse engine.
 """
 from std.math import max, min
-from .coefficients import ModInt, Modulus
+from .coefficients import CoefficientRing, ModInt, Modulus
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
 from .monomial import MonomialOrder
 from .sparse import SparsePoly
@@ -73,7 +73,7 @@ def _times[W: Int](a: _Packed[W], b: _Packed[W]) -> _Packed[W]:
 
 
 struct _Store[W: Int](Movable):
-    """Each basis element's term hashes and residues, leading term first."""
+    """Each basis element's term hashes and, over a prime field, residues, leading term first."""
     var hashes: List[List[UInt64]]
     var values: List[List[UInt32]]
     var tops: List[_Packed[Self.W]]
@@ -84,8 +84,8 @@ struct _Store[W: Int](Movable):
         self.values = List[List[UInt32]]()
         self.tops = List[_Packed[Self.W]]()
 
-    def extend(mut self, engine: _Engine[ModInt, Self.W, False], mut budget: Budget) raises PolyError:
-        """Add the elements inserted since the last call."""
+    def extend[C: CoefficientRing, integral: Bool](mut self, engine: _Engine[C, Self.W, integral], mut budget: Budget) raises PolyError:
+        """Add the elements inserted since the last call; residues only over a prime field."""
         for i in range(len(self.hashes), len(engine.polys)):
             ref p = engine.polys[i]
             var n = len(p)
@@ -98,7 +98,8 @@ struct _Store[W: Int](Movable):
             for k in range(n - 1, -1, -1):
                 ref t = p[k]
                 h.append(_raw_hash(t.monomial))
-                v.append(UInt32(t.coefficient.value))
+                comptime if C == ModInt:
+                    v.append(UInt32(rebind[ModInt](t.coefficient).value))
                 top = max(top, t.monomial.exponents())
             self.hashes.append(h^)
             self.values.append(v^)
@@ -219,7 +220,7 @@ struct _Matrix[W: Int](Movable):
         self.starts = [0]
         self.entries = List[Int32]()
 
-    def add_row(mut self, engine: _Engine[ModInt, Self.W, False], store: _Store[Self.W], source: Int, shift: _Packed[Self.W], mut budget: Budget) raises PolyError:
+    def add_row[C: CoefficientRing, integral: Bool](mut self, engine: _Engine[C, Self.W, integral], store: _Store[Self.W], source: Int, shift: _Packed[Self.W], mut budget: Budget) raises PolyError:
         """Add shift * engine.polys[source]."""
         ref p = engine.polys[source]
         ref h = store.hashes[source]
@@ -237,7 +238,7 @@ struct _Matrix[W: Int](Movable):
         self.sources.append(source)
         self.starts.append(len(self.entries))
 
-    def preprocess(mut self, engine: _Engine[ModInt, Self.W, False], store: _Store[Self.W], mut budget: Budget) raises PolyError:
+    def preprocess[C: CoefficientRing, integral: Bool](mut self, engine: _Engine[C, Self.W, integral], store: _Store[Self.W], mut budget: Budget) raises PolyError:
         """Symbolic preprocessing: a reducer for each monomial some active leading monomial divides.
 
         The reducer is the active element with the least such leading monomial;

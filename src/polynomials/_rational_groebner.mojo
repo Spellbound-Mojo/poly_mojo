@@ -1,17 +1,10 @@
 """Gröbner bases over QQ under GREVLEX, through the homogenized inputs.
 
 The inputs become primitive integer polynomials, homogenized with a new least
-variable h (GREVLEX with h last) unless they are homogeneous already. Their
-ideal J is computed in one of two ways, and setting h = 1 then gives the
-basis of the input ideal.
+variable h (GREVLEX with h last) unless they are homogeneous already. The
+reduced basis of their ideal J is reconstructed from modular images and
+certified, and setting h = 1 then gives the basis of the input ideal.
 
-Exactly. The packed engine runs fraction-free Buchberger on the homogenized
-inputs. Processing them degree by degree avoids most of the intermediate
-coefficient growth an inhomogeneous computation suffers. If a basis element's
-coefficients still grow beyond `_GROWTH_BITS`, or four times the inputs',
-the exact run stops in favor of:
-
-Reconstruction, with a certificate.
 1. Images. Modulo each prime below 2^31 that divides no leading coefficient,
    F4 computes the reduced basis of the image of J. Images whose leading
    monomials differ from the first one's are set aside.
@@ -23,7 +16,9 @@ Reconstruction, with a certificate.
    (a) every input reduces to zero modulo G, so J is contained in <G>;
    (b) every S-pair kept by the Gebauer–Möller criteria reduces to zero, so
        G is a Gröbner basis of <G> and <G>_d has dimension c_d, the number of
-       degree-d monomials its leading monomials generate;
+       degree-d monomials its leading monomials generate; the pairs of each
+       degree are reduced in one F4 matrix over the integers
+       (`_integer_f4`);
    (c) G's leading monomials are those of a basis G_p computed inside the
        image J_p. Then dim (J_p)_d >= c_d, and dim (J_p)_d <= dim J_d since
        the Macaulay matrix of J_d is an integer matrix and reduction modulo p
@@ -33,7 +28,10 @@ Reconstruction, with a certificate.
        monomial, so G is the reduced basis of J.
    Correctness never depends on a prime being lucky; bad primes cost time.
    If reconstruction needs more than `_PRIME_LIMIT` primes or certification
-   fails `_CERTIFY_LIMIT` times, the exact run resumes without a limit.
+   fails `_CERTIFY_LIMIT` times, J is computed exactly instead: the packed
+   engine runs fraction-free Buchberger on the homogenized inputs, degree by
+   degree, which avoids most of the coefficient growth an inhomogeneous
+   computation suffers.
 
 Finish. A GREVLEX basis of J with h last dehomogenizes to a basis of the
 input ideal, because the leading monomial of a homogeneous element
@@ -42,7 +40,7 @@ leading monomial another's divides and reducing the tails exactly gives the
 reduced basis, which is unique, so every route returns the same result.
 """
 from std.math import max
-from apn_mojo import Integer, Rational, div_rem_euclid, gcd as integer_gcd, isqrt
+from apn_mojo import Integer, Rational, div_rem_euclid, gcd as integer_gcd, inverse_mod, isqrt
 from .coefficients import ModInt, Modulus, NoContext, QQ, ZZ, _prime, _work
 from .errors import Budget, PolyError, PolyErrorKind, _allocation
 from .monomial import MonomialOrder
@@ -51,15 +49,16 @@ from .primes import _residue
 from ._images import _denominator, _scaled_integer
 from ._packed_groebner import _Buckets, _Engine, _Packed, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
 from ._f4 import _f4_packed
+from ._integer_f4 import _pairs_reduce_to_zero
 
 comptime _PRIME_LIMIT = 4096
 """Primes tried before giving up on reconstruction."""
 comptime _CERTIFY_LIMIT = 4
 """Certification attempts before giving up."""
-comptime _GROWTH_BITS = 512
-"""Coefficient size, at least, at which the exact run gives way to reconstruction."""
 comptime _MISMATCH_LIMIT = 3
 """Consecutive images with other leading monomials before they replace the first."""
+comptime _BATCH = 32
+"""Primes whose residues are combined in word arithmetic before joining the accumulated values."""
 
 
 def _next_prime(previous: UInt64, mut budget: Budget) raises PolyError -> UInt64:
@@ -80,7 +79,41 @@ def _reconstruct(value: Integer, modulus: Integer, bound: Integer, mut budget: B
         var r1 = div_rem_euclid(value, modulus)[1].copy()
         var t0 = Integer(0)
         var t1 = Integer(1)
+        var stop = bound.magnitude_bit_length() + 128
         while r1 > bound:
+            if r1.magnitude_bit_length() > stop:
+                # Lehmer: the quotients of the leading 62 bits, while they are
+                # certainly the true ones, as one matrix [[a, b], [c, d]]. A
+                # batch shortens r1 by less than 128 bits, so every remainder
+                # it skips stays above the bound.
+                var shift = Integer(r0.magnitude_bit_length() - 62)
+                var x = Int(r0 >> shift)
+                var y = Int(r1 >> shift)
+                var a = 1
+                var b = 0
+                var c = 0
+                var d = 1
+                while y + c != 0 and y + d != 0:
+                    var q = (x + a) // (y + c)
+                    if q != (x + b) // (y + d):
+                        break
+                    var t = a - q * c
+                    a = c
+                    c = t
+                    t = b - q * d
+                    b = d
+                    d = t
+                    t = x - q * y
+                    x = y
+                    y = t
+                if b != 0:
+                    var next_r0 = r0 * Integer(a) + r1 * Integer(b)
+                    r1 = r0 * Integer(c) + r1 * Integer(d)
+                    r0 = next_r0^
+                    var next_t0 = t0 * Integer(a) + t1 * Integer(b)
+                    t1 = t0 * Integer(c) + t1 * Integer(d)
+                    t0 = next_t0^
+                    continue
             var qr = div_rem_euclid(r0, r1)
             var t2 = t0 - qr[0] * t1
             r0 = r1^
@@ -102,7 +135,13 @@ def _reconstruct(value: Integer, modulus: Integer, bound: Integer, mut budget: B
 
 
 struct _Images[W: Int](Movable):
-    """CRT accumulation of monic modular bases that share their leading monomials."""
+    """CRT accumulation of monic modular bases that share their leading monomials.
+
+    Residues wait as words in batches of up to `_BATCH` primes. A batch is
+    combined by Garner's algorithm in word arithmetic and joins the
+    accumulated values in one step, so the large values are touched once per
+    batch rather than once per prime.
+    """
     var kind: UInt8
     var leads: List[_Packed[Self.W]]
     var monomials: List[List[_Packed[Self.W]]]
@@ -110,6 +149,11 @@ struct _Images[W: Int](Movable):
     var values: List[List[Integer]]
     """Each coefficient modulo `modulus`, in [0, modulus)."""
     var modulus: Integer
+    """The product of the primes whose residues have joined `values`."""
+    var batch: List[UInt64]
+    """The primes whose residues still wait."""
+    var residues: List[List[UInt32]]
+    """Each element's waiting residues, `_BATCH` slots per coefficient."""
     var count: Int
     var probe: Tuple[Int, Int]
     """The coefficient that last failed to reconstruct, tried first next time."""
@@ -120,6 +164,8 @@ struct _Images[W: Int](Movable):
         self.monomials = List[List[_Packed[Self.W]]]()
         self.values = List[List[Integer]]()
         self.modulus = Integer(1)
+        self.batch = List[UInt64]()
+        self.residues = List[List[UInt32]]()
         self.count = 0
         self.probe = (0, 0)
 
@@ -136,87 +182,211 @@ struct _Images[W: Int](Movable):
         self.monomials = List[List[_Packed[Self.W]]]()
         self.values = List[List[Integer]]()
         self.modulus = Integer(1)
+        self.batch = List[UInt64]()
+        self.residues = List[List[UInt32]]()
         self.count = 0
         self.probe = (0, 0)
 
-    def _merge(self, value: Integer, residue: UInt64, p: UInt64, inverse: UInt64, mut budget: Budget) raises PolyError -> Integer:
-        """The number below modulus * p congruent to value and to residue modulo p.
-
-        `inverse` is the inverse of the modulus modulo p, shared by every coefficient.
-        """
-        var old = _residue(value, p, budget)
-        var correction = UInt64((UInt128((residue + p - old) % p) * UInt128(inverse)) % UInt128(p))
-        if correction == 0:
-            return value.copy()
-        _work(self.modulus.magnitude_bit_length() // 8 + 1, 8, True, budget)
-        try:
-            return value + self.modulus * Integer(correction)
-        except e:
-            raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    def _cover(mut self, e: Int, image: List[_Term[ModInt, Self.W]], mut budget: Budget) raises PolyError:
+        """Give element e every monomial of the image, new ones with value and residues zero."""
+        var missing = 0
+        var i = 0
+        for j in range(len(image)):
+            budget.charge(1)
+            while i < len(self.monomials[e]) and _compare(self.kind, self.monomials[e][i], image[j].monomial) < 0:
+                i += 1
+            if i < len(self.monomials[e]) and _equal(self.monomials[e][i], image[j].monomial):
+                i += 1
+            else:
+                missing += 1
+        if missing == 0:
+            return
+        var n = len(self.monomials[e]) + missing
+        _allocation[Integer](n, budget)
+        _allocation[UInt32](n * _BATCH, budget)
+        var monomials = List[_Packed[Self.W]](capacity=n)
+        var values = List[Integer](capacity=n)
+        var residues = List[UInt32](capacity=n * _BATCH)
+        i = 0
+        var j = 0
+        while i < len(self.monomials[e]) or j < len(image):
+            budget.charge(1)
+            var comparison: Int
+            if j == len(image):
+                comparison = -1
+            elif i == len(self.monomials[e]):
+                comparison = 1
+            else:
+                comparison = _compare(self.kind, self.monomials[e][i], image[j].monomial)
+            if comparison <= 0:
+                monomials.append(self.monomials[e][i])
+                values.append(self.values[e][i].copy())
+                for slot in range(_BATCH):
+                    residues.append(self.residues[e][i * _BATCH + slot])
+                i += 1
+                if comparison == 0:
+                    j += 1
+            else:
+                monomials.append(image[j].monomial)
+                values.append(Integer(0))
+                for _ in range(_BATCH):
+                    residues.append(0)
+                j += 1
+        self.monomials[e] = monomials^
+        self.values[e] = values^
+        self.residues[e] = residues^
 
     def add(mut self, basis: List[List[_Term[ModInt, Self.W]]], p: UInt64, mut budget: Budget) raises PolyError:
-        """Merge one image: its residues join the accumulated ones over the union of supports."""
-        var ring = Modulus(_prime_value=p)
-        var inverse = ModInt(_residue(self.modulus, p, budget), ring).inverse(budget).value
+        """Add one image: its residues wait in the batch, over the union of supports."""
         if self.count == 0:
             for element in basis:
                 self.leads.append(element[len(element) - 1].monomial)
                 self.monomials.append(List[_Packed[Self.W]]())
                 self.values.append(List[Integer]())
+                self.residues.append(List[UInt32]())
+        var slot = len(self.batch)
         for e in range(len(basis)):
             ref image = basis[e]
-            ref old_m = self.monomials[e]
-            ref old_v = self.values[e]
-            _allocation[Integer](len(old_m) + len(image), budget)
-            var merged_m = List[_Packed[Self.W]](capacity=len(old_m) + len(image))
-            var merged_v = List[Integer](capacity=len(old_m) + len(image))
+            self._cover(e, image, budget)
+            # The image's monomials are now among the element's; both increase.
             var i = 0
-            var j = 0
-            while i < len(old_m) or j < len(image):
-                var comparison: Int
-                if i == len(old_m):
-                    comparison = 1
-                elif j == len(image):
-                    comparison = -1
-                else:
-                    comparison = _compare(self.kind, image[j].monomial, old_m[i])
-                if comparison < 0:
-                    merged_m.append(old_m[i])
-                    merged_v.append(self._merge(old_v[i], 0, p, inverse, budget))
+            for j in range(len(image)):
+                while not _equal(self.monomials[e][i], image[j].monomial):
+                    budget.charge(1)
                     i += 1
-                elif comparison > 0:
-                    merged_m.append(image[j].monomial)
-                    merged_v.append(self._merge(Integer(0), image[j].coefficient.value, p, inverse, budget))
-                    j += 1
-                else:
-                    merged_m.append(old_m[i])
-                    merged_v.append(self._merge(old_v[i], image[j].coefficient.value, p, inverse, budget))
-                    i += 1
-                    j += 1
-            self.monomials[e] = merged_m^
-            self.values[e] = merged_v^
+                self.residues[e][i * _BATCH + slot] = UInt32(image[j].coefficient.value)
+        self.batch.append(p)
+        self.count += 1
+        if len(self.batch) == _BATCH:
+            self._flush(budget)
+
+    def _batch_modulus(self, mut budget: Budget) raises PolyError -> Integer:
+        var q = Integer(1)
+        for prime in self.batch:
+            _work(q.magnitude_bit_length() // 8 + 1, 8, False, budget)
+            try:
+                q = q * Integer(prime)
+            except e:
+                raise PolyError(PolyErrorKind.CAPACITY, String(e))
+        return q^
+
+    def _garner_inverses(self, mut budget: Budget) raises PolyError -> List[UInt64]:
+        """For each batch prime, the inverse modulo it of the product of the primes before it."""
+        var b = len(self.batch)
+        var inverses = List[UInt64](length=b, fill=1)
+        for j in range(1, b):
+            var prime = self.batch[j]
+            var product = UInt64(1)
+            for i in range(j):
+                budget.charge(1)
+                product = (product * (self.batch[i] % prime)) % prime
+            inverses[j] = ModInt(product, Modulus(_prime_value=prime)).inverse(budget).value
+        return inverses^
+
+    def _garner(self, e: Int, k: Int, inverses: List[UInt64], mut budget: Budget) raises PolyError -> Integer:
+        """The waiting residues of coefficient k of element e, combined modulo the batch's product.
+
+        The mixed-radix digits d_j, with value d_0 + p_0 (d_1 + p_1 (d_2 + ...)),
+        need only word arithmetic: every product is below 2^62.
+        """
+        var b = len(self.batch)
+        budget.charge(UInt64(b * b))
+        var digits = List[UInt64](length=b, fill=0)
+        for j in range(b):
+            var prime = self.batch[j]
+            var known = UInt64(0)
+            for i in range(j - 1, -1, -1):
+                known = (known * (self.batch[i] % prime) + digits[i]) % prime
+            var residue = UInt64(self.residues[e][k * _BATCH + j])
+            digits[j] = ((residue + prime - known) % prime) * inverses[j] % prime
+        # Horner in 64-bit limbs, least significant first.
+        var limbs = List[UInt64](length=b // 2 + 2, fill=0)
+        limbs[0] = digits[b - 1]
+        var used = 1
+        for i in range(b - 2, -1, -1):
+            var carry = UInt128(digits[i])
+            for l in range(used):
+                var x = UInt128(limbs[l]) * UInt128(self.batch[i]) + carry
+                limbs[l] = UInt64(x & UInt128(UInt64.MAX))
+                carry = x >> 64
+            if carry:
+                limbs[used] = UInt64(carry)
+                used += 1
+        var bytes = List[UInt8](capacity=8 * used)
+        for l in range(used):
+            for shift in range(8):
+                bytes.append(UInt8((limbs[l] >> UInt64(8 * shift)) & 0xFF))
+        return Integer.from_bytes(bytes)
+
+    def _joined(self, value: Integer, waiting: Integer, q: Integer, inverse: Integer, mut budget: Budget) raises PolyError -> Integer:
+        """The number below modulus * q congruent to value modulo `modulus` and to waiting modulo q."""
+        _work(self.modulus.magnitude_bit_length() // 8 + 1, q.magnitude_bit_length() // 8 + 1, True, budget)
         try:
-            self.modulus = self.modulus * Integer(p)
+            var t = div_rem_euclid((waiting - div_rem_euclid(value, q)[1]) * inverse, q)[1].copy()
+            return value + self.modulus * t
         except e:
             raise PolyError(PolyErrorKind.CAPACITY, String(e))
-        self.count += 1
+
+    def _inverse(self, q: Integer) raises PolyError -> Integer:
+        """The inverse of `modulus` modulo q."""
+        try:
+            return inverse_mod(div_rem_euclid(self.modulus, q)[1], q)
+        except e:
+            raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+    def _flush(mut self, mut budget: Budget) raises PolyError:
+        """Join the waiting residues to the accumulated values."""
+        if len(self.batch) == 0:
+            return
+        var q = self._batch_modulus(budget)
+        var inverses = self._garner_inverses(budget)
+        var inverse = self._inverse(q)
+        for e in range(len(self.values)):
+            for k in range(len(self.values[e])):
+                var waiting = self._garner(e, k, inverses, budget)
+                self.values[e][k] = self._joined(self.values[e][k], waiting, q, inverse, budget)
+            for i in range(len(self.residues[e])):
+                self.residues[e][i] = 0
+        try:
+            self.modulus = self.modulus * q
+        except e:
+            raise PolyError(PolyErrorKind.CAPACITY, String(e))
+        self.batch.clear()
+
+    def _probe_ready(self, mut budget: Budget) raises PolyError -> Bool:
+        """Whether the probe coefficient, with the waiting residues, has a small enough fraction."""
+        var pe = self.probe[0]
+        var pk = self.probe[1]
+        if pe >= len(self.values) or pk >= len(self.values[pe]):
+            return True
+        var q = self._batch_modulus(budget)
+        var value = self.values[pe][pk].copy()
+        if len(self.batch):
+            value = self._joined(value, self._garner(pe, pk, self._garner_inverses(budget), budget), q, self._inverse(q), budget)
+        var total: Integer
+        var bound: Integer
+        try:
+            total = self.modulus * q
+            bound = isqrt(total // 2)
+        except e:
+            raise PolyError(PolyErrorKind.CAPACITY, String(e))
+        return Bool(_reconstruct(value, total, bound, budget))
 
     def reconstruct(mut self, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[QQ, Self.W]]]]:
         """Every coefficient as a fraction, or None when one has no small enough fraction yet.
 
         The coefficient that failed last time is tried first, so an attempt
-        that is still too early costs one reconstruction.
+        that is still too early costs one reconstruction and leaves the batch
+        waiting.
         """
+        if not self._probe_ready(budget):
+            return None
+        self._flush(budget)
         var bound: Integer
         try:
             bound = isqrt(self.modulus // 2)
         except e:
             raise PolyError(PolyErrorKind.CAPACITY, String(e))
-        var pe = self.probe[0]
-        var pk = self.probe[1]
-        if pe < len(self.values) and pk < len(self.values[pe]):
-            if not _reconstruct(self.values[pe][pk], self.modulus, bound, budget):
-                return None
         var half: Integer
         try:
             half = self.modulus // 2
@@ -347,12 +517,7 @@ def _certify[W: Int](kind: UInt8, inputs: List[List[_Term[ZZ, W]]], candidate: L
         if not engine.reduces_to_zero(pending^, engine.active, budget):
             return False
     # (b) Every remaining S-pair reduces to zero.
-    while len(engine.pairs):
-        budget.charge(1)
-        var pair = engine.select(budget)
-        if not engine.pair_reduces_to_zero(pair, budget):
-            return False
-    return True
+    return _pairs_reduce_to_zero(engine, budget)
 
 
 def _monic[W: Int](p: List[_Term[ZZ, W]], order: MonomialOrder, by_index: List[Int], mut budget: Budget) raises PolyError -> SparsePoly[QQ]:
@@ -373,15 +538,8 @@ def _monic[W: Int](p: List[_Term[ZZ, W]], order: MonomialOrder, by_index: List[I
     return monic^
 
 
-def _bits[W: Int](p: List[_Term[ZZ, W]]) -> Int:
-    var bits = 0
-    for t in p:
-        bits = max(bits, t.coefficient.value.magnitude_bit_length())
-    return bits
-
-
-def _exact[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, limit: Int, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ZZ, W]]]]:
-    """The reduced basis by fraction-free Buchberger, or None once an element exceeds `limit` bits (0: no limit)."""
+def _exact[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut budget: Budget) raises PolyError -> List[List[_Term[ZZ, W]]]:
+    """The reduced basis by fraction-free Buchberger."""
     var engine = _Engine[ZZ, W, True](kind, NoContext())
     var copies = List[List[_Term[ZZ, W]]]()
     for f in inputs:
@@ -398,8 +556,6 @@ def _exact[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, limit: Int, mu
         if len(reduced) == 0:
             continue
         engine.insert(reduced^, budget)
-        if limit and _bits(engine.polys[len(engine.polys) - 1]) > limit:
-            return None
         dirty_order = True
     return engine.finish(budget)
 
@@ -414,6 +570,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut bud
     var candidate = Optional[List[List[_Term[QQ, W]]]](None)
     var mismatches = 0
     var certifications = 0
+    var attempt = 1
     var p = (UInt64(1) << 31) + 1
     for _ in range(_PRIME_LIMIT):
         budget.charge(1)
@@ -445,6 +602,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut bud
             # The first images were likely the unlucky ones: start over from this one.
             images.reset()
             candidate = None
+            attempt = 1
         mismatches = 0
         if candidate:
             if _agrees(kind, candidate.value(), basis, p, budget):
@@ -459,20 +617,23 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut bud
             candidate = None
         images.add(basis, p, budget)
         var count = images.count
-        if count & (count - 1) == 0 or count % 8 == 0:
+        if count >= attempt:
             candidate = images.reconstruct(budget)
+            # After 1, 2, 4, and 8 images, every 8 up to 64, then every eighth
+            # more: a failed attempt costs at least one reconstruction of a
+            # coefficient as large as the modulus.
+            attempt = 2 * count if count < 8 else count + max(8, count // 8)
     return None
 
 
 
 
-def _rational_basis[W: Int](generators: List[SparsePoly[QQ]], order: MonomialOrder, growth: Int, mut budget: Budget) raises PolyError -> List[SparsePoly[QQ]]:
+def _rational_basis[W: Int](generators: List[SparsePoly[QQ]], order: MonomialOrder, exact: Bool, mut budget: Budget) raises PolyError -> List[SparsePoly[QQ]]:
     var n = len(order.variables)
     var kind = order.kind
     # Primitive integer inputs, in the order's lanes; h, if needed, is lane n.
     var inputs = List[List[_Term[ZZ, W]]]()
     var homogeneous = True
-    var input_bits = 0
     for g in generators:
         budget.charge(1)
         if g.is_zero():
@@ -483,7 +644,6 @@ def _rational_basis[W: Int](generators: List[SparsePoly[QQ]], order: MonomialOrd
         for t in integral:
             if t.monomial.degree != degree:
                 homogeneous = False
-        input_bits = max(input_bits, _bits(integral))
         inputs.append(integral^)
     if len(inputs) == 0:
         return List[SparsePoly[QQ]]()
@@ -497,17 +657,12 @@ def _rational_basis[W: Int](generators: List[SparsePoly[QQ]], order: MonomialOrd
                 var exponents = inputs[f][k].monomial.exponents()
                 exponents[n] = UInt32(degree - inputs[f][k].monomial.degree)
                 inputs[f][k].monomial = _packed(exponents)
-    # Exactly, unless coefficients grow far beyond the inputs'; then by
-    # certified reconstruction; and exactly without limit if that gives up.
-    if growth >= 0:
-        var exact = _exact[W](inputs, kind, max(growth, 4 * input_bits), budget)
-        if exact:
-            return _finish(exact.take(), homogeneous, n, order, budget)
-    var modular = _multimodular[W](inputs, kind, budget)
-    if modular:
-        return _finish(modular.take(), homogeneous, n, order, budget)
-    var unlimited = _exact[W](inputs, kind, 0, budget)
-    return _finish(unlimited.take(), homogeneous, n, order, budget)
+    # By certified reconstruction, and exactly if that gives up.
+    if not exact:
+        var modular = _multimodular[W](inputs, kind, budget)
+        if modular:
+            return _finish(modular.take(), homogeneous, n, order, budget)
+    return _finish(_exact[W](inputs, kind, budget), homogeneous, n, order, budget)
 
 
 def _finish[W: Int](var basis: List[List[_Term[ZZ, W]]], homogeneous: Bool, n: Int, order: MonomialOrder, mut budget: Budget) raises PolyError -> List[SparsePoly[QQ]]:
@@ -555,13 +710,12 @@ def _grevlex_supported(order: MonomialOrder) -> Bool:
     return order.kind == MonomialOrder.GREVLEX and len(order.variables) + 1 <= 16
 
 
-def _grevlex_groebner_rational(generators: List[SparsePoly[QQ]], order: MonomialOrder, mut budget: Budget, growth: Int = _GROWTH_BITS) raises PolyError -> List[SparsePoly[QQ]]:
+def _grevlex_groebner_rational(generators: List[SparsePoly[QQ]], order: MonomialOrder, mut budget: Budget, exact: Bool = False) raises PolyError -> List[SparsePoly[QQ]]:
     """The reduced monic basis over QQ under a supported GREVLEX order.
 
-    The exact run gives way to reconstruction once a basis element's
-    coefficients exceed max(growth, four times the inputs') bits; a negative
-    `growth` skips the exact run, which tests use to exercise reconstruction.
+    By certified reconstruction unless `exact`, which tests use to exercise
+    the exact computation that reconstruction falls back on.
     """
     if len(order.variables) + 1 <= 8:
-        return _rational_basis[8](generators, order, growth, budget)
-    return _rational_basis[16](generators, order, growth, budget)
+        return _rational_basis[8](generators, order, exact, budget)
+    return _rational_basis[16](generators, order, exact, budget)
