@@ -42,6 +42,7 @@ prime in one SIMD vector, and every update is one vector operation.
 GREVLEX, over at most sixteen variables; other cases use Buchberger's
 algorithm in the packed or sparse engine.
 """
+from std.bit import count_leading_zeros
 from std.math import max, min
 from .coefficients import CoefficientRing, ModInt, Modulus
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product, _sum
@@ -179,11 +180,10 @@ struct _Columns[W: Int](Movable):
 
 def _sort_descending[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) raises PolyError -> List[Int]:
     """Indices of `monomials` from greatest to least, by bottom-up merge sort."""
-    comptime if W <= 8:
-        if len(monomials) < (1 << 32):
-            var keys = _keys(kind, monomials, budget)
-            if keys:
-                return _sort_keys(keys.take(), budget)
+    if len(monomials) < (1 << 32):
+        var keys = _keys(kind, monomials, budget)
+        if keys:
+            return _sort_keys(keys.take(), budget)
     var n = len(monomials)
     _allocation[Int](2 * n, budget)
     var order = List[Int](capacity=n)
@@ -223,29 +223,49 @@ def _sort_descending[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budge
 
 
 def _keys[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) raises PolyError -> Optional[List[UInt128]]:
-    """Keys whose integer order is the monomial order, each with its index in the low 32 bits; None unless every exponent is below 2^8 and every degree below 2^16.
+    """Keys whose integer order is the monomial order, each with its index in the low 32 bits; None unless they fit in 128 bits.
 
-    From the top: the degree (zero under LEX), then one byte per lane in
-    the order that decides, which under GREVLEX is from the last lane up,
-    with the exponent complemented, since a smaller one there is greater.
+    From the top: the degree (none under LEX), then a digit of b bits per
+    lane that some monomial uses, in the order that decides, which under
+    GREVLEX is from the last lane up, with the exponent complemented, since a
+    smaller one there is greater. Lanes no monomial uses are equal
+    throughout and get no digit; b and the degree's width are the fewest
+    bits that hold every exponent and degree.
     """
-    comptime assert W <= 8, "one byte per lane in 64 bits"
     var n = len(monomials)
+    budget.charge(UInt64(n))
+    var top = SIMD[DType.uint32, W](0)
+    var degree = UInt64(0)
+    for i in range(n):
+        ref m = monomials.unsafe_get(i)
+        top = max(top, m.exponents())
+        degree = max(degree, m.degree)
+    var largest = top.reduce_max()
+    var b = 32 - Int(count_leading_zeros(largest))
+    var degree_bits = 0 if kind == MonomialOrder.LEX else 64 - Int(count_leading_zeros(degree))
+    var used = 0
+    comptime for j in range(W):
+        if top[j] != 0:
+            used += 1
+    if degree_bits + used * b > 96:
+        return None
     _allocation[UInt128](n, budget)
     budget.charge(UInt64(n))
     var keys = List[UInt128](capacity=n)
+    var mask = UInt128((1 << b) - 1)
     for i in range(n):
         ref m = monomials.unsafe_get(i)
         var e = m.exponents()
-        if m.degree >= (1 << 16) or e.reduce_max() >= 256:
-            return None
-        var digits = UInt64(0)
-        comptime for j in range(W):
-            var lane = UInt64(e[W - 1 - j]) if kind == MonomialOrder.GREVLEX else UInt64(e[j])
-            var digit = UInt64(255) - lane if kind == MonomialOrder.GREVLEX else lane
-            digits |= digit << UInt64(8 * (7 - j))
-        var degree = UInt128(0) if kind == MonomialOrder.LEX else UInt128(m.degree)
-        keys.append((degree << 112) | (UInt128(digits) << 48) | UInt128(i))
+        var key = UInt128(0) if kind == MonomialOrder.LEX else UInt128(m.degree)
+        if kind == MonomialOrder.GREVLEX:
+            comptime for j in range(W - 1, -1, -1):
+                if top[j] != 0:
+                    key = (key << UInt128(b)) | (mask - UInt128(e[j]))
+        else:
+            comptime for j in range(W):
+                if top[j] != 0:
+                    key = (key << UInt128(b)) | UInt128(e[j])
+        keys.append((key << 32) | UInt128(i))
     return keys^
 
 
@@ -333,10 +353,20 @@ struct _Matrix[W: Int](Movable):
         `engine.active` must be sorted, and the order graded, so the search
         stops at the first leading monomial of greater degree.
         """
-        _allocation[_Packed[Self.W]](len(engine.active), budget)
-        var leads = List[_Packed[Self.W]](capacity=len(engine.active))
+        var count = len(engine.active)
+        _allocation[_Packed[Self.W]](count, budget)
+        _allocation[UInt32](count + 16, budget)
+        var leads = List[_Packed[Self.W]](capacity=count)
+        # The supports apart, padded with full masks, to rule out most leading monomials 16 at a time.
+        var supports = List[UInt32](capacity=count + 16)
         for g in engine.active:
             leads.append(engine.leads[g])
+            supports.append(engine.leads[g].support)
+        for _ in range(16):
+            supports.append(UInt32.MAX)
+        # The leading monomials of degree at most `degree` are the first `limit`.
+        var degree = UInt64.MAX
+        var limit = 0
         var next = 0
         while next < len(self.columns.monomials):
             var c = next
@@ -344,17 +374,27 @@ struct _Matrix[W: Int](Movable):
             if self.columns.covered[c]:
                 continue
             var u = self.columns.monomials[c]
+            if u.degree != degree:
+                degree = u.degree
+                limit = 0
+                while limit < count and leads[limit].degree <= degree:
+                    limit += 1
+            var outside = ~u.support
+            var exponents = u.exponents()
             var found = -1
             var i = 0
-            while i < len(leads):
-                ref lead = leads.unsafe_get(i)
-                if lead.degree > u.degree:
-                    break
-                if _divides(lead, u):
-                    found = i
-                    break
-                i += 1
-            budget.charge(UInt64(i + 1))
+            while i < limit:
+                var block = supports.unsafe_ptr().unsafe_offset(i).unsafe_load[width=16]()
+                var candidates = (block & outside).eq(0)
+                if candidates.reduce_or():
+                    for k in range(min(16, limit - i)):
+                        if candidates[k] and leads.unsafe_get(i + k).exponents().le(exponents).reduce_and():
+                            found = i + k
+                            break
+                    if found >= 0:
+                        break
+                i += 16
+            budget.charge(UInt64((found if found >= 0 else limit) + 1))
             if found >= 0:
                 self.add_row(engine, store, engine.active[found], _div(u, leads[found]), budget)
 
