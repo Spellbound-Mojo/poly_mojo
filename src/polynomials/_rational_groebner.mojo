@@ -42,6 +42,11 @@ input ideal, because the leading monomial of a homogeneous element
 dehomogenizes to the leading monomial of its image. Dropping elements whose
 leading monomial another's divides and reducing the tails exactly gives the
 reduced basis, which is unique, so every route returns the same result.
+
+Uncertified, inhomogeneous inputs are not homogenized: steps 1 and 2 run on
+the input ideal itself, whose reduced basis is often many times smaller than
+that of J, and the first candidate that agrees with the next image is the
+result.
 """
 from std.bit import count_leading_zeros
 from std.math import max
@@ -939,7 +944,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
             continue
         var ring = Modulus(_prime_value=p)
         var replayed = Optional[List[List[_Term[ModInt, W]]]](None)
-        if learned and trace.usable:
+        if learned:
             if len(ahead_primes) > 0 and ahead_primes[0] == p:
                 replayed = ahead.pop(0)
                 _ = ahead_primes.pop(0)
@@ -1022,6 +1027,12 @@ def _rational_basis[W: Int](generators: List[SparsePoly[QQ]], order: MonomialOrd
         inputs.append(integral^)
     if len(inputs) == 0:
         return List[SparsePoly[QQ]]()
+    if not homogeneous and not certify and not exact:
+        # Uncertified, the affine basis is reconstructed directly: the proof
+        # needs J, but the basis of J is often many times larger.
+        var affine = _multimodular[W](inputs, kind, False, budget)
+        if affine:
+            return _finish(affine.take(), True, n, order, budget)
     if not homogeneous:
         # Under GREVLEX the leading term has the greatest degree, and adding h
         # keeps the order of every polynomial's terms.
