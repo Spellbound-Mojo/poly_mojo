@@ -44,14 +44,14 @@ reduced basis, which is unique, so every route returns the same result.
 from std.math import max
 from apn_mojo import Integer, Rational, div_rem_euclid, gcd as integer_gcd, inverse_mod, isqrt
 from .coefficients import ModInt, Modulus, NoContext, QQ, ZZ, _prime, _work
-from .errors import Budget, PolyError, PolyErrorKind, _allocation
+from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product
 from .monomial import MonomialOrder
 from .sparse import SparsePoly, Term
 from .primes import _residue
 from ._images import _denominator, _scaled_integer
 from ._packed_groebner import _Buckets, _Engine, _Packed, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
 from ._f4 import _Matrix, _Store, _Trace, _f4_learn, _f4_replay
-from ._integer_f4 import _pairs_reduce_to_zero, _reduced_tails
+from ._integer_f4 import _add_mul_1, _divide, _pairs_reduce_to_zero, _reduced_tails, _remainder, _sub_mul_1
 
 comptime _PRIME_LIMIT = 4096
 """Primes tried before giving up on reconstruction."""
@@ -138,39 +138,97 @@ def _reconstruct(value: Integer, modulus: Integer, bound: Integer, mut budget: B
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
 
 
-@always_inline
-def _quotient(w: UInt64, p: UInt64) -> UInt64:
-    """floor(w * 2^64 / p), for products by w modulo p."""
-    return UInt64((UInt128(w) << 64) // UInt128(p))
+struct _Crt(Movable):
+    """A batch's CRT basis. For primes p_i with product Q, Q_i = Q / p_i and
+    c_i = Q_i^-1 modulo p_i, the residues r_i give x = sum r_i e_i - k Q with
+    e_i = c_i Q_i and k = floor(sum r_i c_i / p_i), so a value takes word
+    multiples of the basis and one word multiple of Q, in limbs."""
+    var product: List[UInt64]
+    var basis: List[UInt64]
+    """The e_i, `limbs` limbs each."""
+    var weights: List[Float64]
+    """The c_i / p_i, whose sum against the residues estimates k."""
+    var limbs: Int
+    var work: List[UInt64]
 
+    def __init__(out self, primes: List[UInt64], mut budget: Budget) raises PolyError:
+        var b = len(primes)
+        self.product = [UInt64(1)]
+        for prime in primes:
+            budget.charge(UInt64(len(self.product)))
+            var carry = UInt128(0)
+            for l in range(len(self.product)):
+                var x = UInt128(self.product[l]) * UInt128(prime) + carry
+                self.product[l] = UInt64(x & UInt128(UInt64.MAX))
+                carry = x >> 64
+            if carry:
+                self.product.append(UInt64(carry))
+        self.limbs = len(self.product)
+        _allocation[UInt64](_product(b, self.limbs) + self.limbs + 2, budget)
+        self.basis = List[UInt64](length=b * self.limbs, fill=0)
+        self.weights = List[Float64](capacity=b)
+        self.work = List[UInt64](length=self.limbs + 2, fill=0)
+        for i in range(b):
+            var prime = primes[i]
+            budget.charge(UInt64(3 * self.limbs))
+            var cofactor = self.product.copy()
+            _divide(cofactor, prime)
+            var c = ModInt(_remainder(cofactor, prime), Modulus(_prime_value=prime)).inverse(budget).value
+            var carry = UInt128(0)
+            for l in range(self.limbs):
+                var x = (UInt128(cofactor[l]) if l < len(cofactor) else UInt128(0)) * UInt128(c) + carry
+                self.basis[i * self.limbs + l] = UInt64(x & UInt128(UInt64.MAX))
+                carry = x >> 64
+            self.weights.append(Float64(c) / Float64(prime))
 
-@always_inline
-def _times(x: UInt64, w: UInt64, quotient: UInt64, p: UInt64) -> UInt64:
-    """x * w modulo p by the precomputed quotient, for x, w < p < 2^62."""
-    var r = x * w - UInt64((UInt128(x) * UInt128(quotient)) >> 64) * p
-    return r - p if r >= p else r
+    def value(mut self, residues: List[UInt32], start: Int, b: Int, mut budget: Budget) raises PolyError -> Integer:
+        """The number below Q with the residues residues[start : start + b]."""
+        budget.charge(UInt64(_product(b, self.limbs)))
+        var n = self.limbs + 2
+        var work = self.work.unsafe_ptr()
+        for l in range(n):
+            work.unsafe_offset(l).unsafe_store(0)
+        var estimate = Float64(0)
+        for i in range(b):
+            var r = residues.unsafe_get(start + i)
+            if r == 0:
+                continue
+            _add_mul_1(work, n, UInt64(r), self.basis.unsafe_ptr().unsafe_offset(i * self.limbs), self.limbs)
+            estimate += Float64(r) * self.weights.unsafe_get(i)
+        # The estimate's error is far below one, so one correction at most remains.
+        var k = UInt64(estimate)
+        if k:
+            _sub_mul_1(work, n, k, self.product.unsafe_ptr(), self.limbs)
+        while (work.unsafe_offset(n - 1).unsafe_load() >> 63) != 0:
+            _add_mul_1(work, n, 1, self.product.unsafe_ptr(), self.limbs)
+        while not self._below_product():
+            _sub_mul_1(work, n, 1, self.product.unsafe_ptr(), self.limbs)
+        var bytes = List[UInt8](length=8 * self.limbs, fill=0)
+        for l in range(self.limbs):
+            var limb = work.unsafe_offset(l).unsafe_load()
+            comptime for shift in range(8):
+                bytes.unsafe_get(8 * l + shift) = UInt8((limb >> UInt64(8 * shift)) & 0xFF)
+        return Integer.from_bytes(bytes)
 
-
-struct _Garner(Movable):
-    """For a batch of primes p_0, p_1, ...: p_i modulo p_j for i < j, the
-    inverse modulo p_j of p_0 ... p_(j-1), and their precomputed quotients."""
-    var factors: List[UInt64]
-    var quotients: List[UInt64]
-    var inverses: List[UInt64]
-    var inverse_quotients: List[UInt64]
-
-    def __init__(out self, b: Int):
-        self.factors = List[UInt64](length=b * b, fill=0)
-        self.quotients = List[UInt64](length=b * b, fill=0)
-        self.inverses = List[UInt64](length=b, fill=1)
-        self.inverse_quotients = List[UInt64](length=b, fill=0)
+    def _below_product(self) -> Bool:
+        """Whether the nonnegative accumulator is below Q."""
+        var n = self.limbs + 2
+        for l in range(n - 1, self.limbs - 1, -1):
+            if self.work.unsafe_get(l) != 0:
+                return False
+        for l in range(self.limbs - 1, -1, -1):
+            var x = self.work.unsafe_get(l)
+            var y = self.product.unsafe_get(l)
+            if x != y:
+                return x < y
+        return False
 
 
 struct _Images[W: Int](Movable):
     """CRT accumulation of monic modular bases that share their leading monomials.
 
     Residues wait as words in batches of up to `_BATCH` primes. A batch is
-    combined by Garner's algorithm in word arithmetic and joins the
+    combined through its CRT basis in word multiples (`_Crt`) and joins the
     accumulated values in one step, so the large values are touched once per
     batch rather than once per prime.
     """
@@ -302,63 +360,6 @@ struct _Images[W: Int](Movable):
                 raise PolyError(PolyErrorKind.CAPACITY, String(e))
         return q^
 
-    def _garner_tables(self, mut budget: Budget) raises PolyError -> _Garner:
-        var b = len(self.batch)
-        _allocation[UInt64](2 * b * b + 2 * b, budget)
-        var tables = _Garner(b)
-        for j in range(b):
-            var prime = self.batch[j]
-            var product = UInt64(1)
-            for i in range(j):
-                budget.charge(1)
-                var factor = self.batch[i] % prime
-                tables.factors[j * b + i] = factor
-                tables.quotients[j * b + i] = _quotient(factor, prime)
-                product = (product * factor) % prime
-            var inverse = ModInt(product, Modulus(_prime_value=prime)).inverse(budget).value
-            tables.inverses[j] = inverse
-            tables.inverse_quotients[j] = _quotient(inverse, prime)
-        return tables^
-
-    def _garner(self, e: Int, k: Int, tables: _Garner, mut budget: Budget) raises PolyError -> Integer:
-        """The waiting residues of coefficient k of element e, combined modulo the batch's product.
-
-        The mixed-radix digits d_j, with value d_0 + p_0 (d_1 + p_1 (d_2 + ...)),
-        need only word arithmetic, with products by precomputed quotients.
-        """
-        var b = len(self.batch)
-        budget.charge(UInt64(b * b))
-        var digits = List[UInt64](length=b, fill=0)
-        for j in range(b):
-            var prime = self.batch[j]
-            var known = UInt64(0)
-            for i in range(j - 1, -1, -1):
-                known = _times(known, tables.factors.unsafe_get(j * b + i), tables.quotients.unsafe_get(j * b + i), prime) + digits.unsafe_get(i)
-                if known >= prime:
-                    known -= prime
-            var difference = UInt64(self.residues[e][k * _BATCH + j]) + prime - known
-            if difference >= prime:
-                difference -= prime
-            digits[j] = _times(difference, tables.inverses[j], tables.inverse_quotients[j], prime)
-        # Horner in 64-bit limbs, least significant first.
-        var limbs = List[UInt64](length=b // 2 + 2, fill=0)
-        limbs[0] = digits[b - 1]
-        var used = 1
-        for i in range(b - 2, -1, -1):
-            var carry = UInt128(digits[i])
-            for l in range(used):
-                var x = UInt128(limbs[l]) * UInt128(self.batch[i]) + carry
-                limbs[l] = UInt64(x & UInt128(UInt64.MAX))
-                carry = x >> 64
-            if carry:
-                limbs[used] = UInt64(carry)
-                used += 1
-        var bytes = List[UInt8](capacity=8 * used)
-        for l in range(used):
-            for shift in range(8):
-                bytes.append(UInt8((limbs[l] >> UInt64(8 * shift)) & 0xFF))
-        return Integer.from_bytes(bytes)
-
     def _joined(self, value: Integer, waiting: Integer, q: Integer, inverse: Integer, mut budget: Budget) raises PolyError -> Integer:
         """The number below modulus * q congruent to value modulo `modulus` and to waiting modulo q."""
         _work(self.modulus.magnitude_bit_length() // 8 + 1, q.magnitude_bit_length() // 8 + 1, True, budget)
@@ -380,12 +381,13 @@ struct _Images[W: Int](Movable):
         if len(self.batch) == 0:
             return
         var q = self._batch_modulus(budget)
-        var tables = self._garner_tables(budget)
+        var crt = _Crt(self.batch, budget)
         var first = self.modulus == Integer(1)
         var inverse = Integer(1) if first else self._inverse(q)
+        var b = len(self.batch)
         for e in range(len(self.values)):
             for k in range(len(self.values[e])):
-                var waiting = self._garner(e, k, tables, budget)
+                var waiting = crt.value(self.residues[e], k * _BATCH, b, budget)
                 if first:
                     self.values[e][k] = waiting^
                 else:
@@ -406,7 +408,7 @@ struct _Images[W: Int](Movable):
         """
         var waiting = len(self.batch) > 0
         var q = self._batch_modulus(budget)
-        var tables = self._garner_tables(budget)
+        var crt = _Crt(self.batch, budget)
         var inverse = self._inverse(q) if waiting else Integer(1)
         var total: Integer
         var bound: Integer
@@ -425,7 +427,7 @@ struct _Images[W: Int](Movable):
                 continue
             var value = self.values[pe][pk].copy()
             if waiting:
-                value = self._joined(value, self._garner(pe, pk, tables, budget), q, inverse, budget)
+                value = self._joined(value, crt.value(self.residues[pe], pk * _BATCH, len(self.batch), budget), q, inverse, budget)
             if not _reconstruct(value, total, bound, budget):
                 self.probe = (pe, pk)
                 return False

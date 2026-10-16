@@ -55,13 +55,17 @@ comptime _PAD = 32
 def _magnitude(value: Integer, mut limbs: List[UInt64]):
     """Append the magnitude of value in 64-bit limbs, least significant first."""
     var bytes = value.to_bytes()
-    var n = (len(bytes) + 7) // 8
-    for l in range(n):
+    var count = len(bytes)
+    var full = count // 8
+    for l in range(full):
         var limb = UInt64(0)
-        for b in range(8):
-            var i = 8 * l + b
-            if i < len(bytes):
-                limb |= UInt64(bytes[i]) << UInt64(8 * b)
+        comptime for b in range(8):
+            limb |= UInt64(bytes.unsafe_get(8 * l + b)) << UInt64(8 * b)
+        limbs.append(limb)
+    if full * 8 < count:
+        var limb = UInt64(0)
+        for i in range(full * 8, count):
+            limb |= UInt64(bytes.unsafe_get(i)) << UInt64(8 * (i - 8 * full))
         limbs.append(limb)
 
 
@@ -304,7 +308,7 @@ struct _Row(Movable):
         var base = c * self.width
         var negative = (self.data.unsafe_get(base + self.width - 1) >> 63) != 0
         var used = (self._entry_bits(c) + 63) // 64
-        var bytes = List[UInt8](capacity=8 * used)
+        var bytes = List[UInt8](length=8 * used, fill=0)
         var carry = UInt64(1)
         for l in range(used):
             var limb = self.data.unsafe_get(base + l)
@@ -312,8 +316,8 @@ struct _Row(Movable):
                 # The magnitude of a two's complement value: invert and add one.
                 limb = ~limb + carry
                 carry = UInt64(1) if (carry != 0 and limb == 0) else UInt64(0)
-            for b in range(8):
-                bytes.append(UInt8((limb >> UInt64(8 * b)) & 0xFF))
+            comptime for b in range(8):
+                bytes.unsafe_get(8 * l + b) = UInt8((limb >> UInt64(8 * b)) & 0xFF)
         return Integer.from_bytes(bytes, negative=negative)
 
     def magnitude_into(self, c: Int, mut limbs: List[UInt64]):
@@ -469,24 +473,16 @@ struct _Row(Movable):
             c = next
 
 
-@always_inline
 def _accumulate[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int):
     """data += a[0:na] * b[0:nb], or -= when `subtract`, over `width` limbs of two's complement.
 
     Products past the width are dropped, which is exact modulo 2^(64 width).
     A short factor goes in a limb pair at a time, each pair in one carry
-    chain along the longer one; two long ones go a column at a time. Inlined,
-    since a reduction step makes one such update per term.
+    chain along the longer one; two long ones go a column at a time.
     """
-    if na <= nb:
-        _accumulate_ordered[subtract](data, width, a, na, b, nb)
-    else:
-        _accumulate_ordered[subtract](data, width, b, nb, a, na)
-
-
-@always_inline
-def _accumulate_ordered[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int):
-    """`_accumulate` for na <= nb."""
+    if na > nb:
+        _accumulate[subtract](data, width, b, nb, a, na)
+        return
     if na >= _COMBA:
         _comba[subtract](data, width, a, na, b, nb)
         return
