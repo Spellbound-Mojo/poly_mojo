@@ -1498,8 +1498,10 @@ def _exact_cost(units: Int, terms: Int, columns: Int) -> Int:
 def _modular_cost(lane_units: Int, crt_units: Int, slots: Int) -> Int:
     """The modular route's cost model, in the units of `_exact_cost`: from the
     budget units of its lane sweeps and of its proofs, and the quotient slots
-    its attempts combine (fitted as `_exact_cost`, to about fifteen percent)."""
-    return 38 * lane_units + 232 * crt_units + 21000 * slots
+    its attempts combine. Fitted as `_exact_cost`, refitted after the limb
+    reconstruction of the proofs, to about twenty percent, and scaled up by a
+    fifth so that close calls go to the exact check."""
+    return 25 * lane_units + 110 * crt_units + 20000 * slots
 
 
 def _remainder_of(limbs: Pointer[mut=False, UInt64, _], n: Int, d: UInt64) -> UInt64:
