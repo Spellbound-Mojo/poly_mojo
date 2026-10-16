@@ -50,7 +50,7 @@ from .sparse import SparsePoly, Term
 from .primes import _residue
 from ._images import _denominator, _scaled_integer
 from ._packed_groebner import _Buckets, _Engine, _Packed, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
-from ._f4 import _Trace, _f4_learn, _f4_replay
+from ._f4 import _Matrix, _Store, _Trace, _f4_learn, _f4_replay
 from ._integer_f4 import _pairs_reduce_to_zero, _reduced_tails
 
 comptime _PRIME_LIMIT = 4096
@@ -581,13 +581,25 @@ def _certify[W: Int](kind: UInt8, inputs: List[List[_Term[ZZ, W]]], candidate: L
     if len(engine.active) != len(candidate):
         return False  # Some leading monomial divides another.
     engine.sort_active(budget)
-    # (d) Reduced: no tail monomial is divisible by a leading monomial.
-    for g in candidate:
-        for k in range(len(g) - 1):
-            for i in engine.active:
-                budget.charge(1)
-                if _divides(engine.leads[i], g[k].monomial):
-                    return False
+    # (d) Reduced: no tail monomial is divisible by a leading monomial. As
+    # rows of one F4 matrix, numbering each distinct monomial once, no tail
+    # column may be a leading one, and symbolic preprocessing must find no
+    # reducer for any other.
+    var store = _Store[W]()
+    store.extend(engine, budget)
+    var matrix = _Matrix[W]()
+    var one = _Packed[W](SIMD[DType.uint32, W](0), 0, 0)
+    for i in engine.active:
+        matrix.add_row(engine, store, i, one, budget)
+    var rows = len(matrix.sources)
+    budget.charge(UInt64(len(matrix.entries)))
+    for r in range(rows):
+        for k in range(matrix.starts[r] + 1, matrix.starts[r + 1]):
+            if matrix.columns.covered[Int(matrix.entries[k])]:
+                return False
+    matrix.preprocess(engine, store, budget)
+    if len(matrix.sources) != rows:
+        return False
     # (a) Every input reduces to zero.
     for f in inputs:
         budget.charge(1)
