@@ -530,6 +530,7 @@ struct _Images[W: Int](Movable):
         self.verified[e] = -1
         var n = len(self.monomials[e]) + missing
         _allocation[UInt32](_product(n * _BATCH, len(self.residues[e])), budget)
+        # A block has room for the primes it has held so far.
         var monomials = List[_Packed[Self.W]](capacity=n)
         # Where each old coefficient goes.
         var places = List[Int](capacity=len(self.monomials[e]))
@@ -555,8 +556,9 @@ struct _Images[W: Int](Movable):
                 j += 1
         var old = len(places)
         for b in range(len(self.residues[e])):
-            var residues = List[UInt32](length=n * _BATCH, fill=0)
-            for slot in range(_BATCH):
+            var slots = len(self.residues[e][b]) // old
+            var residues = List[UInt32](length=n * slots, fill=0)
+            for slot in range(slots):
                 budget.charge(UInt64(old))
                 for k in range(old):
                     residues[slot * n + places[k]] = self.residues[e][b][slot * old + k]
@@ -564,11 +566,21 @@ struct _Images[W: Int](Movable):
         self.monomials[e] = monomials^
 
     def _block(mut self, e: Int, slot: Int, mut budget: Budget) raises PolyError:
-        """Start a new block for element e at its first slot."""
+        """Make room for slot `slot` of element e's last block, starting a new block at its first slot.
+
+        Blocks grow with their primes, doubling their slots up to `_BATCH`,
+        so that bases a few images settle do not pay for whole blocks.
+        """
+        var n = len(self.monomials[e])
         if slot == 0:
-            var n = len(self.monomials[e])
-            _allocation[UInt32](n * _BATCH, budget)
-            self.residues[e].append(List[UInt32](length=n * _BATCH, fill=0))
+            self.residues[e].append(List[UInt32]())
+        ref block = self.residues[e][len(self.residues[e]) - 1]
+        var needed = (slot + 1) * n
+        if needed > block.capacity():
+            var slots = min(_BATCH, max(slot + 1, 2 * slot))
+            _allocation[UInt32](slots * n, budget)
+            block.reserve(slots * n)
+        block.resize(needed, 0)
 
     def add(mut self, basis: List[List[_Term[ModInt, Self.W]]], p: UInt64, mut budget: Budget) raises PolyError:
         """Add one image: its residues join their block, over the union of supports."""
