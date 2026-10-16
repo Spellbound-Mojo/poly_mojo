@@ -7,9 +7,11 @@ certified, and setting h = 1 then gives the basis of the input ideal.
 
 1. Images. Modulo each prime below 2^31 that divides no leading coefficient,
    F4 computes the reduced basis of the image of J. The first prime's run
-   is recorded and later primes replay its matrices; a prime whose replay
-   declines is computed in full and recorded instead. Images whose leading
-   monomials differ from the first one's are set aside.
+   is recorded and later primes replay its matrices, `_LANES` primes at a
+   time, one per SIMD lane; a prime whose replay declines is computed in
+   full and recorded instead, and the primes after it replay the new run.
+   Images whose leading monomials differ from the first one's are set
+   aside.
 2. Reconstruction. Each coefficient is lifted by the Chinese remainder
    theorem over the union of the images' supports and recovered as a
    fraction, through a running denominator per element; a candidate must
@@ -50,7 +52,7 @@ from .sparse import SparsePoly, Term
 from .primes import _residue
 from ._images import _denominator, _scaled_integer
 from ._packed_groebner import _Buckets, _Engine, _Packed, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
-from ._f4 import _Matrix, _Store, _Trace, _f4_learn, _f4_replay
+from ._f4 import _LANES, _Matrix, _Store, _Trace, _f4_learn, _f4_replay, _f4_replay_lanes
 from ._integer_f4 import _add_mul_1, _divide, _pairs_reduce_to_zero, _reduced_tails, _remainder, _sub_mul_1
 
 comptime _PRIME_LIMIT = 4096
@@ -653,16 +655,37 @@ def _exact[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, mut budget: Bu
     return engine.finish(budget)
 
 
+def _admissible[W: Int](inputs: List[List[_Term[ZZ, W]]], p: UInt64, mut budget: Budget) raises PolyError -> Bool:
+    """Whether p divides no input's leading coefficient."""
+    for f in inputs:
+        if _residue(f[len(f) - 1].coefficient.value, p, budget) == 0:
+            return False
+    return True
+
+
+def _images_of[W: Int](inputs: List[List[_Term[ZZ, W]]], ring: Modulus, mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
+    """The inputs modulo the ring's prime."""
+    var p = ring.value
+    var reduced = List[List[_Term[ModInt, W]]](capacity=len(inputs))
+    for f in inputs:
+        _allocation[_Term[ModInt, W]](len(f), budget)
+        var terms = List[_Term[ModInt, W]](capacity=len(f))
+        for t in f:
+            budget.charge(1)
+            # Euclidean residues are already in [0, p), for negative values too.
+            var r = _residue(t.coefficient.value, p, budget)
+            if r != 0:
+                terms.append(_Term[ModInt, W](t.monomial, ModInt(r, ring)))
+        reduced.append(terms^)
+    return reduced^
+
+
 def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify: Bool, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ZZ, W]]]]:
     """The certified reduced basis of homogeneous inputs, or None when reconstruction gives up.
 
     Without `certify`, the first candidate that agrees with the next image is
     returned uncertified.
     """
-    # Leading coefficients, which an admissible prime must not divide.
-    var leads = List[Integer]()
-    for f in inputs:
-        leads.append(f[len(f) - 1].coefficient.value.copy())
     var images = _Images[W](kind)
     var candidate = Optional[List[List[_Term[ZZ, W]]]](None)
     var mismatches = 0
@@ -672,38 +695,48 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
     # prime whose replay departs from it is computed in full and recorded.
     var trace = _Trace[W]()
     var learned = False
+    # Replays run `_LANES` primes at once: the images of the primes after
+    # this one wait in `ahead`, computed from the same recorded run, and are
+    # dropped whenever the run is recorded anew.
+    var ahead = List[List[List[_Term[ModInt, W]]]]()
+    var ahead_primes = List[UInt64]()
     var p = (UInt64(1) << 31) + 1
     for _ in range(_PRIME_LIMIT):
         budget.charge(1)
         p = _next_prime(p, budget)
-        var admissible = True
-        for c in leads:
-            if _residue(c, p, budget) == 0:
-                admissible = False
-                break
-        if not admissible:
+        if not _admissible(inputs, p, budget):
             continue
         var ring = Modulus(_prime_value=p)
-        var reduced = List[List[_Term[ModInt, W]]](capacity=len(inputs))
-        for f in inputs:
-            _allocation[_Term[ModInt, W]](len(f), budget)
-            var terms = List[_Term[ModInt, W]](capacity=len(f))
-            for t in f:
-                budget.charge(1)
-                # Euclidean residues are already in [0, p), for negative values too.
-                var r = _residue(t.coefficient.value, p, budget)
-                if r != 0:
-                    terms.append(_Term[ModInt, W](t.monomial, ModInt(r, ring)))
-            reduced.append(terms^)
         var replayed = Optional[List[List[_Term[ModInt, W]]]](None)
         if learned and trace.usable:
-            replayed = _f4_replay[W](trace, reduced.copy(), kind, ring, budget)
+            if len(ahead_primes) > 0 and ahead_primes[0] == p:
+                replayed = ahead.pop(0)
+                _ = ahead_primes.pop(0)
+            else:
+                # This prime and the next admissible ones, in one batch.
+                var rings: List[Modulus] = [ring]
+                var batch = List[List[List[_Term[ModInt, W]]]]()
+                batch.append(_images_of(inputs, ring, budget))
+                var q = p
+                while len(rings) < _LANES:
+                    q = _next_prime(q, budget)
+                    if _admissible(inputs, q, budget):
+                        rings.append(Modulus(_prime_value=q))
+                        batch.append(_images_of(inputs, rings[len(rings) - 1], budget))
+                ahead = _f4_replay_lanes[W](trace, batch^, kind, rings, budget)
+                ahead_primes = List[UInt64]()
+                for i in range(1, len(ahead)):
+                    ahead_primes.append(rings[i].value)
+                if len(ahead) > 0:
+                    replayed = ahead.pop(0)
         var basis: List[List[_Term[ModInt, W]]]
         if replayed:
             basis = replayed.take()
         else:
-            basis = _f4_learn[W](reduced^, kind, ring, trace, budget)
+            basis = _f4_learn[W](_images_of(inputs, ring, budget), kind, ring, trace, budget)
             learned = True
+            ahead = List[List[List[_Term[ModInt, W]]]]()
+            ahead_primes = List[UInt64]()
         if images.count > 0 and not images.matches(basis):
             mismatches += 1
             if mismatches < _MISMATCH_LIMIT:
@@ -723,6 +756,8 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
                 # The images may follow an unlucky recorded run: record anew,
                 # so that differing leading monomials can show.
                 learned = False
+                ahead = List[List[List[_Term[ModInt, W]]]]()
+                ahead_primes = List[UInt64]()
             candidate = None
         images.add(basis, p, budget)
         var count = images.count

@@ -29,7 +29,10 @@ A run can be recorded (`_f4_learn`) and replayed modulo another prime
 (`_f4_replay`): the replay reduces only the recorded rows that gave new
 elements, against the recorded pivots, with no pairs, symbolic
 preprocessing, or rows that reduced to zero, and declines as soon as a row
-leads elsewhere or a result leaves its recorded support.
+leads elsewhere or a result leaves its recorded support. A replay can also run
+modulo `_LANES` primes at once (`_f4_replay_lanes`): the recorded matrices are
+the same for every prime, so each accumulator column holds a residue per
+prime in one SIMD vector, and every update is one vector operation.
 
 `groebner` uses F4 for untracked bases over primes below 2^31 under GRLEX and
 GREVLEX, over at most sixteen variables; other cases use Buchberger's
@@ -37,7 +40,7 @@ algorithm in the packed or sparse engine.
 """
 from std.math import max, min
 from .coefficients import CoefficientRing, ModInt, Modulus
-from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
+from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product, _sum
 from .monomial import MonomialOrder
 from .sparse import SparsePoly
 from ._packed_groebner import _Engine, _Packed, _Term, _compare, _div, _divides, _equal, _mul, _pack, _packed, _priorities, _unpack
@@ -864,6 +867,330 @@ def _f4_replay[W: Int](trace: _Trace[W], var generators: List[List[_Term[ModInt,
             basis.append(terms^)
         return basis^
     return None
+
+
+comptime _LANES = 8
+"""Primes a batched replay runs at once, one per SIMD lane."""
+
+comptime _Lanes = SIMD[DType.uint64, _LANES]
+
+
+struct _LaneRows(Movable):
+    """Rows found during a batched replay, concatenated: each entry has a residue per prime, `_LANES` apart."""
+    var columns: List[Int32]
+    var values: List[UInt32]
+    var starts: List[Int]
+    """Where each row starts, then where the last one ends."""
+
+    def __init__(out self):
+        self.columns = List[Int32]()
+        self.values = List[UInt32]()
+        self.starts = [0]
+
+
+struct _Primes(Movable):
+    """The primes of a batched replay, one per lane, and how many still follow the recorded run."""
+    var rings: List[Modulus]
+    var primes: _Lanes
+    var squares: _Lanes
+    var reciprocals: SIMD[DType.float64, _LANES]
+    var live: Int
+    """Lanes 0 to live - 1 follow the run; a lane that departs takes the later ones with it."""
+
+    def __init__(out self, rings: List[Modulus]):
+        self.rings = rings.copy()
+        self.primes = _Lanes(0)
+        for l in range(_LANES):
+            self.primes[l] = rings[l].value
+        self.squares = self.primes * self.primes
+        self.reciprocals = SIMD[DType.float64, _LANES](1.0) / self.primes.cast[DType.float64]()
+        self.live = _LANES
+
+    def mask(self) -> _Lanes:
+        """All ones in the lanes that follow the run, zero in the others."""
+        var mask = _Lanes(0)
+        for l in range(self.live):
+            mask[l] = UInt64.MAX
+        return mask
+
+    def depart(mut self, lane: Int):
+        self.live = min(self.live, lane)
+
+
+@always_inline
+def _mod_lanes(v: _Lanes, lanes: _Primes) -> _Lanes:
+    """Each lane of v, below 2^62, modulo its prime.
+
+    The quotient estimated in floating point is off by one at most either
+    way, so one correction each way remains.
+    """
+    var q = (v.cast[DType.float64]() * lanes.reciprocals).cast[DType.uint64]()
+    var r = v - q * lanes.primes
+    r = (r >> 63).ne(0).select(r + lanes.primes, r)
+    return r.ge(lanes.primes).select(r - lanes.primes, r)
+
+
+@always_inline
+def _axpy_lanes(data: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factor: SIMD[DType.uint32, _LANES], squares: _Lanes):
+    """Add factor times a row, after its leading entry, to every lane of the dense accumulator.
+
+    Both factors widen from 32 bits, so each product is one 32 by 32 bit
+    multiplication.
+    """
+    var f = factor.cast[DType.uint64]()
+    for k in range(1, n):
+        var at = data.unsafe_offset(_LANES * Int(columns.unsafe_offset(k).unsafe_load()))
+        var x = at.unsafe_load[width=_LANES]() + f * values.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
+        at.unsafe_store[width=_LANES](x.ge(squares).select(x - squares, x))
+
+
+def _scatter_lanes[W: Int](mut dense: List[UInt64], step: _Step[W], values: List[List[UInt32]], row: Int, skip: Int):
+    """Write a recorded row's residues in every lane, after its first `skip` entries, into the dense accumulator."""
+    var s = step.starts[row]
+    var source = values[step.sources[row]].unsafe_ptr()
+    var data = dense.unsafe_ptr()
+    for k in range(skip, step.starts[row + 1] - s):
+        var at = data.unsafe_offset(_LANES * Int(step.entries.unsafe_get(s + k)))
+        at.unsafe_store[width=_LANES](source.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]())
+
+
+def _reduce_lanes[W: Int](mut dense: List[UInt64], ncols: Int, start: Int, pivot: List[Int], step: _Step[W], values: List[List[UInt32]], mut found: _LaneRows, lanes: _Primes, mut budget: Budget) raises PolyError:
+    """As `_reduce_row` in every lane at once, for primes below 2^31.
+
+    A column is reduced when some lane that follows the run has a nonzero
+    residue there, by its pivot, or else joins `found` with every lane's
+    residue; zero lanes take a zero multiple. Lanes that departed are left
+    out of every decision.
+    """
+    var rows = len(step.sources)
+    var data = dense.unsafe_ptr()
+    var live = lanes.mask()
+    budget.charge(UInt64(_LANES * (ncols - start)))
+    for c in range(start, ncols):
+        var at = data.unsafe_offset(_LANES * c)
+        var v = at.unsafe_load[width=_LANES]()
+        if not v.ne(0).reduce_or():
+            continue
+        at.unsafe_store[width=_LANES](_Lanes(0))
+        v = _mod_lanes(v, lanes) & live
+        if not v.ne(0).reduce_or():
+            continue
+        var factor = v.eq(0).select(_Lanes(0), lanes.primes - v).cast[DType.uint32]()
+        var q = pivot.unsafe_get(c)
+        if q >= rows:
+            var r = q - rows
+            var s = found.starts.unsafe_get(r)
+            var n = found.starts.unsafe_get(r + 1) - s
+            budget.charge(UInt64(_LANES * n))
+            _axpy_lanes(data, found.columns.unsafe_ptr().unsafe_offset(s), found.values.unsafe_ptr().unsafe_offset(_LANES * s), n, factor, lanes.squares)
+        elif q >= 0:
+            var s = step.starts.unsafe_get(q)
+            var n = step.starts.unsafe_get(q + 1) - s
+            budget.charge(UInt64(_LANES * n))
+            _axpy_lanes(data, step.entries.unsafe_ptr().unsafe_offset(s), values[step.sources.unsafe_get(q)].unsafe_ptr(), n, factor, lanes.squares)
+        else:
+            found.columns.append(Int32(c))
+            for l in range(_LANES):
+                found.values.append(UInt32(v[l]))
+
+
+def _eliminate_lanes[W: Int](step: _Step[W], mut dense: List[UInt64], mut pivot: List[Int], values: List[List[UInt32]], mut found: _LaneRows, mut lanes: _Primes, mut budget: Budget) raises PolyError -> List[Int]:
+    """As `_eliminate` on a recorded round's rows after its pivots, in every lane, each row to a pivot in its recorded column.
+
+    A lane whose row leads elsewhere or reduces to zero departs. Returns the
+    reduced new pivots, rows of `found`, by decreasing leading column.
+    """
+    var nrows = len(step.sources)
+    var ncols = len(pivot)
+    for i in range(nrows - step.pivots):
+        var r = step.pivots + i
+        _scatter_lanes(dense, step, values, r, 0)
+        var before = len(found.columns)
+        _reduce_lanes(dense, ncols, Int(step.entries[step.starts[r]]), pivot, step, values, found, lanes, budget)
+        _allocation[UInt32](_product(len(found.columns) - before, 2 * _LANES), budget)
+        # Each lane that follows the run leads in the recorded column.
+        var lead = step.leads[i]
+        var at = before
+        while at < len(found.columns) and found.columns[at] < lead:
+            at += 1
+        var present = at < len(found.columns) and found.columns[at] == lead
+        for l in range(lanes.live):
+            var leads_there = present and found.values[_LANES * at + l] != 0
+            for k in range(before, at):
+                if found.values[_LANES * k + l] != 0:
+                    leads_there = False
+            if not leads_there:
+                lanes.depart(l)
+                break
+        if lanes.live == 0:
+            return List[Int]()
+        # Entries before the lead are nonzero only in departed lanes.
+        if at > before:
+            var n = len(found.columns) - at
+            for k in range(n):
+                found.columns[before + k] = found.columns[at + k]
+                for l in range(_LANES):
+                    found.values[_LANES * (before + k) + l] = found.values[_LANES * (at + k) + l]
+            found.columns.resize(before + n, 0)
+            found.values.resize(_LANES * (before + n), 0)
+        # A new pivot: monic in every lane that follows the run.
+        var inverse = _Lanes(0)
+        for l in range(lanes.live):
+            inverse[l] = ModInt(UInt64(found.values[_LANES * before + l]), lanes.rings[l]).inverse(budget).value
+        var p = found.values.unsafe_ptr()
+        for k in range(before, len(found.columns)):
+            var x = p.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
+            p.unsafe_offset(_LANES * k).unsafe_store[width=_LANES](_mod_lanes(x * inverse, lanes).cast[DType.uint32]())
+        pivot[Int(lead)] = nrows + len(found.starts) - 1
+        found.starts.append(len(found.columns))
+    # The new pivots by decreasing leading column, each reduced by the ones
+    # right of its leading column, as in `_eliminate`.
+    var created = List[Int]()
+    for i in range(len(found.starts) - 1):
+        var j = len(created)
+        created.append(i)
+        while j > 0 and found.columns[found.starts[created[j - 1]]] < found.columns[found.starts[i]]:
+            created[j] = created[j - 1]
+            j -= 1
+        created[j] = i
+    var results = List[Int](capacity=len(created))
+    var data = dense.unsafe_ptr()
+    for i in created:
+        var lead = Int(found.columns[found.starts[i]])
+        for k in range(found.starts[i] + 1, found.starts[i + 1]):
+            data.unsafe_offset(_LANES * Int(found.columns[k])).unsafe_store[width=_LANES](found.values.unsafe_ptr().unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]())
+        var before = len(found.columns)
+        found.columns.append(Int32(lead))
+        for _ in range(_LANES):
+            found.values.append(UInt32(1))
+        _reduce_lanes(dense, ncols, lead + 1, pivot, step, values, found, lanes, budget)
+        _allocation[UInt32](_product(len(found.columns) - before, 2 * _LANES), budget)
+        pivot[lead] = nrows + len(found.starts) - 1
+        results.append(len(found.starts) - 1)
+        found.starts.append(len(found.columns))
+    return results^
+
+
+def _replay_rows_lanes(found: _LaneRows, results: List[Int], supports: List[List[Int32]], mut values: List[List[UInt32]], mut lanes: _Primes, mut budget: Budget) raises PolyError:
+    """As `_replay_rows` in every lane: a lane departs when its result leaves the recorded support or loses its leading entry."""
+    for t in range(len(results)):
+        var i = results[t]
+        ref support = supports[t]
+        _allocation[UInt32](_product(len(support), _LANES), budget)
+        var residues = List[UInt32](length=_LANES * len(support), fill=0)
+        var j = 0
+        for k in range(found.starts[i], found.starts[i + 1]):
+            budget.charge(UInt64(_LANES))
+            while j < len(support) and support[j] < found.columns[k]:
+                j += 1
+            if j == len(support) or support[j] != found.columns[k]:
+                for l in range(lanes.live):
+                    if found.values[_LANES * k + l] != 0:
+                        lanes.depart(l)
+                        break
+                continue
+            for l in range(_LANES):
+                residues[_LANES * j + l] = found.values[_LANES * k + l]
+        for l in range(lanes.live):
+            if residues[l] == 0:
+                lanes.depart(l)
+                break
+        values.append(residues^)
+
+
+def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_Term[ModInt, W]]]], kind: UInt8, rings: List[Modulus], mut budget: Budget) raises PolyError -> List[List[List[_Term[ModInt, W]]]]:
+    """`_f4_replay` modulo `_LANES` primes below 2^31 at once, one per SIMD lane.
+
+    Returns the bases of the primes before the first whose replay declines,
+    each exactly what `_f4_replay` returns for it: lanes share the recorded
+    matrices, and a lane with a zero residue where another has not takes a
+    zero multiple.
+    """
+    var lanes = _Primes(rings)
+    var values = List[List[UInt32]]()
+    for l in range(_LANES):
+        var engine = _Engine[ModInt, W, False](kind, rings[l])
+        var own = List[List[_Term[ModInt, W]]]()
+        swap(own, generators[l])
+        engine.start(own^, budget)
+        var follows = len(engine.polys) == len(trace.inputs)
+        if follows and l == 0:
+            for i in range(len(engine.polys)):
+                _allocation[UInt32](_product(len(engine.polys[i]), _LANES), budget)
+                values.append(List[UInt32](length=_LANES * len(engine.polys[i]), fill=0))
+        for i in range(len(engine.polys)):
+            if not follows:
+                break
+            ref p = engine.polys[i]
+            ref monomials = trace.inputs[i]
+            if len(p) != len(monomials):
+                follows = False
+                break
+            for k in range(len(p) - 1, -1, -1):
+                budget.charge(1)
+                if not _equal(p[k].monomial, monomials[k]):
+                    follows = False
+                    break
+                values[i][_LANES * (len(p) - 1 - k) + l] = UInt32(p[k].coefficient.value)
+        if not follows:
+            lanes.depart(l)
+            break
+    var bases = List[List[List[_Term[ModInt, W]]]]()
+    if lanes.live == 0:
+        return bases^
+    var width = 0
+    for step in trace.steps:
+        width = max(width, step.ncols)
+    _allocation[UInt64](_product(width, _LANES), budget)
+    var dense = List[UInt64](length=_LANES * width, fill=0)
+    for step in trace.steps:
+        budget.charge(1)
+        var nrows = len(step.sources)
+        for r in range(nrows):
+            if step.starts[r + 1] - step.starts[r] != len(values[step.sources[r]]) // _LANES:
+                return bases^
+        _allocation[Int](step.ncols, budget)
+        var pivot = List[Int](length=step.ncols, fill=-1)
+        for r in range(step.pivots):
+            pivot[Int(step.entries[step.starts[r]])] = r
+        var found = _LaneRows()
+        if not step.final:
+            var results = _eliminate_lanes(step, dense, pivot, values, found, lanes, budget)
+            if lanes.live == 0:
+                return bases^
+            _replay_rows_lanes(found, results, step.supports, values, lanes, budget)
+            if lanes.live == 0:
+                return bases^
+            continue
+        # The final matrix: the basis rows' tails reduced against all rows.
+        for r in range(step.basis):
+            var first = Int(step.entries[step.starts[r]])
+            _scatter_lanes(dense, step, values, r, 1)
+            found.columns.append(Int32(first))
+            for l in range(_LANES):
+                found.values.append(values[step.sources[r]][l])
+            _reduce_lanes(dense, step.ncols, first + 1, pivot, step, values, found, lanes, budget)
+            _allocation[UInt32](_product(len(found.columns) - found.starts[len(found.starts) - 1], 2 * _LANES), budget)
+            found.starts.append(len(found.columns))
+        var rows = List[Int](capacity=step.basis)
+        for r in range(step.basis):
+            rows.append(r)
+        var first = len(values)
+        _replay_rows_lanes(found, rows, step.supports, values, lanes, budget)
+        for l in range(lanes.live):
+            var basis = List[List[_Term[ModInt, W]]](capacity=step.basis)
+            for r in range(step.basis):
+                ref residues = values[first + r]
+                ref monomials = step.monomials[r]
+                var terms = List[_Term[ModInt, W]](capacity=len(monomials))
+                for k in range(len(monomials) - 1, -1, -1):
+                    var residue = residues[_LANES * k + l]
+                    if residue != 0:
+                        terms.append(_Term[ModInt, W](monomials[k], ModInt(UInt64(residue), lanes.rings[l])))
+                basis.append(terms^)
+            bases.append(basis^)
+        return bases^
+    return bases^
 
 
 def _f4_basis[W: Int](generators: List[SparsePoly[ModInt]], order: MonomialOrder, mut budget: Budget) raises PolyError -> List[SparsePoly[ModInt]]:

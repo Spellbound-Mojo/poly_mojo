@@ -4,11 +4,13 @@ Rational bases are reconstructed from images modulo many primes: the first
 prime's F4 run is recorded, and later primes replay only its matrices. A
 replay must either decline or return exactly the basis a full F4 run
 computes, for homogeneous and inhomogeneous systems and for small and large
-primes; and recording must not change the run it records.
+primes; and recording must not change the run it records. A batched replay,
+one prime per SIMD lane, must return each single replay's basis for the
+primes before the first whose replay declines.
 """
 from apn_mojo import Rational
 from polynomials import Budget, QQ, ModInt, Modulus, NoContext, SparsePoly, Term, Monomial, MonomialOrder
-from polynomials._f4 import _Trace, _f4_learn, _f4_packed, _f4_replay, _sort_descending
+from polynomials._f4 import _LANES, _Trace, _f4_learn, _f4_packed, _f4_replay, _f4_replay_lanes, _sort_descending
 from polynomials._packed_groebner import _Packed, _Term, _compare, _equal, _pack, _packed
 from support.check import Checker
 from support.corpus import as_mod
@@ -99,6 +101,28 @@ def check_system(generators: List[SparsePoly[QQ]], order: MonomialOrder, name: S
             replays += 1
             c.check(same(replayed.value(), full), name + ": replay modulo " + String(primes[i]))
     c.check(replays > 0, name + ": some replay succeeds")
+    # Batches of large primes, with primes too small for the run now and then.
+    var large: List[UInt64] = [2147483629, 2147483587, 2147483579, 2147483563, 2147483549, 2147483543, 2147483497, 2147483489, 2147483477, 2147483423]
+    for shift in range(3):
+        var rings = List[Modulus]()
+        var batch = List[List[List[_Term[ModInt, 8]]]]()
+        for l in range(_LANES):
+            var prime = large[l + shift]
+            if shift == 1 and l == 5:
+                prime = 7
+            elif shift == 2 and l == 2:
+                prime = 5
+            rings.append(Modulus(prime, work))
+            batch.append(packed_mod(generators, rings[l], order, work))
+        var bases = _f4_replay_lanes[8](trace, batch^, order.kind, rings, work)
+        c.check(len(bases) <= _LANES, name + ": a batch has a basis per lane at most")
+        for l in range(min(len(bases) + 1, _LANES)):
+            var single = _f4_replay[8](trace, packed_mod(generators, rings[l], order, work), order.kind, rings[l], work)
+            var label = name + ": batch " + String(shift) + ", lane " + String(l)
+            if l < len(bases):
+                c.check(Bool(single) and same(single.value(), bases[l]), label + " replays as alone")
+            else:
+                c.check(not single, label + ", the first left out, declines alone")
 
 
 def check_column_order(mut c: Checker, mut work: Budget) raises:
