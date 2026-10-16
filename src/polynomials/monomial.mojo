@@ -344,17 +344,47 @@ struct MonomialOrder(Copyable, Movable, Equatable, Writable):
         return 0
 
     def _covers(self, m: Monomial) -> Bool:
-        """Whether the order lists variables 0..n-1 in priority order and m uses only those.
+        """Whether the order lists variables 0..n-1 in priority order and m uses only those."""
+        return self._within(m) and self._identity()
+
+    def _within(self, m: Monomial) -> Bool:
+        """Whether m uses only variables 0..n-1 for the order's n variables.
 
         Pair indices increase, so checking the first and last pairs bounds them all.
         """
         var n = len(self.variables)
-        if len(m.pairs) and (m.pairs.unsafe_get(0)[0] < 0 or m.pairs.unsafe_get(len(m.pairs) - 1)[0] >= Int64(n)):
+        return not len(m.pairs) or (m.pairs.unsafe_get(0)[0] >= 0 and m.pairs.unsafe_get(len(m.pairs) - 1)[0] < Int64(n))
+
+    def _identity(self) -> Bool:
+        """Whether the order is explicit and lists variables 0..n-1 in priority order."""
+        if self.kind == Self.KERNEL:
             return False
-        for i in range(n):
+        for i in range(len(self.variables)):
             if self.variables.unsafe_get(i) != Int64(i):
                 return False
         return True
+
+    def _validate_identity(self, monomial: Monomial, mut budget: Budget) raises PolyError:
+        """`validate` under an order that `_identity` accepts, charged identically in one step.
+
+        Variable v sits at position v, so the search for each pair charges v+2;
+        anything unusual, including a charge the budget cannot cover, takes the
+        general path for its exact error and partial charges.
+        """
+        var n = Int64(len(self.variables))
+        var total = UInt64(len(monomial.pairs))
+        var previous = Int64(-1)
+        for i in range(len(monomial.pairs)):
+            ref pair = monomial.pairs.unsafe_get(i)
+            if pair[1] == 0 or pair[0] <= previous or pair[0] >= n:
+                self.validate(monomial, budget)
+                return
+            previous = pair[0]
+            total += UInt64(pair[0]) + 2
+        if total > budget.remaining():
+            self.validate(monomial, budget)
+            return
+        budget.charge(total)
 
     def _compare_identity(self, a: Monomial, b: Monomial, mut budget: Budget) raises PolyError -> Int:
         """Compare by one merge pass when variable index order is priority order.

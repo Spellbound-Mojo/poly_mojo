@@ -136,6 +136,9 @@ struct SparsePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
         """
         var result = Self.zero(order, ring, budget)
         var indices = _sorted_indices[validate=True](terms, order, ring, budget)
+        # Validated monomials use only the order's variables, so an identity
+        # order compares them all by the merge pass `_compare` would choose.
+        var identity = order._identity()
         for index in indices:
             budget.charge(1)
             # Sorting is finished and each owned slot is visited once. Move its
@@ -146,7 +149,12 @@ struct SparsePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
                 continue
             if len(result.terms) > 0:
                 var last = len(result.terms) - 1
-                if order._compare(result.terms[last].monomial, t.monomial, budget) == 0:
+                var same: Bool
+                if identity:
+                    same = order._compare_identity(result.terms[last].monomial, t.monomial, budget) == 0
+                else:
+                    same = order._compare(result.terms[last].monomial, t.monomial, budget) == 0
+                if same:
                     var sum = result.terms[last].coefficient.add(t.coefficient, budget)
                     if sum.is_zero():
                         _ = result.terms.pop()
@@ -670,10 +678,31 @@ struct _ExactTermOrder[C: CoefficientRing](_IndexedOrder):
         return order._compare(items[a].monomial, items[b].monomial, budget)
 
 
+struct _IdentityTermOrder[C: CoefficientRing](_IndexedOrder):
+    """`_ExactTermOrder` for an identity order whose terms all lie within it."""
+    comptime Item = Term[Self.C]
+
+    @staticmethod
+    @always_inline
+    def compare(items: List[Self.Item], a: Int, b: Int, order: MonomialOrder, mut budget: Budget) raises PolyError -> Int:
+        return order._compare_identity(items.unsafe_get(a).monomial, items.unsafe_get(b).monomial, budget)
+
+
 def _sorted_indices[C: CoefficientRing, validate: Bool = False](terms: List[Term[C]], order: MonomialOrder, ring: C.Context, mut budget: Budget) raises PolyError -> List[Int]:
+    # `_compare` checks the order and both monomials on every call; check once.
+    var identity = order._identity()
     comptime if validate:
         for term in terms:
             if term.coefficient.context() != ring:
                 raise PolyError(PolyErrorKind.DOMAIN, "coefficient in another ring")
-            order.validate(term.monomial, budget)
+            if identity:
+                order._validate_identity(term.monomial, budget)
+            else:
+                order.validate(term.monomial, budget)
+    else:
+        for term in terms:
+            if identity and not order._within(term.monomial):
+                identity = False
+    if identity:
+        return _stable_indices[_IdentityTermOrder[C]](terms, order, budget)
     return _stable_indices[_ExactTermOrder[C]](terms, order, budget)
