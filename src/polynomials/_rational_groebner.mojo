@@ -51,9 +51,9 @@ from .monomial import MonomialOrder
 from .sparse import SparsePoly, Term
 from .primes import _residue
 from ._images import _denominator, _scaled_integer
-from ._packed_groebner import _Buckets, _Engine, _Packed, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
+from ._packed_groebner import _Buckets, _Engine, _Packed, _Shoup, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
 from ._f4 import _Columns, _Image, _LANES, _LaneBases, _Matrix, _raw_hash, _Step, _Store, _Trace, _f4_learn, _f4_replay, _f4_replay_lanes
-from ._integer_f4 import _add_mul_1, _divide, _pairs_reduce_to_zero, _reduced_tails, _remainder, _sub_mul_1
+from ._integer_f4 import _add_mul_1, _divide, _magnitude, _pairs_reduce_to_zero, _reduced_tails, _remainder, _sub_mul_1
 
 comptime _PRIME_LIMIT = 4096
 """Primes tried before giving up on reconstruction."""
@@ -142,6 +142,28 @@ def _reconstruct(value: Integer, modulus: Integer, bound: Integer, mut budget: B
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
 
 
+def _integer_of(limbs: Pointer[mut=False, UInt64, _], n: Int) -> Integer:
+    """The nonnegative number with the n limbs, least significant first."""
+    var bytes = List[UInt8](length=8 * n, fill=0)
+    for l in range(n):
+        var limb = limbs.unsafe_offset(l).unsafe_load()
+        comptime for shift in range(8):
+            bytes.unsafe_get(8 * l + shift) = UInt8((limb >> UInt64(8 * shift)) & 0xFF)
+    return Integer.from_bytes(bytes)
+
+
+@always_inline
+def _limbs_mod(limbs: Pointer[mut=False, UInt64, _], n: Int, one: _Shoup, radix: _Shoup) -> UInt64:
+    """The n limbs modulo the prime p of `one` (1) and `radix` (2^64 mod p)."""
+    var p = one.modulus
+    var r = UInt64(0)
+    for l in range(n - 1, -1, -1):
+        r = radix.times(r) + one.times(limbs.unsafe_offset(l).unsafe_load())
+        if r >= p:
+            r -= p
+    return r
+
+
 struct _Crt(Movable):
     """A batch's CRT basis. For primes p_i with product Q, Q_i = Q / p_i and
     c_i = Q_i^-1 modulo p_i, the residues r_i give x = sum r_i e_i - k Q with
@@ -187,6 +209,11 @@ struct _Crt(Movable):
 
     def value(mut self, residues: List[UInt32], start: Int, b: Int, mut budget: Budget) raises PolyError -> Integer:
         """The number below Q with the residues residues[start : start + b]."""
+        self.accumulate(residues, start, b, budget)
+        return _integer_of(self.work.unsafe_ptr(), self.limbs)
+
+    def accumulate(mut self, residues: List[UInt32], start: Int, b: Int, mut budget: Budget) raises PolyError:
+        """Leave the number below Q with the residues residues[start : start + b] in the first `limbs` limbs of `work`."""
         budget.charge(UInt64(_product(b, self.limbs)))
         var n = self.limbs + 2
         var work = self.work.unsafe_ptr()
@@ -207,12 +234,6 @@ struct _Crt(Movable):
             _add_mul_1(work, n, 1, self.product.unsafe_ptr(), self.limbs)
         while not self._below_product():
             _sub_mul_1(work, n, 1, self.product.unsafe_ptr(), self.limbs)
-        var bytes = List[UInt8](length=8 * self.limbs, fill=0)
-        for l in range(self.limbs):
-            var limb = work.unsafe_offset(l).unsafe_load()
-            comptime for shift in range(8):
-                bytes.unsafe_get(8 * l + shift) = UInt8((limb >> UInt64(8 * shift)) & 0xFF)
-        return Integer.from_bytes(bytes)
 
     def _below_product(self) -> Bool:
         """Whether the nonnegative accumulator is below Q."""
@@ -245,7 +266,8 @@ struct _Images[W: Int](Movable):
     Residues wait as words in batches of up to `_BATCH` primes. A batch is
     combined through its CRT basis in word multiples (`_Crt`) and joins the
     accumulated values in one step, so the large values are touched once per
-    batch rather than once per prime. Each coefficient has room for as many
+    batch rather than once per prime. The values are fixed-width limbs, and
+    a batch joins them in word arithmetic. Each coefficient has room for as many
     waiting residues as the batch has needed so far, so a basis that a few
     images settle never pays for a whole batch.
     """
@@ -255,10 +277,13 @@ struct _Images[W: Int](Movable):
     """The distinct monomials of all elements, each once."""
     var monomials: List[List[UInt32]]
     """Each element's monomials so far, in increasing order, as numbers in `table`."""
-    var values: List[List[Integer]]
-    """Each coefficient modulo `modulus`, in [0, modulus)."""
+    var values: List[List[UInt64]]
+    """Each coefficient modulo `modulus`, in [0, modulus), in `limbs` limbs, least significant first."""
+    var limbs: Int
     var modulus: Integer
     """The product of the primes whose residues have joined `values`."""
+    var product: List[UInt64]
+    """The modulus in `limbs` limbs."""
     var batch: List[UInt64]
     """The primes whose residues still wait."""
     var residues: List[List[UInt32]]
@@ -273,8 +298,10 @@ struct _Images[W: Int](Movable):
         self.leads = List[_Packed[Self.W]]()
         self.table = _Columns[Self.W]()
         self.monomials = List[List[UInt32]]()
-        self.values = List[List[Integer]]()
+        self.values = List[List[UInt64]]()
+        self.limbs = 0
         self.modulus = Integer(1)
+        self.product = List[UInt64]()
         self.batch = List[UInt64]()
         self.residues = List[List[UInt32]]()
         self.slots = _SLOTS
@@ -293,13 +320,21 @@ struct _Images[W: Int](Movable):
         self.leads = List[_Packed[Self.W]]()
         self.table = _Columns[Self.W]()
         self.monomials = List[List[UInt32]]()
-        self.values = List[List[Integer]]()
+        self.values = List[List[UInt64]]()
+        self.limbs = 0
         self.modulus = Integer(1)
+        self.product = List[UInt64]()
         self.batch = List[UInt64]()
         self.residues = List[List[UInt32]]()
         self.slots = _SLOTS
         self.count = 0
         self.probe = (0, 0)
+
+    def _value(self, e: Int, k: Int) -> Integer:
+        """Coefficient k of element e."""
+        if self.limbs == 0:
+            return Integer(0)
+        return _integer_of(self.values[e].unsafe_ptr().unsafe_offset(k * self.limbs), self.limbs)
 
     @always_inline
     def _monomial(self, e: Int, i: Int) -> _Packed[Self.W]:
@@ -320,11 +355,11 @@ struct _Images[W: Int](Movable):
         if missing == 0:
             return
         var n = len(self.monomials[e]) + missing
-        _allocation[Integer](n, budget)
+        _allocation[UInt64](n * self.limbs, budget)
         _allocation[UInt32](n * self.slots, budget)
         self.table.reserve(missing, budget)
         var monomials = List[UInt32](capacity=n)
-        var values = List[Integer](capacity=n)
+        var values = List[UInt64](capacity=n * self.limbs)
         var residues = List[UInt32](capacity=n * self.slots)
         i = 0
         var j = 0
@@ -339,7 +374,8 @@ struct _Images[W: Int](Movable):
                 comparison = _compare(self.kind, self._monomial(e, i), image[j].monomial)
             if comparison <= 0:
                 monomials.append(self.monomials[e][i])
-                values.append(self.values[e][i].copy())
+                for l in range(self.limbs):
+                    values.append(self.values[e][i * self.limbs + l])
                 for slot in range(self.slots):
                     residues.append(self.residues[e][i * self.slots + slot])
                 i += 1
@@ -347,7 +383,8 @@ struct _Images[W: Int](Movable):
                     j += 1
             else:
                 monomials.append(UInt32(self.table.find(image[j].monomial, _raw_hash(image[j].monomial))))
-                values.append(Integer(0))
+                for _ in range(self.limbs):
+                    values.append(0)
                 for _ in range(self.slots):
                     residues.append(0)
                 j += 1
@@ -361,7 +398,7 @@ struct _Images[W: Int](Movable):
             for e in range(len(basis.residues)):
                 self.leads.append(basis.lead(e, step))
                 self.monomials.append(List[UInt32]())
-                self.values.append(List[Integer]())
+                self.values.append(List[UInt64]())
                 self.residues.append(List[UInt32]())
         var slot = len(self.batch)
         if slot == self.slots:
@@ -423,27 +460,69 @@ struct _Images[W: Int](Movable):
             raise PolyError(PolyErrorKind.CAPACITY, String(e))
 
     def _flush(mut self, mut budget: Budget) raises PolyError:
-        """Join the waiting residues to the accumulated values."""
+        """Join the waiting residues to the accumulated values.
+
+        With M the modulus so far and Q the batch's, a value v gains
+        M * t, where t < Q has residues (r_i - v) / M modulo each batch
+        prime p_i: everything in limbs and words.
+        """
         if len(self.batch) == 0:
             return
         var q = self._batch_modulus(budget)
         var crt = _Crt(self.batch, budget)
-        var first = self.modulus == Integer(1)
-        var inverse = Integer(1) if first else self._inverse(q)
         var b = len(self.batch)
-        for e in range(len(self.values)):
-            for k in range(len(self.values[e])):
-                var waiting = crt.value(self.residues[e], k * self.slots, b, budget)
-                if first:
-                    self.values[e][k] = waiting^
-                else:
-                    self.values[e][k] = self._joined(self.values[e][k], waiting, q, inverse, budget)
-            for i in range(len(self.residues[e])):
-                self.residues[e][i] = 0
+        var total: Integer
         try:
-            self.modulus = self.modulus * q
+            total = self.modulus * q
         except e:
             raise PolyError(PolyErrorKind.CAPACITY, String(e))
+        var product = List[UInt64]()
+        _magnitude(total, product)
+        var limbs = len(product)
+        # Per batch prime: 1 and 2^64 for reducing limbs, and M^-1.
+        var ones = List[_Shoup](capacity=b)
+        var radices = List[_Shoup](capacity=b)
+        var inverses = List[_Shoup](capacity=b)
+        for i in range(b):
+            var prime = self.batch[i]
+            var ring = Modulus(_prime_value=prime)
+            ones.append(_Shoup.of(ModInt(UInt64(1), ring)))
+            radices.append(_Shoup.of(ModInt(UInt64((UInt128(1) << 64) % UInt128(prime)), ring)))
+            var m = _limbs_mod(self.product.unsafe_ptr(), self.limbs, ones[i], radices[i]) if self.limbs else UInt64(1)
+            inverses.append(_Shoup.of(ModInt(m, ring).inverse(budget)))
+        var t = List[UInt32](length=b, fill=0)
+        for e in range(len(self.values)):
+            var count = len(self.monomials[e])
+            budget.charge(UInt64(_product(count, _product(b + crt.limbs, self.limbs + 1))))
+            _allocation[UInt64](_product(count, limbs), budget)
+            var values = List[UInt64](length=count * limbs, fill=0)
+            ref old = self.values[e]
+            ref residues = self.residues[e]
+            for k in range(count):
+                var v = old.unsafe_ptr().unsafe_offset(k * self.limbs)
+                for i in range(b):
+                    var prime = self.batch.unsafe_get(i)
+                    var r = UInt64(residues.unsafe_get(k * self.slots + i))
+                    var w = _limbs_mod(v, self.limbs, ones.unsafe_get(i), radices.unsafe_get(i)) if self.limbs else UInt64(0)
+                    t.unsafe_get(i) = UInt32(inverses.unsafe_get(i).times(r + prime - w if r < w else r - w))
+                crt.accumulate(t, 0, b, budget)
+                var out = values.unsafe_ptr().unsafe_offset(k * limbs)
+                for l in range(self.limbs):
+                    out.unsafe_offset(l).unsafe_store(v.unsafe_offset(l).unsafe_load())
+                if self.limbs == 0:
+                    for l in range(crt.limbs):
+                        out.unsafe_offset(l).unsafe_store(crt.work.unsafe_get(l))
+                else:
+                    for j in range(crt.limbs):
+                        var f = crt.work.unsafe_get(j)
+                        if f:
+                            _add_mul_1(out.unsafe_offset(j), limbs - j, f, self.product.unsafe_ptr(), self.limbs)
+            self.values[e] = values^
+            for i in range(len(residues)):
+                self.residues[e][i] = 0
+        self.modulus = total^
+        self.product = product^
+        self.limbs = limbs
         self.batch.clear()
 
     def _probe_ready(mut self, mut budget: Budget) raises PolyError -> Bool:
@@ -464,14 +543,14 @@ struct _Images[W: Int](Movable):
         except e:
             raise PolyError(PolyErrorKind.CAPACITY, String(e))
         var probes: List[Tuple[Int, Int]] = [self.probe]
-        for e in range(0, len(self.values), max(1, len(self.values) // _PROBES)):
+        for e in range(0, len(self.monomials), max(1, len(self.monomials) // _PROBES)):
             probes.append((e, 0))
         for probe in probes:
             var pe = probe[0]
             var pk = probe[1]
-            if pe >= len(self.values) or pk >= len(self.values[pe]):
+            if pe >= len(self.monomials) or pk >= len(self.monomials[pe]):
                 continue
-            var value = self.values[pe][pk].copy()
+            var value = self._value(pe, pk)
             if waiting:
                 value = self._joined(value, crt.value(self.residues[pe], pk * self.slots, len(self.batch), budget), q, inverse, budget)
             if not _reconstruct(value, total, bound, budget):
@@ -531,7 +610,7 @@ struct _Images[W: Int](Movable):
                 _work(self.modulus.magnitude_bit_length() // 8 + 1, denominator.magnitude_bit_length() // 8 + 1, True, budget)
                 var numerator: Integer
                 try:
-                    numerator = div_rem_euclid(self.values[e][k] * denominator, self.modulus)[1].copy()
+                    numerator = div_rem_euclid(self._value(e, k) * denominator, self.modulus)[1].copy()
                     if numerator > half:
                         numerator -= self.modulus
                 except err:
