@@ -722,6 +722,7 @@ struct _Images[W: Int](Movable):
             var terms = List[_Term[ZZ, Self.W]](capacity=len(numerators))
             var segment = -1
             var factor = Integer(1)
+            var unit = True
             for k in range(len(numerators)):
                 budget.charge(1)
                 if segment + 1 < len(changes) and changes[segment + 1] == k:
@@ -730,15 +731,20 @@ struct _Images[W: Int](Movable):
                         factor = denominator // denominators[segment]
                     except err:
                         raise PolyError(PolyErrorKind.CAPACITY, String(err))
+                    unit = factor == Integer(1)
                 elif segment < 0 and k == 0:
                     factor = denominator.copy()
+                    unit = factor == Integer(1)
                 if numerators[k].sign() == 0:
                     continue
-                var value: Integer
-                try:
-                    value = numerators[k] * factor
-                except err:
-                    raise PolyError(PolyErrorKind.CAPACITY, String(err))
+                var value = Integer(0)
+                if unit:
+                    swap(value, numerators[k])
+                else:
+                    try:
+                        value = numerators[k] * factor
+                    except err:
+                        raise PolyError(PolyErrorKind.CAPACITY, String(err))
                 terms.append(_Term[ZZ, Self.W](self.monomials[e][k], ZZ(value^)))
             result.append(terms^)
         return result^
