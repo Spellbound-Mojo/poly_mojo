@@ -11,7 +11,7 @@ the library's own Gröbner computation decides independently.
 from std.math import max
 from apn_mojo import Integer, Rational, div_rem_euclid, div_rem_trunc
 from polynomials import Budget, QQ, ZZ, NoContext, SparsePoly, Term, Monomial, MonomialOrder, groebner
-from polynomials._integer_f4 import _IFMA, _PAD, _Row, _accumulate, _append_digits, _bits, _divide_exact, _divide_exact_limbs, _ifma, _limbs_of, _pairs_reduce_to_zero, _shift_out
+from polynomials._integer_f4 import _IFMA, _PAD, _Row, _accumulate, _append_digits, _bits, _divide_exact, _divide_exact_limbs, _ifma, _limbs_of, _pair_routes, _pairs_reduce_to_zero, _Routes, _shift_out
 from polynomials._packed_groebner import _Engine, _Term, _divides, _pack
 from polynomials._rational_groebner import _integral
 from support.check import Checker
@@ -236,15 +236,29 @@ def packed(polys: List[SparsePoly[QQ]], order: MonomialOrder, mut work: Budget) 
     return result^
 
 
-def vanishes(candidate: List[SparsePoly[QQ]], order: MonomialOrder, mut work: Budget) raises -> Bool:
-    """The matrix check on the candidate's pairs."""
+def engine_of(candidate: List[SparsePoly[QQ]], order: MonomialOrder, mut work: Budget) raises -> _Engine[ZZ, 8, True]:
     var engine = _Engine[ZZ, 8, True](order.kind, NoContext())
     for p in packed(candidate, order, work):
         var copy = List[_Term[ZZ, 8]]()
         for t in p:
             copy.append(_Term[ZZ, 8](t.monomial, ZZ(t.coefficient.value.copy())))
         engine.insert(copy^, work)
-    return _pairs_reduce_to_zero(engine, work)
+    return engine^
+
+
+def routes(candidate: List[SparsePoly[QQ]], order: MonomialOrder, primes: Int, mut work: Budget) raises -> _Routes:
+    var engine = engine_of(candidate, order, work)
+    return _pair_routes(engine, work, primes)
+
+
+def vanishes(candidate: List[SparsePoly[QQ]], order: MonomialOrder, mut work: Budget) raises -> Bool:
+    """The matrix check on the candidate's pairs, which every prime budget decides alike."""
+    var engine = engine_of(candidate, order, work)
+    var zero = _pairs_reduce_to_zero(engine, work)
+    for primes in [0, 8, 16]:
+        if routes(candidate, order, primes, work).zero != zero:
+            raise Error("prime budgets " + String(primes) + " and default disagree")
+    return zero
 
 
 def is_basis(candidate: List[SparsePoly[QQ]], order: MonomialOrder, mut work: Budget) raises -> Bool:
@@ -350,6 +364,15 @@ def check_bases(mut c: Checker, mut work: Budget) raises:
     # Coefficients of 13 limbs and more reach the digit products, with IFMA.
     var large = groebner(random_system(4, 3, Integer(10) ** 250, seed, o4, work), o4, work).basis.copy()
     c.check(vanishes(large, o4, work), "a reduced basis with long coefficients")
+    # Small primes budgets leave the long pairs to the exact check; a large one proves them modularly.
+    var few = routes(large, o4, 8, work)
+    c.check(few.zero and few.exact > 0, "eight primes leave long pairs to the exact check")
+    var many = routes(large, o4, 256, work)
+    c.check(many.zero and many.modular > 0, "enough primes prove long pairs modularly")
+    var none = routes(large, o4, 0, work)
+    c.check(none.zero and none.modular == 0, "no primes prove every pair exactly")
+    var small = routes(groebner(random_system(4, 3, Integer(0), seed, o4, work), o4, work).basis, o4, 128, work)
+    c.check(small.zero and small.modular > 0, "short pairs are proved modularly")
     var broken = perturbed(large, len(large) - 1, o4, work)
     if mutually_nondividing(broken, o4, work):
         c.check(vanishes(broken, o4, work) == is_basis(broken, o4, work), "a perturbed basis with long coefficients")
