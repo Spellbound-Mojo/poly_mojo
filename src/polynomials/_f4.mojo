@@ -383,14 +383,25 @@ struct _Rows(Movable):
 
 @always_inline
 def _axpy[small: Bool](data: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factor: UInt64, square: UInt64):
-    """Add factor times a row, after its leading entry, to the dense accumulator."""
-    for k in range(1, n):
-        var j = Int(columns.unsafe_offset(k).unsafe_load())
-        var x = data.unsafe_offset(j).unsafe_load() + factor * UInt64(values.unsafe_offset(k).unsafe_load())
-        comptime if small:
-            data.unsafe_offset(j).unsafe_store(x)
-        else:
-            data.unsafe_offset(j).unsafe_store(x - square if x >= square else x)
+    """Add factor times a row, after its leading entry, to the dense accumulator, four entries a step."""
+    var k = 1
+    while k + 4 <= n:
+        comptime for u in range(4):
+            _update[small](data, columns, values, k + u, factor, square)
+        k += 4
+    while k < n:
+        _update[small](data, columns, values, k, factor, square)
+        k += 1
+
+
+@always_inline
+def _update[small: Bool](data: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], k: Int, factor: UInt64, square: UInt64):
+    var j = Int(columns.unsafe_offset(k).unsafe_load())
+    var x = data.unsafe_offset(j).unsafe_load() + factor * UInt64(values.unsafe_offset(k).unsafe_load())
+    comptime if small:
+        data.unsafe_offset(j).unsafe_store(x)
+    else:
+        data.unsafe_offset(j).unsafe_store(x - square if x >= square else x)
 
 
 def _reduce_row[W: Int](mut dense: List[UInt64], start: Int, pivot: List[Int], matrix: _Matrix[W], values: List[List[UInt32]], mut found: _Rows, prime: UInt64, mut budget: Budget) raises PolyError:
