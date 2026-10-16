@@ -503,7 +503,8 @@ struct _Step[W: Int](Copyable, Movable):
     pivots are then reduced by one another from the right; in the final
     matrix every row is a pivot and the first `basis` rows have their tails
     reduced. `supports` lists each result's columns, leading column first, in
-    the order the results come; the final matrix also keeps their monomials.
+    the order the results come; the final matrix also keeps the monomial of
+    each column.
     """
     var final: Bool
     var ncols: Int
@@ -514,7 +515,7 @@ struct _Step[W: Int](Copyable, Movable):
     var basis: Int
     var leads: List[Int32]
     var supports: List[List[Int32]]
-    var monomials: List[List[_Packed[Self.W]]]
+    var columns: List[_Packed[Self.W]]
 
     def __init__(out self, final: Bool, ncols: Int):
         self.final = final
@@ -526,7 +527,7 @@ struct _Step[W: Int](Copyable, Movable):
         self.basis = 0
         self.leads = List[Int32]()
         self.supports = List[List[Int32]]()
-        self.monomials = List[List[_Packed[Self.W]]]()
+        self.columns = List[_Packed[Self.W]]()
 
     def keep(mut self, matrix: _Matrix[Self.W], r: Int, mut budget: Budget) raises PolyError:
         """Append matrix row r."""
@@ -738,11 +739,10 @@ def _interreduce[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], st
         step.pivots = nrows
         step.basis = basis_rows
         step.supports = _supports(found, rows, budget)
-        for r in range(basis_rows):
-            var monomials = List[_Packed[W]]()
-            for k in range(found.starts[r], found.starts[r + 1]):
-                monomials.append(matrix.columns.monomials[order[Int(found.columns[k])]])
-            step.monomials.append(monomials^)
+        _allocation[_Packed[W]](ncols, budget)
+        step.columns = List[_Packed[W]](capacity=ncols)
+        for c in range(ncols):
+            step.columns.append(matrix.columns.monomials[order[c]])
         trace.steps.append(step^)
     var final = _Final[W](ring)
     swap(final.found, found)
@@ -926,11 +926,11 @@ def _f4_replay[W: Int](trace: _Trace[W], var generators: List[List[_Term[ModInt,
         var basis = List[List[_Term[ModInt, W]]](capacity=step.basis)
         for r in range(step.basis):
             ref residues = values[first + r]
-            ref monomials = step.monomials[r]
-            var terms = List[_Term[ModInt, W]](capacity=len(monomials))
-            for k in range(len(monomials) - 1, -1, -1):
+            ref support = step.supports[r]
+            var terms = List[_Term[ModInt, W]](capacity=len(support))
+            for k in range(len(support) - 1, -1, -1):
                 if residues[k] != 0:
-                    terms.append(_Term[ModInt, W](monomials[k], ModInt(UInt64(residues[k]), ring)))
+                    terms.append(_Term[ModInt, W](step.columns[Int(support[k])], ModInt(UInt64(residues[k]), ring)))
             basis.append(terms^)
         return basis^
     return None
@@ -1187,12 +1187,12 @@ struct _LaneBases(Movable):
         var basis = List[List[_Term[ModInt, W]]](capacity=len(self.residues))
         for r in range(len(self.residues)):
             ref residues = self.residues[r]
-            ref monomials = step.monomials[r]
-            var terms = List[_Term[ModInt, W]](capacity=len(monomials))
-            for k in range(len(monomials) - 1, -1, -1):
+            ref support = step.supports[r]
+            var terms = List[_Term[ModInt, W]](capacity=len(support))
+            for k in range(len(support) - 1, -1, -1):
                 var residue = residues[_LANES * k + l]
                 if residue != 0:
-                    terms.append(_Term[ModInt, W](monomials[k], ModInt(UInt64(residue), self.rings[l])))
+                    terms.append(_Term[ModInt, W](step.columns[Int(support[k])], ModInt(UInt64(residue), self.rings[l])))
             basis.append(terms^)
         return basis^
 
