@@ -89,6 +89,10 @@ struct _Coefficients(Movable):
     var starts: List[List[Int]]
     """Where each coefficient's limbs start, then where the last one's end."""
     var negative: List[List[Bool]]
+    var by_sign: List[List[Int]]
+    """Each element's term indices, the positive coefficients' first."""
+    var positives: List[Int]
+    """How many of each element's coefficients are positive."""
     var bits: List[Int]
     """The bit length of each element's largest coefficient."""
     var leads: List[Integer]
@@ -109,6 +113,8 @@ struct _Coefficients(Movable):
         self.limbs = List[List[UInt64]]()
         self.starts = List[List[Int]]()
         self.negative = List[List[Bool]]()
+        self.by_sign = List[List[Int]]()
+        self.positives = List[Int]()
         self.bits = List[Int]()
         self.leads = List[Integer]()
         self.words = List[UInt64]()
@@ -132,6 +138,16 @@ struct _Coefficients(Movable):
                 bits = max(bits, value.magnitude_bit_length())
             starts.append(len(limbs))
             _allocation[UInt64](len(limbs), budget)
+            _allocation[Int](len(negative), budget)
+            var by_sign = List[Int](capacity=len(negative))
+            for k in range(len(negative)):
+                if not negative[k]:
+                    by_sign.append(k)
+            self.positives.append(len(by_sign))
+            for k in range(len(negative)):
+                if negative[k]:
+                    by_sign.append(k)
+            self.by_sign.append(by_sign^)
             var digits = List[UInt64]()
             var digit_starts = List[Int]()
             var digit_counts = List[Int]()
@@ -511,100 +527,128 @@ def _accumulate[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, 
 
 
 @always_inline
-def _add_mul_1(data: Pointer[mut=True, UInt64, _], width: Int, f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int):
+def _add_mul_1[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int):
     """data += f * other[0:n] over `width` limbs of two's complement, in one carry chain."""
     var g = UInt128(f)
-    var carry = UInt128(0)
+    var carry = UInt64(0)
     var m = min(n, width)
     var l = 0
     while l < m:
-        var t = g * UInt128(other.unsafe_offset(l).unsafe_load()) + UInt128(data.unsafe_offset(l).unsafe_load()) + carry
-        data.unsafe_offset(l).unsafe_store(UInt64(t & UInt128(UInt64.MAX)))
-        carry = t >> 64
+        var p = g * UInt128(other.unsafe_offset(l).unsafe_load())
+        var low = UInt64(p & UInt128(UInt64.MAX))
+        var high = UInt64(p >> 64)
+        var e = data.unsafe_offset(l).unsafe_load()
+        low += e
+        high += UInt64(1) if low < e else UInt64(0)
+        low += carry
+        high += UInt64(1) if low < carry else UInt64(0)
+        data.unsafe_offset(l).unsafe_store(low)
+        carry = high
         l += 1
-    _carry(data, width, l, carry)
+    _carry_word[whole](data, width, l, carry)
 
 
 @always_inline
-def _sub_mul_1(data: Pointer[mut=True, UInt64, _], width: Int, f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int):
+def _sub_mul_1[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int):
     """data -= f * other[0:n] over `width` limbs of two's complement, in one borrow chain."""
     var g = UInt128(f)
-    var borrow = UInt128(0)
+    var borrow = UInt64(0)
     var m = min(n, width)
     var l = 0
     while l < m:
-        var t = g * UInt128(other.unsafe_offset(l).unsafe_load()) + borrow
-        var low = UInt64(t & UInt128(UInt64.MAX))
+        var p = g * UInt128(other.unsafe_offset(l).unsafe_load())
+        var low = UInt64(p & UInt128(UInt64.MAX))
+        var high = UInt64(p >> 64)
+        low += borrow
+        high += UInt64(1) if low < borrow else UInt64(0)
         var e = data.unsafe_offset(l).unsafe_load()
         data.unsafe_offset(l).unsafe_store(e - low)
-        borrow = (t >> 64) + (UInt128(1) if e < low else UInt128(0))
+        borrow = high + (UInt64(1) if e < low else UInt64(0))
         l += 1
-    _borrow(data, width, l, borrow)
+    _borrow_word[whole](data, width, l, borrow)
 
 
 @always_inline
-def _add_mul_2(data: Pointer[mut=True, UInt64, _], width: Int, f0: UInt64, f1: UInt64, b: Pointer[mut=False, UInt64, _], n: Int):
+def _add_mul_2[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, f0: UInt64, f1: UInt64, b: Pointer[mut=False, UInt64, _], n: Int):
     """data += (f0 + f1 2^64) * b[0:n] over `width` limbs, both limbs in one carry chain.
 
-    Limb l receives f0 b[l] + f1 b[l - 1] + data[l] and a carry below 2^65,
-    a sum that overflows 128 bits at most three times.
+    Limb l receives the low words of f0 b[l] and f1 b[l - 1], data[l] and
+    the carry c0 + c1 2^64, where c1 is at most two; the high words, the
+    overflows and c1 make the next carry.
     """
-    var g0 = UInt128(f0)
-    var g1 = UInt128(f1)
     var m = min(n, width)
-    var carry = UInt128(0)
-    var previous = UInt128(0)
+    var c0 = UInt64(0)
+    var c1 = UInt64(0)
+    var previous = UInt64(0)
     var l = 0
     while l < m:
-        var bl = UInt128(b.unsafe_offset(l).unsafe_load())
-        var x = g0 * bl
-        var t = x + g1 * previous
-        var over = UInt128(1) if t < x else UInt128(0)
-        var t2 = t + carry
-        over += UInt128(1) if t2 < t else UInt128(0)
-        var t3 = t2 + UInt128(data.unsafe_offset(l).unsafe_load())
-        over += UInt128(1) if t3 < t2 else UInt128(0)
-        data.unsafe_offset(l).unsafe_store(UInt64(t3 & UInt128(UInt64.MAX)))
-        carry = (t3 >> 64) + (over << 64)
+        var bl = b.unsafe_offset(l).unsafe_load()
+        var x = UInt128(f0) * UInt128(bl)
+        var y = UInt128(f1) * UInt128(previous)
+        var x0 = UInt64(x & UInt128(UInt64.MAX))
+        var y0 = UInt64(y & UInt128(UInt64.MAX))
+        var e = data.unsafe_offset(l).unsafe_load()
+        var s = x0 + y0
+        var k = UInt64(1) if s < x0 else UInt64(0)
+        s += e
+        k += UInt64(1) if s < e else UInt64(0)
+        s += c0
+        k += UInt64(1) if s < c0 else UInt64(0)
+        data.unsafe_offset(l).unsafe_store(s)
+        var x1 = UInt64(x >> 64)
+        var t = x1 + UInt64(y >> 64)
+        var o = UInt64(1) if t < x1 else UInt64(0)
+        var kc = k + c1
+        t += kc
+        c1 = o + (UInt64(1) if t < kc else UInt64(0))
+        c0 = t
         previous = bl
         l += 1
     if l == n and l < width:
         # The second limb's last product.
-        var t = g1 * previous + carry
+        var t = UInt128(f1) * UInt128(previous) + UInt128(c0)
         var t3 = t + UInt128(data.unsafe_offset(l).unsafe_load())
         var over = UInt128(1) if t3 < t else UInt128(0)
         data.unsafe_offset(l).unsafe_store(UInt64(t3 & UInt128(UInt64.MAX)))
-        _carry(data, width, l + 1, (t3 >> 64) + (over << 64))
+        _carry[whole](data, width, l + 1, (t3 >> 64) + (over << 64) + UInt128(c1))
 
 
 @always_inline
-def _sub_mul_2(data: Pointer[mut=True, UInt64, _], width: Int, f0: UInt64, f1: UInt64, b: Pointer[mut=False, UInt64, _], n: Int):
+def _sub_mul_2[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, f0: UInt64, f1: UInt64, b: Pointer[mut=False, UInt64, _], n: Int):
     """data -= (f0 + f1 2^64) * b[0:n] over `width` limbs, both limbs in one borrow chain."""
-    var g0 = UInt128(f0)
-    var g1 = UInt128(f1)
     var m = min(n, width)
-    var borrow = UInt128(0)
-    var previous = UInt128(0)
+    var c0 = UInt64(0)
+    var c1 = UInt64(0)
+    var previous = UInt64(0)
     var l = 0
     while l < m:
-        var bl = UInt128(b.unsafe_offset(l).unsafe_load())
-        var x = g0 * bl
-        var t = x + g1 * previous
-        var over = UInt128(1) if t < x else UInt128(0)
-        var t2 = t + borrow
-        over += UInt128(1) if t2 < t else UInt128(0)
-        var low = UInt64(t2 & UInt128(UInt64.MAX))
+        var bl = b.unsafe_offset(l).unsafe_load()
+        var x = UInt128(f0) * UInt128(bl)
+        var y = UInt128(f1) * UInt128(previous)
+        var x0 = UInt64(x & UInt128(UInt64.MAX))
+        var y0 = UInt64(y & UInt128(UInt64.MAX))
+        var s = x0 + y0
+        var k = UInt64(1) if s < x0 else UInt64(0)
+        s += c0
+        k += UInt64(1) if s < c0 else UInt64(0)
         var e = data.unsafe_offset(l).unsafe_load()
-        data.unsafe_offset(l).unsafe_store(e - low)
-        borrow = (t2 >> 64) + (over << 64) + (UInt128(1) if e < low else UInt128(0))
+        data.unsafe_offset(l).unsafe_store(e - s)
+        k += UInt64(1) if e < s else UInt64(0)
+        var x1 = UInt64(x >> 64)
+        var t = x1 + UInt64(y >> 64)
+        var o = UInt64(1) if t < x1 else UInt64(0)
+        var kc = k + c1
+        t += kc
+        c1 = o + (UInt64(1) if t < kc else UInt64(0))
+        c0 = t
         previous = bl
         l += 1
     if l == n and l < width:
-        var t = g1 * previous + borrow
+        var t = UInt128(f1) * UInt128(previous) + UInt128(c0)
         var low = UInt64(t & UInt128(UInt64.MAX))
         var e = data.unsafe_offset(l).unsafe_load()
         data.unsafe_offset(l).unsafe_store(e - low)
-        _borrow(data, width, l + 1, (t >> 64) + (UInt128(1) if e < low else UInt128(0)))
+        _borrow[whole](data, width, l + 1, (t >> 64) + (UInt128(1) if e < low else UInt128(0)) + UInt128(c1))
 
 
 def _comba[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int):
@@ -657,10 +701,36 @@ def _comba[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Po
 
 
 @always_inline
-def _carry(data: Pointer[mut=True, UInt64, _], width: Int, start: Int, var carry: UInt128):
-    """Add carry to data[start:width], two's complement."""
+def _carry_word[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, start: Int, var carry: UInt64):
+    """Add the word carry to data[start:width], two's complement.
+
+    With `whole`, the carry goes through every limb even once it is zero, in
+    a loop whose length does not depend on the data.
+    """
     var l = start
-    while carry != 0 and l < width:
+    while (whole or carry != 0) and l < width:
+        var x = data.unsafe_offset(l).unsafe_load() + carry
+        data.unsafe_offset(l).unsafe_store(x)
+        carry = UInt64(1) if x < carry else UInt64(0)
+        l += 1
+
+
+@always_inline
+def _borrow_word[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, start: Int, var borrow: UInt64):
+    """Subtract the word borrow from data[start:width], two's complement; `whole` as for `_carry_word`."""
+    var l = start
+    while (whole or borrow != 0) and l < width:
+        var e = data.unsafe_offset(l).unsafe_load()
+        data.unsafe_offset(l).unsafe_store(e - borrow)
+        borrow = UInt64(1) if e < borrow else UInt64(0)
+        l += 1
+
+
+@always_inline
+def _carry[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, start: Int, var carry: UInt128):
+    """Add carry to data[start:width], two's complement; `whole` as for `_carry_word`."""
+    var l = start
+    while (whole or carry != 0) and l < width:
         var x = UInt128(data.unsafe_offset(l).unsafe_load()) + (carry & UInt128(UInt64.MAX))
         data.unsafe_offset(l).unsafe_store(UInt64(x & UInt128(UInt64.MAX)))
         carry = (carry >> 64) + (x >> 64)
@@ -668,10 +738,10 @@ def _carry(data: Pointer[mut=True, UInt64, _], width: Int, start: Int, var carry
 
 
 @always_inline
-def _borrow(data: Pointer[mut=True, UInt64, _], width: Int, start: Int, var borrow: UInt128):
-    """Subtract borrow from data[start:width], two's complement."""
+def _borrow[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: Int, start: Int, var borrow: UInt128):
+    """Subtract borrow from data[start:width], two's complement; `whole` as for `_carry_word`."""
     var l = start
-    while borrow != 0 and l < width:
+    while (whole or borrow != 0) and l < width:
         var e = UInt128(data.unsafe_offset(l).unsafe_load())
         var low = borrow & UInt128(UInt64.MAX)
         data.unsafe_offset(l).unsafe_store(UInt64((e - low) & UInt128(UInt64.MAX)))
@@ -1176,42 +1246,60 @@ def _load[W: Int](mut row: _Row, matrix: _Matrix[W], coefficients: _Coefficients
     var bits = coefficients.bits[g] + _bits(factor)
     row.room_for_sum(bits, budget)
     ref limbs = coefficients.limbs[g]
-    ref starts = coefficients.starts[g]
-    ref signs = coefficients.negative[g]
     var s = matrix.starts[r]
     var n = matrix.starts[r + 1] - s
     budget.charge(UInt64(_product(n, len(factor) * (coefficients.bits[g] // 64 + 1) + row.width)))
+    ref by_sign = coefficients.by_sign[g]
+    var positives = coefficients.positives[g]
+    # Each column takes one term, so the terms go in any order: those to add,
+    # then those to subtract, with no branch on each term's sign.
+    var plus_first = subtract == negative
     if coefficients.bits[g] <= 64:
         # Word coefficients, the common case: one carry chain along the factor per term.
-        var f = factor.unsafe_ptr()
-        var nf = len(factor)
-        for k in range(n):
-            var c = Int(matrix.entries.unsafe_get(s + k))
-            if subtract != (negative != signs.unsafe_get(k)):
-                row.word_product[True](c, f, nf, limbs.unsafe_get(k), bits)
-            else:
-                row.word_product[False](c, f, nf, limbs.unsafe_get(k), bits)
+        if plus_first:
+            _word_terms[minus=False](row, matrix, s, by_sign, 0, positives, limbs, factor, bits)
+            _word_terms[minus=True](row, matrix, s, by_sign, positives, n, limbs, factor, bits)
+        else:
+            _word_terms[minus=True](row, matrix, s, by_sign, 0, positives, limbs, factor, bits)
+            _word_terms[minus=False](row, matrix, s, by_sign, positives, n, limbs, factor, bits)
         return
     var digits = False
     comptime if _IFMA:
         if len(factor) >= _IFMA_MIN and len(coefficients.digits[g]) > 0:
             row.set_factor_digits(factor)
             digits = True
-    for k in range(n):
+    if plus_first:
+        _long_terms[minus=False](row, matrix, coefficients, g, s, 0, positives, factor, digits, bits)
+        _long_terms[minus=True](row, matrix, coefficients, g, s, positives, n, factor, digits, bits)
+    else:
+        _long_terms[minus=True](row, matrix, coefficients, g, s, 0, positives, factor, digits, bits)
+        _long_terms[minus=False](row, matrix, coefficients, g, s, positives, n, factor, digits, bits)
+
+
+@always_inline
+def _word_terms[W: Int, minus: Bool](mut row: _Row, matrix: _Matrix[W], s: Int, by_sign: List[Int], begin: Int, end: Int, limbs: List[UInt64], factor: List[UInt64], bits: Int):
+    """Add, or subtract when `minus`, factor times the word terms by_sign[begin:end] of the matrix row starting at s."""
+    var f = factor.unsafe_ptr()
+    var nf = len(factor)
+    for i in range(begin, end):
+        var k = by_sign.unsafe_get(i)
         var c = Int(matrix.entries.unsafe_get(s + k))
-        # The term's sign, times the factor's, decides between adding and subtracting.
-        var minus = subtract != (negative != signs.unsafe_get(k))
+        row.word_product[minus](c, f, nf, limbs.unsafe_get(k), bits)
+
+
+def _long_terms[W: Int, minus: Bool](mut row: _Row, matrix: _Matrix[W], coefficients: _Coefficients, g: Int, s: Int, begin: Int, end: Int, factor: List[UInt64], digits: Bool, bits: Int):
+    """Add, or subtract when `minus`, factor times the terms by_sign[begin:end] of element g's matrix row starting at s."""
+    ref limbs = coefficients.limbs[g]
+    ref starts = coefficients.starts[g]
+    ref by_sign = coefficients.by_sign[g]
+    for i in range(begin, end):
+        var k = by_sign.unsafe_get(i)
+        var c = Int(matrix.entries.unsafe_get(s + k))
         comptime if _IFMA:
             if digits and starts.unsafe_get(k + 1) - starts.unsafe_get(k) >= _IFMA_MIN:
-                ref string = coefficients.digits[g]
-                var at = coefficients.digit_starts[g].unsafe_get(k)
-                var count = coefficients.digit_counts[g].unsafe_get(k)
-                if minus:
-                    row.digit_product[True](c, string, at, count, bits)
-                else:
-                    row.digit_product[False](c, string, at, count, bits)
+                row.digit_product[minus](c, coefficients.digits[g], coefficients.digit_starts[g].unsafe_get(k), coefficients.digit_counts[g].unsafe_get(k), bits)
                 continue
-        if minus:
+        comptime if minus:
             row.subtract_product(c, factor, limbs, starts.unsafe_get(k), starts.unsafe_get(k + 1), bits)
         else:
             row.add_product(c, factor, limbs, starts.unsafe_get(k), starts.unsafe_get(k + 1), bits)
