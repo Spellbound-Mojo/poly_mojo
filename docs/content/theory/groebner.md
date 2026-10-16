@@ -34,6 +34,20 @@ therefore be retained by index. The active reducer order is sorted after an
 insertion and reused until the next insertion. Initial generator reductions and
 cofactor propagation retain their established schedules.
 
+**F4.** Over a prime field below $2^{31}$, under GRLEX and GREVLEX and
+without cofactor tracking, the library runs F4 [Faugère 1999] instead of
+reducing one S-polynomial at a time. Each round takes every pending pair whose
+LCM has the least degree, writes both halves of each S-polynomial as rows of a
+sparse matrix, adds a row $m \cdot g$ for every monomial of the matrix that a
+leading monomial divides (symbolic preprocessing), and row-reduces the matrix.
+A reduced row whose leading monomial no other row has is a polynomial of the
+ideal whose leading monomial no basis element divides, so it joins the basis.
+Pairs are pruned by the same Gebauer–Möller criteria, and when no pairs remain
+every S-polynomial has a standard representation in terms of the basis, which
+is Buchberger's criterion. The final interreduction is one more matrix. The
+reduced basis is unique (Theorem B-4), so F4 returns exactly the basis
+Buchberger's algorithm returns.
+
 **Theorem B-4 (reduced bases, cited).** Every ideal has exactly one
 reduced Gröbner basis for a given order: monic, and with no monomial of
 any element divisible by the leading monomial of another [Cox, Little and

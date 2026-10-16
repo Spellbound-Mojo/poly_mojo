@@ -716,8 +716,8 @@ struct _Engine[C: CoefficientRing, W: Int, integral: Bool](Movable):
         self.install(len(self.polys) - 1, budget)
         self.heapify_pairs(budget)
 
-    def run(mut self, var generators: List[List[_Term[Self.C, Self.W]]], mut budget: Budget) raises PolyError -> List[List[_Term[Self.C, Self.W]]]:
-        """Buchberger's loop; returns the reduced basis, normalized, in decreasing leading-monomial order."""
+    def start(mut self, var generators: List[List[_Term[Self.C, Self.W]]], mut budget: Budget) raises PolyError:
+        """Reduce each generator against the basis so far and insert the nonzero ones."""
         for i in range(len(generators)):
             budget.charge(1)
             if len(generators[i]) == 0:
@@ -728,18 +728,9 @@ struct _Engine[C: CoefficientRing, W: Int, integral: Bool](Movable):
             if len(reduced) == 0:
                 continue
             self.insert(reduced^, budget)
-        var dirty_order = True
-        while len(self.pairs):
-            budget.charge(1)
-            var pair = self.select(budget)
-            if dirty_order:
-                self.sort_active(budget)
-                dirty_order = False
-            var reduced = self.reduce_pair(pair, budget)
-            if len(reduced) == 0:
-                continue
-            self.insert(reduced^, budget)
-            dirty_order = True
+
+    def finish(mut self, mut budget: Budget) raises PolyError -> List[List[_Term[Self.C, Self.W]]]:
+        """The reduced basis, normalized, in decreasing leading-monomial order."""
         self.sort_active(budget)
         _allocation[List[_Term[Self.C, Self.W]]](len(self.active), budget)
         var basis = List[List[_Term[Self.C, Self.W]]](capacity=len(self.active))
@@ -762,6 +753,23 @@ struct _Engine[C: CoefficientRing, W: Int, integral: Bool](Movable):
             _normalize[Self.C, Self.W, Self.integral](reduced, self.ring, budget)
             basis.append(reduced^)
         return basis^
+
+    def run(mut self, var generators: List[List[_Term[Self.C, Self.W]]], mut budget: Budget) raises PolyError -> List[List[_Term[Self.C, Self.W]]]:
+        """Buchberger's loop; returns the reduced basis, normalized, in decreasing leading-monomial order."""
+        self.start(generators^, budget)
+        var dirty_order = True
+        while len(self.pairs):
+            budget.charge(1)
+            var pair = self.select(budget)
+            if dirty_order:
+                self.sort_active(budget)
+                dirty_order = False
+            var reduced = self.reduce_pair(pair, budget)
+            if len(reduced) == 0:
+                continue
+            self.insert(reduced^, budget)
+            dirty_order = True
+        return self.finish(budget)
 
 
 def _field_basis[C: CoefficientField, W: Int](generators: List[SparsePoly[C]], order: MonomialOrder, mut budget: Budget) raises PolyError -> List[SparsePoly[C]]:

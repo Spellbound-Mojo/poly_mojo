@@ -1,9 +1,10 @@
 """The packed Gröbner engine against the sparse engine, on benchmark systems.
 
 Untracked calls over at most sixteen variables use packed exponent vectors;
-cofactor tracking keeps the sparse engine. Both run the same algorithm, so
-their bases must agree exactly, for every order kind, variable priority list,
-and coefficient field. Residues are multiplied by precomputed quotients,
+cofactor tracking keeps the sparse engine. Under GRLEX and GREVLEX over primes
+below 2^31 the packed path is F4, otherwise Buchberger's algorithm like the
+sparse engine. The reduced basis is unique, so the bases must agree exactly,
+for every order kind, variable priority list, and coefficient field. Residues are multiplied by precomputed quotients,
 so primes near the 2^62 limit are checked as well as small ones.
 """
 from apn_mojo import Rational
@@ -119,6 +120,12 @@ def main() raises:
             var identity5 = MonomialOrder(UInt8(kind), [0, 1, 2, 3, 4], work)
             agree_mod(cyclic(5, identity5, work), identity5, "cyclic-5", c, work)
             agree_qq(cyclic(5, identity5, work), identity5, "cyclic-5", c, work)
+            # F4 accumulates products directly below 2^16 and with a correction
+            # step up to 2^31; check a prime on each side and at the limit.
+            for modulus in [UInt64(32749), UInt64(2147483647)]:
+                agree_mod(cyclic(5, identity5, work), identity5, "cyclic-5", c, work, modulus)
+                agree_mod(katsura(4, identity5, work), identity5, "katsura-4", c, work, modulus)
+                agree_mod(quadratics(4, 7, identity4, work), identity4, "random quadratics", c, work, modulus)
         # Large primes, where residue products need all 128 bits.
         for modulus in [UInt64(4294967291), UInt64(4611686018427387847)]:
             agree_mod(katsura(3, identity4, work), identity4, "katsura-3", c, work, modulus)

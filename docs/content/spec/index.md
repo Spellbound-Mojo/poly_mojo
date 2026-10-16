@@ -84,7 +84,7 @@ irreducibility or squarefreeness.
 
 | ID | Contract | Required checks |
 |---|---|---|
-| P4.1 | Buchberger's algorithm with Gebauer–Möller criteria and least-LCM pair selection returns reduced bases over `QQ`, `QQi`, and prime `ModInt`, with no approximate zero test | Buchberger's criterion recomputed for every basis; independence of generator order; cofactor identities |
+| P4.1 | Buchberger's algorithm with Gebauer–Möller criteria and least-LCM pair selection, or F4 over primes below $2^{31}$ under degree orders, returns reduced bases over `QQ`, `QQi`, and prime `ModInt`, with no approximate zero test | Buchberger's criterion recomputed for every basis; independence of generator order; cofactor identities |
 | P4.2 | Membership returns the cofactors of Proposition B-6 when the remainder is zero; the checker verifies only the identity | Members found, nonmembers refused; the case $1 \in I$ |
 
 ### P5 Exact real roots

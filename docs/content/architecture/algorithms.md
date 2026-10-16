@@ -72,7 +72,11 @@ divisibility take a few vector operations. The polynomial being reduced is kept
 in geobuckets, sorted term lists of geometrically growing capacity, so each
 reduction step merges the reducer's tail into the smallest bucket that fits it.
 Over prime fields residues are multiplied by precomputed quotients while they
-are merged. Over `QQ` the computation is fraction-free over the integers: each
+are merged. Over primes below $2^{31}$ under GRLEX and GREVLEX the packed path
+is F4 instead: each round turns every pair of least LCM degree, with the
+reducers symbolic preprocessing finds, into one sparse matrix and reduces its
+rows in a dense 64-bit accumulator that is reduced modulo the prime only when
+read. Over `QQ` the computation is fraction-free over the integers: each
 remainder is an integer multiple of the rational one, so the monic basis is the
 same. Every path returns exactly the basis of the general engine; only the work
 charged to the budget differs.

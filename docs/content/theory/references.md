@@ -11,6 +11,7 @@
 | Collins 1967 | G. E. Collins, "Subresultants and reduced polynomial remainder sequences", *Journal of the ACM* 14 (1967), 128–142. |
 | Collins and Akritas 1976 | G. E. Collins and A. G. Akritas, "Polynomial real root isolation using Descartes' rule of signs", *Proceedings of SYMSAC 1976*, ACM. |
 | Cox, Little and O'Shea 2015 | D. A. Cox, J. Little, and D. O'Shea, *Ideals, Varieties, and Algorithms*, 4th edition, Springer, 2015. |
+| Faugère 1999 | J.-C. Faugère, "A new efficient algorithm for computing Gröbner bases (F4)", *Journal of Pure and Applied Algebra* 139 (1999), 61–88. |
 | Gebauer and Möller 1988 | R. Gebauer and H. M. Möller, "On an installation of Buchberger's algorithm", *Journal of Symbolic Computation* 6 (1988), 275–286. |
 | Mignotte 1974 | M. Mignotte, "An inequality about factors of polynomials", *Mathematics of Computation* 28 (1974), 1153–1157. |
 | Sturm 1829 | C. Sturm, "Mémoire sur la résolution des équations numériques", *Bulletin des Sciences de Férussac* 11 (1829). |

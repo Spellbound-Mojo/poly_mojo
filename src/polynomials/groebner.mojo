@@ -32,7 +32,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
 OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 """
-from .coefficients import CoefficientField, QQ
+from .coefficients import CoefficientField, ModInt, QQ
 from ._product_stream import _subtract_column
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _sum
 from .monomial import Monomial, MonomialOrder
@@ -41,6 +41,7 @@ from .division import _divide_prepared, _ReducerData, divide_by_list
 from .certificates import ListDivision, MembershipCertificate
 from ._sparse_ops import _subtract_multiples
 from ._packed_groebner import _packed_groebner, _packed_groebner_rational, _packed_supported
+from ._f4 import _f4_groebner, _f4_supported
 
 
 @fieldwise_init
@@ -245,7 +246,8 @@ def groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: Monomi
         raise PolyError(PolyErrorKind.DOMAIN, "Groebner bases require a monomial order")
     order.validate(Monomial(), budget)
     if not track_cofactors and _packed_supported(order):
-        # Same algorithm and result, on packed exponent vectors.
+        # The same result on packed exponent vectors: F4 over small prime
+        # fields under degree orders, Buchberger's algorithm otherwise.
         for i in range(len(generators)):
             budget.charge(1)
             generators[i].check_invariants(budget)
@@ -255,6 +257,12 @@ def groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: Monomi
             # Over QQ the packed engine runs fraction-free on integer coefficients.
             var rational = _packed_groebner_rational(rebind[List[SparsePoly[QQ]]](generators), order, budget)
             return GroebnerBasis[C](order.copy(), rebind_var[List[SparsePoly[C]]](rational^), Optional[List[List[SparsePoly[C]]]](None))
+        elif C == ModInt:
+            ref modular = rebind[List[SparsePoly[ModInt]]](generators)
+            if len(modular) and _f4_supported(order, modular[0].ring.value):
+                var f4 = _f4_groebner(modular, order, budget)
+                return GroebnerBasis[C](order.copy(), rebind_var[List[SparsePoly[C]]](f4^), Optional[List[List[SparsePoly[C]]]](None))
+            return GroebnerBasis[C](order.copy(), _packed_groebner(generators, order, budget), Optional[List[List[SparsePoly[C]]]](None))
         else:
             return GroebnerBasis[C](order.copy(), _packed_groebner(generators, order, budget), Optional[List[List[SparsePoly[C]]]](None))
     var arena = List[SparsePoly[C]]()
