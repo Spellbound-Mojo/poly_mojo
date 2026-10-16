@@ -529,24 +529,29 @@ struct _Row(Movable):
 
     def _scale_word(mut self, first: Int, f: UInt64, bits: Int):
         """`scale` by the word factor f, in place: the entry, sign-extended by a limb, times f."""
+        var data = self.data.unsafe_ptr()
+        var width = self.width
+        var sizes = self.sizes.unsafe_ptr()
         var c = self.next_marked(first)
         while c < self.ncols:
             var next = self.next_marked(c + 1)
-            if self.is_zero(c):
-                c = next
-                continue
-            var u = self._limbs(c)
-            var negative = self.negative(c)
-            self.sizes.unsafe_get(c) += bits
-            var entry = self.data.unsafe_ptr().unsafe_offset(c * self.width)
+            var size = sizes.unsafe_offset(c).unsafe_load()
+            var u = (size // 64 + 1) * Int(size > 0)
+            var entry = data.unsafe_offset(c * width)
+            var negative = u > 0 and (entry.unsafe_offset(u - 1).unsafe_load() >> 63) != 0
             var carry = UInt64(0)
+            var any = UInt64(0)
             for l in range(u):
-                var p = UInt128(f) * UInt128(entry.unsafe_offset(l).unsafe_load()) + UInt128(carry)
+                var e = entry.unsafe_offset(l).unsafe_load()
+                any |= e
+                var p = UInt128(f) * UInt128(e) + UInt128(carry)
                 entry.unsafe_offset(l).unsafe_store(UInt64(p & UInt128(UInt64.MAX)))
                 carry = UInt64(p >> 64)
-            if u < self.width:
+            if u < width:
                 # The sign limb B - 1 times f, plus the carry, is f B + carry - f.
                 entry.unsafe_offset(u).unsafe_store(carry - (f if negative else UInt64(0)))
+            # A zero entry stays zero, and keeps its size.
+            sizes.unsafe_offset(c).unsafe_store(size + bits * Int(any != 0))
             c = next
 
 
