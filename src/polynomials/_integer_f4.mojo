@@ -1359,11 +1359,9 @@ def _reduced_tails[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget)
                 reducible = True
                 break
         if not reducible:
-            ref p = engine.polys[matrix.sources[r]]
-            _allocation[_Term[ZZ, W]](len(p), budget)
-            var terms = List[_Term[ZZ, W]](capacity=len(p))
-            for t in p:
-                terms.append(_Term[ZZ, W](t.monomial, t.coefficient.copy()))
+            # Each element is one basis row, so it moves out of the engine.
+            var terms = List[_Term[ZZ, W]]()
+            swap(terms, engine.polys[matrix.sources[r]])
             result.append(terms^)
             continue
         row.prepare(coefficients.bits[matrix.sources[r]] + 1, budget)

@@ -898,16 +898,22 @@ def _copy[W: Int](p: List[_Term[ZZ, W]], mut budget: Budget) raises PolyError ->
     return terms^
 
 
-def _certify[W: Int](kind: UInt8, inputs: List[List[_Term[ZZ, W]]], candidate: List[List[_Term[ZZ, W]]], mut budget: Budget) raises PolyError -> Bool:
-    """Checks (a), (b), and (d) of the module proof; (c) holds by construction."""
+def _certify[W: Int](kind: UInt8, inputs: List[List[_Term[ZZ, W]]], var candidate: List[List[_Term[ZZ, W]]], mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ZZ, W]]]]:
+    """The candidate, primitive with positive leading coefficients, if it passes checks (a), (b), and (d) of the module proof; (c) holds by construction.
+
+    The checks run on the candidate's own elements, moved into an engine
+    rather than copied.
+    """
     var engine = _Engine[ZZ, W, True](kind, NoContext())
-    for g in candidate:
+    for i in range(len(candidate)):
         budget.charge(1)
-        if len(g) == 0:
-            return False
-        engine.insert(_copy(g, budget), budget, heap=False)
+        if len(candidate[i]) == 0:
+            return None
+        var g = List[_Term[ZZ, W]]()
+        swap(g, candidate[i])
+        engine.insert(g^, budget, heap=False)
     if len(engine.active) != len(candidate):
-        return False  # Some leading monomial divides another.
+        return None  # Some leading monomial divides another.
     engine.heapify_pairs(budget)
     engine.sort_active(budget)
     # (d) Reduced: no tail monomial is divisible by a leading monomial. As
@@ -925,19 +931,23 @@ def _certify[W: Int](kind: UInt8, inputs: List[List[_Term[ZZ, W]]], candidate: L
     for r in range(rows):
         for k in range(matrix.starts[r] + 1, matrix.starts[r + 1]):
             if matrix.columns.covered[Int(matrix.entries[k])]:
-                return False
+                return None
     matrix.preprocess(engine, store, budget)
     if len(matrix.sources) != rows:
-        return False
+        return None
     # (a) Every input reduces to zero.
     for f in inputs:
         budget.charge(1)
         var pending = _Buckets[ZZ, W, True](kind, NoContext())
         pending.add(_copy(f, budget), budget)
         if not engine.reduces_to_zero(pending^, engine.active, budget):
-            return False
+            return None
     # (b) Every remaining S-pair reduces to zero.
-    return _pairs_reduce_to_zero(engine, budget)
+    if not _pairs_reduce_to_zero(engine, budget):
+        return None
+    var basis = List[List[_Term[ZZ, W]]]()
+    swap(basis, engine.polys)
+    return basis^
 
 
 def _monic[W: Int](p: List[_Term[ZZ, W]], order: MonomialOrder, by_index: List[Int], mut budget: Budget) raises PolyError -> SparsePoly[QQ]:
@@ -1064,8 +1074,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
             generation += 1
             ahead = _LaneBases()
             ahead_primes = List[UInt64]()
-        ref supports = trace.steps[len(trace.steps) - 1].monomials
-        if images.count > 0 and not (images.matches_supports(supports) if lane >= 0 else images.matches(basis)):
+        if images.count > 0 and not (images.matches_supports(trace.steps[len(trace.steps) - 1].monomials) if lane >= 0 else images.matches(basis)):
             mismatches += 1
             if mismatches < _MISMATCH_LIMIT:
                 continue
@@ -1080,8 +1089,16 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
                 lane = -1
             if _agrees(kind, candidate.value(), basis, p, budget):
                 certifications += 1
-                if not certify or _certify(kind, inputs, candidate.value(), budget):
+                if not certify:
                     return candidate.take()
+                # Certification needs neither the recorded run nor the
+                # waiting lanes, and a failure records the run anew.
+                trace = _Trace[W]()
+                ahead = _LaneBases()
+                ahead_primes = List[UInt64]()
+                var certified = _certify(kind, inputs, candidate.take(), budget)
+                if certified:
+                    return certified.take()
                 if certifications >= _CERTIFY_LIMIT:
                     return None
                 # The images may follow an unlucky recorded run: record anew,
@@ -1091,7 +1108,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
                 ahead_primes = List[UInt64]()
             candidate = None
         if lane >= 0:
-            images.add_lane(supports, generation, ahead, lane, p, budget)
+            images.add_lane(trace.steps[len(trace.steps) - 1].monomials, generation, ahead, lane, p, budget)
         else:
             images.add(basis, p, budget)
         var count = images.count
@@ -1154,8 +1171,11 @@ def _finish[W: Int](var basis: List[List[_Term[ZZ, W]]], homogeneous: Bool, n: I
     var by_index = _priorities(order, budget)
     var result = List[SparsePoly[QQ]]()
     if homogeneous:
-        for p in basis:
+        for e in range(len(basis)):
             budget.charge(1)
+            # Each integral element goes as soon as it is written out.
+            var p = List[_Term[ZZ, W]]()
+            swap(p, basis[e])
             result.append(_monic(p, order, by_index, budget))
         return result^
     # Set h = 1. Distinct terms of a homogeneous polynomial differ off lane n,
@@ -1166,25 +1186,32 @@ def _finish[W: Int](var basis: List[List[_Term[ZZ, W]]], homogeneous: Bool, n: I
             var exponents = basis[e][k].monomial.exponents()
             exponents[n] = 0
             basis[e][k].monomial = _packed(exponents)
-    # Keep the elements whose leading monomial no other one divides, then reduce tails.
+    # Keep the elements whose leading monomial no other one divides, then
+    # reduce tails. The kept elements move into the engine.
+    var leads = List[_Packed[W]](capacity=len(basis))
+    for e in range(len(basis)):
+        leads.append(basis[e][len(basis[e]) - 1].monomial)
     var engine = _Engine[ZZ, W, True](order.kind, NoContext())
     for e in range(len(basis)):
         budget.charge(1)
-        var lead = basis[e][len(basis[e]) - 1].monomial
         var redundant = False
         for f in range(len(basis)):
             budget.charge(1)
-            if f != e and _divides(basis[f][len(basis[f]) - 1].monomial, lead):
+            if f != e and _divides(leads[f], leads[e]):
                 redundant = True
                 break
         if redundant:
             continue
-        engine.leads.append(lead)
+        engine.leads.append(leads[e])
         engine.active.append(len(engine.polys))
-        engine.polys.append(_copy(basis[e], budget))
+        var p = List[_Term[ZZ, W]]()
+        swap(p, basis[e])
+        engine.polys.append(p^)
     var reduced = _reduced_tails(engine, budget)
-    for p in reduced:
+    for e in range(len(reduced)):
         budget.charge(1)
+        var p = List[_Term[ZZ, W]]()
+        swap(p, reduced[e])
         result.append(_monic(p, order, by_index, budget))
     return result^
 
