@@ -25,7 +25,8 @@ widened when a bound on their size requires it, so a reduction step is an
 in-place multiply-subtract with no allocation. The entry divides by the
 reducer's leading coefficient from the low end (Hensel division), which also
 tells whether the division is exact. Products of long factors go through
-52-bit digits and AVX-512 IFMA where the target has it.
+52-bit digits and AVX-512 IFMA where the target has it, and otherwise,
+where it has ADX, through rows of mulx, adcx and adox.
 """
 from std.bit import count_leading_zeros, count_trailing_zeros
 from std.math import max, min
