@@ -805,9 +805,10 @@ def _certify[W: Int](kind: UInt8, inputs: List[List[_Term[ZZ, W]]], candidate: L
         budget.charge(1)
         if len(g) == 0:
             return False
-        engine.insert(_copy(g, budget), budget)
+        engine.insert(_copy(g, budget), budget, heap=False)
     if len(engine.active) != len(candidate):
         return False  # Some leading monomial divides another.
+    engine.heapify_pairs(budget)
     engine.sort_active(budget)
     # (d) Reduced: no tail monomial is divisible by a leading monomial. As
     # rows of one F4 matrix, numbering each distinct monomial once, no tail
