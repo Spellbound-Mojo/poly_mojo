@@ -515,11 +515,49 @@ struct SparsePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
         _charge_size(_sum(len(self.order.variables), len(order.variables)), budget)
         if self.order == order:
             return self._copy(budget)
+        if order.kind == MonomialOrder.LEX and order._identity():
+            var sorted = self._lex_sorted(order, budget)
+            if sorted:
+                return sorted.take()
         var terms = List[Term[Self.C]]()
         for t in self.terms:
             budget.charge(1)
             terms.append(t._copy(budget))
         return Self.from_terms(terms^, order, self.ring, budget)
+
+    def _lex_sorted(self, order: MonomialOrder, mut budget: Budget) raises PolyError -> Optional[Self]:
+        """`reorder` into a LEX order over variables 0..n-1 by integer keys, or None when they do not fit.
+
+        The terms are already distinct and nonzero, so reordering is a sort.
+        LEX compares exponent vectors from variable 0, so for at most sixteen
+        variables and exponents below 4096 a key of twelve bits per variable,
+        variable 0 highest, over the term's index in the low 32 bits, sorts
+        exactly as the order does.
+        """
+        var n = len(order.variables)
+        if n > 16 or len(self.terms) >= (1 << 32):
+            return None
+        _allocation[UInt256](len(self.terms), budget)
+        var keys = List[UInt256](capacity=len(self.terms))
+        for i in range(len(self.terms)):
+            ref m = self.terms[i].monomial
+            _charge_size(_sum(len(m.pairs), 1), budget)
+            if not order._within(m):
+                return None
+            var key = UInt256(i)
+            for pair in m.pairs:
+                if pair[1] >= 4096:
+                    return None
+                key |= UInt256(pair[1]) << UInt256(32 + 12 * (n - 1 - Int(pair[0])))
+            keys.append(key)
+        sort(keys)
+        var result = Self.zero(order, self.ring, budget)
+        _allocation[Term[Self.C]](len(self.terms), budget)
+        result.terms.reserve(len(self.terms))
+        for key in keys:
+            budget.charge(1)
+            result.terms.append(self.terms[Int(key & UInt256(0xFFFFFFFF))]._copy(budget))
+        return result^
 
     def check_invariants(self, mut budget: Budget) raises PolyError:
         """Check the ring, monomials, coefficients, and strict term order.
