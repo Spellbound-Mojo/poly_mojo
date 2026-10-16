@@ -89,7 +89,7 @@ def check_system(generators: List[SparsePoly[QQ]], order: MonomialOrder, name: S
     var first = Modulus(primes[0], work)
     var trace = _Trace[8]()
     var learned = _f4_learn[8](packed_mod(generators, first, order, work), order.kind, first, trace, work)
-    c.check(same(learned, _f4_packed[8](packed_mod(generators, first, order, work), order.kind, first, work)), name + ": recording leaves the run unchanged")
+    c.check(same(learned.packed[8](trace), _f4_packed[8](packed_mod(generators, first, order, work), order.kind, first, work)), name + ": recording leaves the run unchanged")
     if not trace.usable:
         return
     var replays = 0

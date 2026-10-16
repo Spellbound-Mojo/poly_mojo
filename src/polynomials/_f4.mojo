@@ -834,10 +834,21 @@ def _f4_packed[W: Int](var generators: List[List[_Term[ModInt, W]]], kind: UInt8
     return _f4_run[W, False](generators^, kind, ring, trace, budget).packed(budget)
 
 
-def _f4_learn[W: Int](var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
-    """As `_f4_packed`, recording the run in `trace` for `_f4_replay`."""
+def _f4_learn[W: Int](var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> _Image:
+    """As `_f4_packed`, recording the run in `trace` for `_f4_replay`; the basis is on the recorded final supports."""
     trace = _Trace[W]()
-    return _f4_run[W, True](generators^, kind, ring, trace, budget).packed(budget)
+    var final = _f4_run[W, True](generators^, kind, ring, trace, budget)
+    # The final rows are the recorded supports, entry for entry.
+    var image = _Image(ring)
+    for r in range(len(final.found.starts) - 1):
+        var s = final.found.starts[r]
+        var n = final.found.starts[r + 1] - s
+        _allocation[UInt32](n, budget)
+        var residues = List[UInt32](capacity=n)
+        for k in range(n):
+            residues.append(final.found.values[s + k])
+        image.residues.append(residues^)
+    return image^
 
 
 def _replay_rows(found: _Rows, results: List[Int], supports: List[List[Int32]], mut values: List[List[UInt32]], mut budget: Budget) raises PolyError -> Bool:
@@ -1165,10 +1176,48 @@ def _replay_rows_lanes(found: _LaneRows, results: List[Int], supports: List[List
         values.append(residues^)
 
 
+struct _Image(Movable):
+    """A reduced basis modulo one prime as residues on the supports of the final matrix of the run it follows, recorded in a `_Trace`.
+
+    Kept this way, a basis costs four bytes a term; `element` writes out one
+    element at a time.
+    """
+    var residues: List[List[UInt32]]
+    """Each element's residues on its recorded support, leading term first; zero where the residue is."""
+    var ring: Modulus
+
+    def __init__(out self, ring: Modulus):
+        self.residues = List[List[UInt32]]()
+        self.ring = ring
+
+    def element[W: Int](self, e: Int, step: _Step[W]) -> List[_Term[ModInt, W]]:
+        """Element e as an increasing term list; `step` is the recorded final matrix."""
+        ref residues = self.residues[e]
+        ref support = step.supports[e]
+        var terms = List[_Term[ModInt, W]](capacity=len(support))
+        for k in range(len(support) - 1, -1, -1):
+            var residue = residues[k]
+            if residue != 0:
+                terms.append(_Term[ModInt, W](step.columns[Int(support[k])], ModInt(UInt64(residue), self.ring)))
+        return terms^
+
+    def lead[W: Int](self, e: Int, step: _Step[W]) -> _Packed[W]:
+        """The leading monomial of element e, whose leading residue is nonzero."""
+        return step.columns[Int(step.supports[e][0])]
+
+    def packed[W: Int](self, trace: _Trace[W]) -> List[List[_Term[ModInt, W]]]:
+        """Every element as an increasing term list."""
+        ref step = trace.steps[len(trace.steps) - 1]
+        var basis = List[List[_Term[ModInt, W]]](capacity=len(self.residues))
+        for e in range(len(self.residues)):
+            basis.append(self.element[W](e, step))
+        return basis^
+
+
 struct _LaneBases(Movable):
     """The reduced bases a batched replay found, as residues on the recorded final supports: `_LANES` per entry, one per prime.
 
-    Kept this way, a basis costs four bytes a term until `basis` writes it out.
+    Kept this way, a basis costs four bytes a term until `image` takes it out.
     """
     var residues: List[List[UInt32]]
     """Each basis element's residues, `_LANES` apart, on its support in the recorded final matrix."""
@@ -1181,20 +1230,21 @@ struct _LaneBases(Movable):
         self.rings = List[Modulus]()
         self.count = 0
 
-    def basis[W: Int](self, l: Int, trace: _Trace[W]) -> List[List[_Term[ModInt, W]]]:
-        """The basis of lane l, from the run `trace` that the replay followed."""
-        ref step = trace.steps[len(trace.steps) - 1]
-        var basis = List[List[_Term[ModInt, W]]](capacity=len(self.residues))
+    def image(self, l: Int) -> _Image:
+        """The basis of lane l."""
+        var image = _Image(self.rings[l])
         for r in range(len(self.residues)):
             ref residues = self.residues[r]
-            ref support = step.supports[r]
-            var terms = List[_Term[ModInt, W]](capacity=len(support))
-            for k in range(len(support) - 1, -1, -1):
-                var residue = residues[_LANES * k + l]
-                if residue != 0:
-                    terms.append(_Term[ModInt, W](step.columns[Int(support[k])], ModInt(UInt64(residue), self.rings[l])))
-            basis.append(terms^)
-        return basis^
+            var n = len(residues) // _LANES
+            var own = List[UInt32](capacity=n)
+            for k in range(n):
+                own.append(residues.unsafe_get(_LANES * k + l))
+            image.residues.append(own^)
+        return image^
+
+    def basis[W: Int](self, l: Int, trace: _Trace[W]) -> List[List[_Term[ModInt, W]]]:
+        """The basis of lane l, from the run `trace` that the replay followed."""
+        return self.image(l).packed(trace)
 
 
 def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_Term[ModInt, W]]]], kind: UInt8, rings: List[Modulus], mut budget: Budget) raises PolyError -> _LaneBases:

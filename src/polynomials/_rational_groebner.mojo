@@ -52,7 +52,7 @@ from .sparse import SparsePoly, Term
 from .primes import _residue
 from ._images import _denominator, _scaled_integer
 from ._packed_groebner import _Buckets, _Engine, _Packed, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
-from ._f4 import _Columns, _LANES, _LaneBases, _Matrix, _raw_hash, _Store, _Trace, _f4_learn, _f4_replay, _f4_replay_lanes
+from ._f4 import _Columns, _Image, _LANES, _LaneBases, _Matrix, _raw_hash, _Step, _Store, _Trace, _f4_learn, _f4_replay, _f4_replay_lanes
 from ._integer_f4 import _add_mul_1, _divide, _pairs_reduce_to_zero, _reduced_tails, _remainder, _sub_mul_1
 
 comptime _PRIME_LIMIT = 4096
@@ -270,11 +270,11 @@ struct _Images[W: Int](Movable):
         self.count = 0
         self.probe = (0, 0)
 
-    def matches(self, basis: List[List[_Term[ModInt, Self.W]]]) -> Bool:
-        if len(basis) != len(self.leads):
+    def matches(self, image: _Image, step: _Step[Self.W]) -> Bool:
+        if len(image.residues) != len(self.leads):
             return False
-        for i in range(len(basis)):
-            if not _equal(basis[i][len(basis[i]) - 1].monomial, self.leads[i]):
+        for i in range(len(image.residues)):
+            if not _equal(image.lead(i, step), self.leads[i]):
                 return False
         return True
 
@@ -344,19 +344,19 @@ struct _Images[W: Int](Movable):
         self.values[e] = values^
         self.residues[e] = residues^
 
-    def add(mut self, basis: List[List[_Term[ModInt, Self.W]]], p: UInt64, mut budget: Budget) raises PolyError:
-        """Add one image: its residues wait in the batch, over the union of supports."""
+    def add(mut self, basis: _Image, step: _Step[Self.W], p: UInt64, mut budget: Budget) raises PolyError:
+        """Add one image, on the final supports `step` recorded: its residues wait in the batch, over the union of supports."""
         if self.count == 0:
-            for element in basis:
-                self.leads.append(element[len(element) - 1].monomial)
+            for e in range(len(basis.residues)):
+                self.leads.append(basis.lead(e, step))
                 self.monomials.append(List[UInt32]())
                 self.values.append(List[Integer]())
                 self.residues.append(List[UInt32]())
         var slot = len(self.batch)
         if slot == self.slots:
             self._widen(budget)
-        for e in range(len(basis)):
-            ref image = basis[e]
+        for e in range(len(basis.residues)):
+            var image = basis.element(e, step)
             self._cover(e, image, budget)
             # The image's monomials are now among the element's; both increase.
             var i = 0
@@ -552,13 +552,13 @@ struct _Images[W: Int](Movable):
         return result^
 
 
-def _agrees[W: Int](kind: UInt8, candidate: List[List[_Term[ZZ, W]]], basis: List[List[_Term[ModInt, W]]], p: UInt64, mut budget: Budget) raises PolyError -> Bool:
+def _agrees[W: Int](kind: UInt8, candidate: List[List[_Term[ZZ, W]]], basis: _Image, step: _Step[W], p: UInt64, mut budget: Budget) raises PolyError -> Bool:
     """Whether the integral candidate is, modulo p, its leading coefficient times the monic image, coefficient by coefficient."""
-    if len(candidate) != len(basis):
+    if len(candidate) != len(basis.residues):
         return False
-    for e in range(len(basis)):
+    for e in range(len(basis.residues)):
         ref c = candidate[e]
-        ref image = basis[e]
+        var image = basis.element(e, step)
         var lead = _residue(c[len(c) - 1].coefficient.value, p, budget)
         if lead == 0:
             return False
@@ -741,10 +741,10 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
         if not _admissible(inputs, p, budget):
             continue
         var ring = Modulus(_prime_value=p)
-        var replayed = Optional[List[List[_Term[ModInt, W]]]](None)
+        var replayed = Optional[_Image](None)
         if learned and trace.usable:
             if len(ahead_primes) > 0 and ahead_primes[0] == p:
-                replayed = ahead.basis[W](ahead_lanes.pop(0), trace)
+                replayed = ahead.image(ahead_lanes.pop(0))
                 _ = ahead_primes.pop(0)
             else:
                 # This prime and the next admissible ones, in one batch.
@@ -764,10 +764,10 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
                     ahead_primes.append(rings[i].value)
                     ahead_lanes.append(i)
                 if ahead.count > 0:
-                    replayed = ahead.basis[W](0, trace)
+                    replayed = ahead.image(0)
             if len(ahead_primes) == 0:
                 ahead = _LaneBases()
-        var basis: List[List[_Term[ModInt, W]]]
+        var basis: _Image
         if replayed:
             basis = replayed.take()
         else:
@@ -776,7 +776,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
             ahead = _LaneBases()
             ahead_primes = List[UInt64]()
             ahead_lanes = List[Int]()
-        if images.count > 0 and not images.matches(basis):
+        if images.count > 0 and not images.matches(basis, trace.steps[len(trace.steps) - 1]):
             mismatches += 1
             if mismatches < _MISMATCH_LIMIT:
                 continue
@@ -786,7 +786,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
             attempt = 1
         mismatches = 0
         if candidate:
-            if _agrees(kind, candidate.value(), basis, p, budget):
+            if _agrees(kind, candidate.value(), basis, trace.steps[len(trace.steps) - 1], p, budget):
                 certifications += 1
                 if not certify or _certify(kind, inputs, candidate.value(), budget):
                     return candidate.take()
@@ -799,7 +799,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
                 ahead_primes = List[UInt64]()
                 ahead_lanes = List[Int]()
             candidate = None
-        images.add(basis, p, budget)
+        images.add(basis, trace.steps[len(trace.steps) - 1], p, budget)
         var count = images.count
         if count >= attempt:
             candidate = images.reconstruct(budget)
