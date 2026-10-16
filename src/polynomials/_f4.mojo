@@ -45,6 +45,7 @@ GREVLEX, over at most sixteen variables; other cases use Buchberger's
 algorithm in the packed or sparse engine.
 """
 from std.math import max, min
+from std.sys import size_of
 from .coefficients import CoefficientRing, ModInt, Modulus
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product, _sum
 from .monomial import MonomialOrder
@@ -235,9 +236,10 @@ def _wide[W: Int](m: _Packed[W]) -> UInt64:
 
 def _sort_descending[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) raises PolyError -> List[Int]:
     """Indices of `monomials` from greatest to least, by bottom-up merge sort."""
-    comptime if W <= 8:
+    comptime if W <= 16:
         if len(monomials) < (1 << 32):
-            var keys = _keys(kind, monomials, budget)
+            comptime D = DType.uint128 if W <= 8 else DType.uint256
+            var keys = _keys[D](kind, monomials, budget)
             if keys:
                 return _sort_keys(keys.take(), budget)
     var n = len(monomials)
@@ -278,38 +280,42 @@ def _sort_descending[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budge
     return order^
 
 
-def _keys[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) raises PolyError -> Optional[List[UInt128]]:
+def _keys[D: DType, W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) raises PolyError -> Optional[List[Scalar[D]]]:
     """Keys whose integer order is the monomial order, each with its index in the low 32 bits; None unless every exponent is below 2^8 and every degree below 2^16.
 
     From the top: the degree (zero under LEX), then one byte per lane in
     the order that decides, which under GREVLEX is from the last lane up,
     with the exponent complemented, since a smaller one there is greater.
+    Keys of `D` bits leave 48 bits for the degree and the index; 128 bits
+    hold eight lanes, 256 bits sixteen.
     """
-    comptime assert W <= 8, "one byte per lane in 64 bits"
+    comptime bits = 8 * size_of[Scalar[D]]()
+    comptime assert bits - 48 >= 8 * W, "one byte per lane"
+    comptime top = bits - 16
     var n = len(monomials)
-    _allocation[UInt128](n, budget)
+    _allocation[Scalar[D]](n, budget)
     budget.charge(UInt64(n))
-    var keys = List[UInt128](capacity=n)
+    var keys = List[Scalar[D]](capacity=n)
     for i in range(n):
         ref m = monomials.unsafe_get(i)
         var e = m.exponents()
         if m.degree >= (1 << 16) or e.reduce_max() >= 256:
             return None
-        var digits = UInt64(0)
+        var digits = Scalar[D](0)
         comptime for j in range(W):
-            var lane = UInt64(e[W - 1 - j]) if kind == MonomialOrder.GREVLEX else UInt64(e[j])
-            var digit = UInt64(255) - lane if kind == MonomialOrder.GREVLEX else lane
-            digits |= digit << UInt64(8 * (7 - j))
-        var degree = UInt128(0) if kind == MonomialOrder.LEX else UInt128(m.degree)
-        keys.append((degree << 112) | (UInt128(digits) << 48) | UInt128(i))
+            var lane = Scalar[D](e[W - 1 - j]) if kind == MonomialOrder.GREVLEX else Scalar[D](e[j])
+            var digit = Scalar[D](255) - lane if kind == MonomialOrder.GREVLEX else lane
+            digits |= digit << Scalar[D](top - 8 * (j + 1))
+        var degree = Scalar[D](0) if kind == MonomialOrder.LEX else Scalar[D](m.degree)
+        keys.append((degree << Scalar[D](top)) | digits | Scalar[D](i))
     return keys^
 
 
-def _sort_keys(var keys: List[UInt128], mut budget: Budget) raises PolyError -> List[Int]:
+def _sort_keys[D: DType](var keys: List[Scalar[D]], mut budget: Budget) raises PolyError -> List[Int]:
     """The indices in the low 32 bits of distinct keys, by decreasing key."""
     var n = len(keys)
-    _allocation[UInt128](n, budget)
-    var scratch = List[UInt128](length=n, fill=0)
+    _allocation[Scalar[D]](n, budget)
+    var scratch = List[Scalar[D]](length=n, fill=0)
     var width = 1
     while width < n:
         budget.charge(UInt64(n))
@@ -344,7 +350,7 @@ def _sort_keys(var keys: List[UInt128], mut budget: Budget) raises PolyError -> 
     _allocation[Int](n, budget)
     var order = List[Int](capacity=n)
     for k in range(n):
-        order.append(Int(keys.unsafe_get(k) & UInt128(0xFFFFFFFF)))
+        order.append(Int(keys.unsafe_get(k) & Scalar[D](0xFFFFFFFF)))
     return order^
 
 
