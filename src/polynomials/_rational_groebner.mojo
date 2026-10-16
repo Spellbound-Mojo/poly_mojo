@@ -66,6 +66,9 @@ comptime _PROBES = 16
 """Elements whose least coefficient is tried before a full reconstruction."""
 comptime _BATCH = 32
 """Primes whose residues are combined in word arithmetic before joining the accumulated values."""
+comptime _SPREAD = 8
+"""Coefficients whose CRT values are formed together, one per SIMD lane."""
+comptime _Spread = SIMD[DType.uint64, _SPREAD]
 
 
 def _next_prime(previous: UInt64, mut budget: Budget) raises PolyError -> UInt64:
@@ -181,14 +184,24 @@ struct _Crt(Movable):
     """A batch's CRT basis. For primes p_i with product Q, Q_i = Q / p_i and
     c_i = Q_i^-1 modulo p_i, the residues r_i give x = sum r_i e_i - k Q with
     e_i = c_i Q_i and k = floor(sum r_i c_i / p_i), so a value takes word
-    multiples of the basis and one word multiple of Q, in limbs."""
+    multiples of the basis and one word multiple of Q, in limbs.
+
+    `values` forms `_SPREAD` values at once, one per SIMD lane, from the
+    32-bit digits of the e_i: each digit's products with the residues stay
+    below 2^63, and their low and high halves go into columns that only
+    carry once all of them are in.
+    """
     var product: List[UInt64]
     var basis: List[UInt64]
     """The e_i, `limbs` limbs each."""
+    var digits: List[UInt64]
+    """The e_i in 32-bit digits, 2 `limbs` each."""
     var weights: List[Float64]
     """The c_i / p_i, whose sum against the residues estimates k."""
     var limbs: Int
     var work: List[UInt64]
+    var columns: List[UInt64]
+    """`_SPREAD` lanes per 32-bit digit."""
 
     def __init__(out self, primes: List[UInt64], mut budget: Budget) raises PolyError:
         var b = len(primes)
@@ -207,6 +220,7 @@ struct _Crt(Movable):
         self.basis = List[UInt64](length=b * self.limbs, fill=0)
         self.weights = List[Float64](capacity=b)
         self.work = List[UInt64](length=self.limbs + 2, fill=0)
+        self.columns = List[UInt64](length=_SPREAD * (2 * self.limbs + 2), fill=0)
         for i in range(b):
             var prime = primes[i]
             budget.charge(UInt64(3 * self.limbs))
@@ -219,6 +233,11 @@ struct _Crt(Movable):
                 self.basis[i * self.limbs + l] = UInt64(x & UInt128(UInt64.MAX))
                 carry = x >> 64
             self.weights.append(Float64(c) / Float64(prime))
+        _allocation[UInt64](_product(2 * b, self.limbs), budget)
+        self.digits = List[UInt64](capacity=2 * b * self.limbs)
+        for limb in self.basis:
+            self.digits.append(limb & 0xFFFFFFFF)
+            self.digits.append(limb >> 32)
 
     def value(mut self, residues: Pointer[mut=False, UInt32, _], stride: Int, b: Int, target: Pointer[mut=True, UInt64, _], mut budget: Budget) raises PolyError:
         """Write the `limbs` limbs of the number below Q with the residues residues[i stride] for i below b."""
@@ -234,6 +253,54 @@ struct _Crt(Movable):
                 continue
             _add_mul_1(work, n, UInt64(r), self.basis.unsafe_ptr().unsafe_offset(i * self.limbs), self.limbs)
             estimate += Float64(r) * self.weights.unsafe_get(i)
+        self._reduced(estimate, target)
+
+    def values(mut self, residues: Pointer[mut=False, UInt32, _], stride: Int, count: Int, b: Int, target: Pointer[mut=True, UInt64, _], width: Int, mut budget: Budget) raises PolyError:
+        """Write the values of `count` coefficients, the k-th with the residues residues[i stride + k] for i below b, to target[k width : k width + limbs]."""
+        var digits = 2 * self.limbs
+        var columns = self.columns.unsafe_ptr()
+        var mask = _Spread(0xFFFFFFFF)
+        var k = 0
+        while k + _SPREAD <= count:
+            budget.charge(UInt64(_product(_product(b, self.limbs), _SPREAD)))
+            for d in range(digits + 2):
+                columns.unsafe_offset(_SPREAD * d).unsafe_store[width=_SPREAD](_Spread(0))
+            var estimate = SIMD[DType.float64, _SPREAD](0)
+            for i in range(b):
+                var r = residues.unsafe_offset(i * stride + k).unsafe_load[width=_SPREAD]().cast[DType.uint64]()
+                estimate += r.cast[DType.float64]() * self.weights.unsafe_get(i)
+                var e = self.digits.unsafe_ptr().unsafe_offset(i * digits)
+                var high = _Spread(0)
+                for d in range(digits):
+                    # Both factors are below 2^32, which the mask makes plain.
+                    var x = r * (_Spread(e.unsafe_offset(d).unsafe_load()) & mask)
+                    var column = columns.unsafe_offset(_SPREAD * d)
+                    column.unsafe_store[width=_SPREAD](column.unsafe_load[width=_SPREAD]() + (x & mask) + high)
+                    high = x >> 32
+                var column = columns.unsafe_offset(_SPREAD * digits)
+                column.unsafe_store[width=_SPREAD](column.unsafe_load[width=_SPREAD]() + high)
+            var carry = _Spread(0)
+            for d in range(digits + 2):
+                var x = columns.unsafe_offset(_SPREAD * d).unsafe_load[width=_SPREAD]() + carry
+                columns.unsafe_offset(_SPREAD * d).unsafe_store[width=_SPREAD](x & mask)
+                carry = x >> 32
+            var work = self.work.unsafe_ptr()
+            for lane in range(_SPREAD):
+                for l in range(self.limbs + 1):
+                    var low = columns.unsafe_offset(_SPREAD * 2 * l + lane).unsafe_load()
+                    var high = columns.unsafe_offset(_SPREAD * (2 * l + 1) + lane).unsafe_load()
+                    work.unsafe_offset(l).unsafe_store(low | (high << 32))
+                work.unsafe_offset(self.limbs + 1).unsafe_store(0)
+                self._reduced(estimate[lane], target.unsafe_offset((k + lane) * width))
+            k += _SPREAD
+        while k < count:
+            self.value(residues.unsafe_offset(k), stride, b, target.unsafe_offset(k * width), budget)
+            k += 1
+
+    def _reduced(mut self, estimate: Float64, target: Pointer[mut=True, UInt64, _]):
+        """Write the accumulated sum, less the multiple of Q its estimate gives and a correction, to target[0:limbs]."""
+        var n = self.limbs + 2
+        var work = self.work.unsafe_ptr()
         # The estimate's error is far below one, so one correction at most remains.
         var k = UInt64(estimate)
         if k:
@@ -279,8 +346,6 @@ struct _Join(Movable):
     """2^(64 j) modulo p_i, at i limbs + j."""
     var inverses: List[UInt64]
     """M^-1 modulo p_i."""
-    var digits: List[UInt32]
-    var t: List[UInt64]
 
     def __init__(out self, primes: List[UInt64], modulus: List[UInt64], mut budget: Budget) raises PolyError:
         self.crt = _Crt(primes, budget)
@@ -312,8 +377,47 @@ struct _Join(Movable):
             for _ in range(self.limbs):
                 self.powers.append(power)
                 power = UInt64((UInt128(power) << 64) % UInt128(p))
-        self.digits = List[UInt32](length=b, fill=0)
-        self.t = List[UInt64](length=q, fill=0)
+
+    def join_all(mut self, values: Pointer[mut=False, UInt64, _], residues: Pointer[mut=False, UInt32, _], count: Int, target: Pointer[mut=True, UInt64, _], mut budget: Budget) raises PolyError:
+        """`join` for `count` coefficients at once: values `limbs` limbs apart, residue rows `count` long, targets `width` limbs apart."""
+        var b = len(self.primes)
+        var n = self.limbs
+        if n == 0:
+            self.crt.values(residues, count, count, b, target, self.width, budget)
+            return
+        budget.charge(UInt64(_product(count, _product(b, n) + _product(n, self.crt.limbs))))
+        var q = self.crt.limbs
+        _allocation[UInt64](_product(count, b + q), budget)
+        var rows = List[UInt32](length=count * b, fill=0)
+        for k in range(count):
+            self._digits(values.unsafe_offset(k * n), residues.unsafe_offset(k), count, rows.unsafe_ptr().unsafe_offset(k), count)
+        var t = List[UInt64](length=count * q, fill=0)
+        self.crt.values(rows.unsafe_ptr(), count, count, b, t.unsafe_ptr(), q, budget)
+        for k in range(count):
+            self._joined(values.unsafe_offset(k * n), t.unsafe_ptr().unsafe_offset(k * q), target.unsafe_offset(k * self.width))
+
+    def _digits(self, value: Pointer[mut=False, UInt64, _], residues: Pointer[mut=False, UInt32, _], stride: Int, digits: Pointer[mut=True, UInt32, _], step: Int):
+        """Write the residues of t, (r_i - value) M^-1 modulo p_i, to digits[i step]."""
+        var n = self.limbs
+        for i in range(len(self.primes)):
+            var p = self.primes.unsafe_get(i)
+            var powers = self.powers.unsafe_ptr().unsafe_offset(i * n)
+            var sum = UInt128(0)
+            for j in range(n):
+                sum += UInt128(value.unsafe_offset(j).unsafe_load()) * UInt128(powers.unsafe_offset(j).unsafe_load())
+            var v = UInt64(sum % UInt128(p))
+            var difference = UInt64(residues.unsafe_offset(i * stride).unsafe_load()) + p - v
+            digits.unsafe_offset(i * step).unsafe_store(UInt32((difference * self.inverses.unsafe_get(i)) % p))
+
+    def _joined(self, value: Pointer[mut=False, UInt64, _], t: Pointer[mut=False, UInt64, _], target: Pointer[mut=True, UInt64, _]):
+        """Write value + M t to target[0:width]."""
+        var n = self.limbs
+        for l in range(self.width):
+            target.unsafe_offset(l).unsafe_store(value.unsafe_offset(l).unsafe_load() if l < n else UInt64(0))
+        for l in range(self.crt.limbs):
+            var f = t.unsafe_offset(l).unsafe_load()
+            if f:
+                _add_mul_1(target.unsafe_offset(l), self.width - l, f, self.modulus.unsafe_ptr(), n)
 
     def join(mut self, value: Pointer[mut=False, UInt64, _], residues: Pointer[mut=False, UInt32, _], stride: Int, target: Pointer[mut=True, UInt64, _], mut budget: Budget) raises PolyError:
         """Write the `width` limbs of the number below M Q that is value[0:limbs] modulo M and has the residues residues[i stride] for i below b."""
@@ -323,22 +427,11 @@ struct _Join(Movable):
             self.crt.value(residues, stride, b, target, budget)
             return
         budget.charge(UInt64(_product(b, n) + _product(n, self.crt.limbs)))
-        for i in range(b):
-            var p = self.primes.unsafe_get(i)
-            var powers = self.powers.unsafe_ptr().unsafe_offset(i * n)
-            var sum = UInt128(0)
-            for j in range(n):
-                sum += UInt128(value.unsafe_offset(j).unsafe_load()) * UInt128(powers.unsafe_offset(j).unsafe_load())
-            var v = UInt64(sum % UInt128(p))
-            var difference = UInt64(residues.unsafe_offset(i * stride).unsafe_load()) + p - v
-            self.digits.unsafe_get(i) = UInt32((difference * self.inverses.unsafe_get(i)) % p)
-        self.crt.value(self.digits.unsafe_ptr(), 1, b, self.t.unsafe_ptr(), budget)
-        for l in range(self.width):
-            target.unsafe_offset(l).unsafe_store(value.unsafe_offset(l).unsafe_load() if l < n else UInt64(0))
-        for l in range(self.crt.limbs):
-            var f = self.t.unsafe_get(l)
-            if f:
-                _add_mul_1(target.unsafe_offset(l), self.width - l, f, self.modulus.unsafe_ptr(), n)
+        var digits = List[UInt32](length=b, fill=0)
+        var t = List[UInt64](length=self.crt.limbs, fill=0)
+        self._digits(value, residues, stride, digits.unsafe_ptr(), 1)
+        self.crt.value(digits.unsafe_ptr(), 1, b, t.unsafe_ptr(), budget)
+        self._joined(value, t.unsafe_ptr(), target)
 
 
 struct _Images[W: Int](Movable):
@@ -496,14 +589,12 @@ struct _Images[W: Int](Movable):
         if len(self.batch) == 0:
             return
         var join = _Join(self.batch, self.product, budget)
-        var limbs = self.limbs
         var width = join.width
         for e in range(len(self.values)):
             var n = len(self.monomials[e])
             _allocation[UInt64](_product(n, width), budget)
             var values = List[UInt64](length=n * width, fill=0)
-            for k in range(n):
-                join.join(self.values[e].unsafe_ptr().unsafe_offset(k * limbs), self.residues[e].unsafe_ptr().unsafe_offset(k), n, values.unsafe_ptr().unsafe_offset(k * width), budget)
+            join.join_all(self.values[e].unsafe_ptr(), self.residues[e].unsafe_ptr(), n, values.unsafe_ptr(), budget)
             self.values[e] = values^
             for i in range(len(self.residues[e])):
                 self.residues[e][i] = 0
