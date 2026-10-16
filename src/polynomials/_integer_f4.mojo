@@ -1079,12 +1079,15 @@ def _reduced_tails[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget)
     The active elements must form a Gröbner basis with positive leading
     coefficients and mutually nondividing leading monomials, so the reduced
     tails are their normal forms. Each element is one row, a multiple of
-    itself; entries in columns no leading monomial divides stay.
+    itself; entries in columns no leading monomial divides stay. The engine
+    is left without its elements' term lists.
     """
     engine.sort_active(budget)
     var store = _Store[W]()
     store.extend(engine, budget)
     var coefficients = _Coefficients(engine, budget)
+    # The rows need only the stored monomials and the coefficients' limbs.
+    store.release(engine)
     var matrix = _Matrix[W]()
     var one = _Packed[W](SIMD[DType.uint32, W](0), 0, 0)
     for position in range(len(engine.active) - 1, -1, -1):

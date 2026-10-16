@@ -873,8 +873,11 @@ def _finish[W: Int](var basis: List[List[_Term[ZZ, W]]], homogeneous: Bool, n: I
     var by_index = _priorities(order, budget)
     var result = List[SparsePoly[QQ]]()
     if homogeneous:
-        for p in basis:
+        for e in range(len(basis)):
             budget.charge(1)
+            # Each integral element goes as soon as it is written out.
+            var p = List[_Term[ZZ, W]]()
+            swap(p, basis[e])
             result.append(_monic(p, order, by_index, budget))
         return result^
     # Set h = 1. Distinct terms of a homogeneous polynomial differ off lane n,
@@ -885,25 +888,32 @@ def _finish[W: Int](var basis: List[List[_Term[ZZ, W]]], homogeneous: Bool, n: I
             var exponents = basis[e][k].monomial.exponents()
             exponents[n] = 0
             basis[e][k].monomial = _packed(exponents)
-    # Keep the elements whose leading monomial no other one divides, then reduce tails.
+    # Keep the elements whose leading monomial no other one divides, then
+    # reduce tails. The kept elements move into the engine.
+    var leads = List[_Packed[W]](capacity=len(basis))
+    for e in range(len(basis)):
+        leads.append(basis[e][len(basis[e]) - 1].monomial)
     var engine = _Engine[ZZ, W, True](order.kind, NoContext())
     for e in range(len(basis)):
         budget.charge(1)
-        var lead = basis[e][len(basis[e]) - 1].monomial
         var redundant = False
         for f in range(len(basis)):
             budget.charge(1)
-            if f != e and _divides(basis[f][len(basis[f]) - 1].monomial, lead):
+            if f != e and _divides(leads[f], leads[e]):
                 redundant = True
                 break
         if redundant:
             continue
-        engine.leads.append(lead)
+        engine.leads.append(leads[e])
         engine.active.append(len(engine.polys))
-        engine.polys.append(_copy(basis[e], budget))
+        var p = List[_Term[ZZ, W]]()
+        swap(p, basis[e])
+        engine.polys.append(p^)
     var reduced = _reduced_tails(engine, budget)
-    for p in reduced:
+    for e in range(len(reduced)):
         budget.charge(1)
+        var p = List[_Term[ZZ, W]]()
+        swap(p, reduced[e])
         result.append(_monic(p, order, by_index, budget))
     return result^
 
