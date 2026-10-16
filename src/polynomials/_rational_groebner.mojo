@@ -607,16 +607,22 @@ def _copy[W: Int](p: List[_Term[ZZ, W]], mut budget: Budget) raises PolyError ->
     return terms^
 
 
-def _certify[W: Int](kind: UInt8, inputs: List[List[_Term[ZZ, W]]], candidate: List[List[_Term[ZZ, W]]], mut budget: Budget) raises PolyError -> Bool:
-    """Checks (a), (b), and (d) of the module proof; (c) holds by construction."""
+def _certify[W: Int](kind: UInt8, inputs: List[List[_Term[ZZ, W]]], var candidate: List[List[_Term[ZZ, W]]], mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ZZ, W]]]]:
+    """The candidate, primitive with positive leading coefficients, if it passes checks (a), (b), and (d) of the module proof; (c) holds by construction.
+
+    The checks run on the candidate's own elements, moved into an engine
+    rather than copied.
+    """
     var engine = _Engine[ZZ, W, True](kind, NoContext())
-    for g in candidate:
+    for i in range(len(candidate)):
         budget.charge(1)
-        if len(g) == 0:
-            return False
-        engine.insert(_copy(g, budget), budget)
+        if len(candidate[i]) == 0:
+            return None
+        var g = List[_Term[ZZ, W]]()
+        swap(g, candidate[i])
+        engine.insert(g^, budget)
     if len(engine.active) != len(candidate):
-        return False  # Some leading monomial divides another.
+        return None  # Some leading monomial divides another.
     engine.sort_active(budget)
     # (d) Reduced: no tail monomial is divisible by a leading monomial. As
     # rows of one F4 matrix, numbering each distinct monomial once, no tail
@@ -633,19 +639,23 @@ def _certify[W: Int](kind: UInt8, inputs: List[List[_Term[ZZ, W]]], candidate: L
     for r in range(rows):
         for k in range(matrix.starts[r] + 1, matrix.starts[r + 1]):
             if matrix.columns.covered[Int(matrix.entries[k])]:
-                return False
+                return None
     matrix.preprocess(engine, store, budget)
     if len(matrix.sources) != rows:
-        return False
+        return None
     # (a) Every input reduces to zero.
     for f in inputs:
         budget.charge(1)
         var pending = _Buckets[ZZ, W, True](kind, NoContext())
         pending.add(_copy(f, budget), budget)
         if not engine.reduces_to_zero(pending^, engine.active, budget):
-            return False
+            return None
     # (b) Every remaining S-pair reduces to zero.
-    return _pairs_reduce_to_zero(engine, budget)
+    if not _pairs_reduce_to_zero(engine, budget):
+        return None
+    var basis = List[List[_Term[ZZ, W]]]()
+    swap(basis, engine.polys)
+    return basis^
 
 
 def _monic[W: Int](p: List[_Term[ZZ, W]], order: MonomialOrder, by_index: List[Int], mut budget: Budget) raises PolyError -> SparsePoly[QQ]:
@@ -788,8 +798,17 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
         if candidate:
             if _agrees(kind, candidate.value(), basis, trace.steps[len(trace.steps) - 1], p, budget):
                 certifications += 1
-                if not certify or _certify(kind, inputs, candidate.value(), budget):
+                if not certify:
                     return candidate.take()
+                # Certification needs none of the recorded run but what this
+                # image refers to, and a failure records the run anew.
+                trace.keep_final()
+                ahead = _LaneBases()
+                ahead_primes = List[UInt64]()
+                ahead_lanes = List[Int]()
+                var certified = _certify(kind, inputs, candidate.take(), budget)
+                if certified:
+                    return certified.take()
                 if certifications >= _CERTIFY_LIMIT:
                     return None
                 # The images may follow an unlucky recorded run: record anew,

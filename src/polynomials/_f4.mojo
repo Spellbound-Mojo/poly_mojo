@@ -561,6 +561,20 @@ struct _Trace[W: Int](Movable):
         self.steps = List[_Step[Self.W]]()
         self.usable = True
 
+    def keep_final(mut self):
+        """Keep only what an `_Image` of the run needs, the final matrix's supports and columns; the run cannot be replayed after."""
+        if len(self.steps) == 0:
+            return
+        var step = self.steps.pop()
+        step.sources = List[Int]()
+        step.starts = [0]
+        step.entries = List[Int32]()
+        step.leads = List[Int32]()
+        self.steps = List[_Step[Self.W]]()
+        self.steps.append(step^)
+        self.inputs = List[List[_Packed[Self.W]]]()
+        self.usable = False
+
 
 def _eliminate[W: Int](matrix: _Matrix[W], mut pivot: List[Int], reduce: List[Int], values: List[List[UInt32]], prime: UInt64, ring: Modulus, mut found: _Rows, mut kept: List[Int], mut budget: Budget) raises PolyError -> List[Int]:
     """Reduce rows `reduce` in turn, each nonzero remainder becoming a monic pivot; then reduce the new pivots by one another.
