@@ -131,6 +131,12 @@ struct _Store[W: Int](Movable):
             self.values.append(v^)
             self.tops.append(_packed(top))
 
+    def release[C: CoefficientRing, integral: Bool](self, mut engine: _Engine[C, Self.W, integral]):
+        """Drop the engine's term lists of stored elements whose exponents are below 256: `add_row` needs only their hashes and exponent bytes."""
+        for i in range(len(self.hashes)):
+            if self.tops[i].exponents().reduce_max() < 256:
+                engine.polys[i] = List[_Term[C, Self.W]]()
+
 
 struct _Columns[W: Int](Movable):
     """Distinct monomials, numbered in order of first appearance, with a hash index.
@@ -442,10 +448,10 @@ struct _Matrix[W: Int](Movable):
         self.entries = List[Int32]()
 
     def add_row[C: CoefficientRing, integral: Bool](mut self, engine: _Engine[C, Self.W, integral], store: _Store[Self.W], source: Int, shift: _Packed[Self.W], mut budget: Budget) raises PolyError:
-        """Add shift * engine.polys[source]."""
+        """Add shift * engine.polys[source], whose term list `store.release` may have dropped."""
         ref p = engine.polys[source]
         ref h = store.hashes[source]
-        var n = len(p)
+        var n = len(h)
         # Some product's exponent overflows exactly when the greatest exponents' does.
         var top = _mul(store.tops[source], shift)
         budget.charge(UInt64(n))
@@ -459,6 +465,11 @@ struct _Matrix[W: Int](Movable):
             var offset = shift.exponents().cast[DType.uint8]()
             for k in range(n):
                 self.entries.append(self.columns.find_narrow(keys.unsafe_get(k) + offset, base + h.unsafe_get(k)))
+        elif store.tops[source].exponents().reduce_max() < 256:
+            # The element's exponents are its bytes.
+            ref keys = store.keys[source]
+            for k in range(n):
+                self.entries.append(self.columns.find(_times(_packed(keys.unsafe_get(k).cast[DType.uint32]()), shift), base + h.unsafe_get(k)))
         else:
             for k in range(n):
                 self.entries.append(self.columns.find(_times(p.unsafe_get(n - 1 - k).monomial, shift), base + h.unsafe_get(k)))
@@ -1158,6 +1169,7 @@ def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], 
         budget.charge(1)
         engine.sort_active(budget)
         store.extend(engine, budget)
+        store.release(engine)
         var fresh = _round[W, record](engine, store, prime, ring, trace, budget)
         for k in range(len(fresh)):
             var p = List[_Term[ModInt, W]]()
@@ -1166,6 +1178,7 @@ def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], 
         # The pairs are ordered once the round's elements are all in.
         engine.heapify_pairs(budget)
     store.extend(engine, budget)
+    store.release(engine)
     return _interreduce[W, record](engine, store, prime, ring, trace, budget)
 
 
@@ -1650,8 +1663,11 @@ def _f4_basis[W: Int](generators: List[SparsePoly[ModInt]], order: MonomialOrder
     var by_index = _priorities(order, budget)
     _allocation[SparsePoly[ModInt]](len(basis), budget)
     var result = List[SparsePoly[ModInt]](capacity=len(basis))
-    for p in basis:
+    for i in range(len(basis)):
         budget.charge(1)
+        # Each packed element goes as soon as it is unpacked.
+        var p = List[_Term[ModInt, W]]()
+        swap(p, basis[i])
         result.append(_unpack(p, order, ring, by_index, budget))
     return result^
 
