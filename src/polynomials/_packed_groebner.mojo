@@ -36,6 +36,7 @@ are corrected once at the end.
 `groebner` uses this engine for orders over at most 16 variables when no
 cofactors are tracked, and converts the basis back to sparse polynomials.
 """
+from std.bit import pop_count
 from std.math import iota, max
 from apn_mojo import Integer, Rational
 from .coefficients import CoefficientField, CoefficientRing, ModInt, NoContext, QQ, ZZ, _work
@@ -255,7 +256,7 @@ def _pack[C: CoefficientRing, W: Int](p: SparsePoly[C], order: MonomialOrder, mu
 
 
 def _monomial[W: Int](packed: _Packed[W], order: MonomialOrder, by_index: List[Int], mut budget: Budget) raises PolyError -> Monomial:
-    var pairs = List[Tuple[Int64, UInt32]]()
+    var pairs = List[Tuple[Int64, UInt32]](capacity=Int(pop_count(packed.support)))
     for lane in by_index:
         var e = packed.exponents()[lane]
         if e:

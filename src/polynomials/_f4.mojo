@@ -8,9 +8,10 @@ preprocessing), and row-reduces the resulting sparse matrix. Rows whose
 leading monomial no pivot covers are new basis elements; they are reduced by
 one another too, so each round's new elements are in reduced row echelon
 form, which keeps the rows they later contribute sparse. Pairs are still
-pruned by the Gebauer–Möller criteria of the packed engine, which also stores
-the basis and computes the final reduced basis; the reduced basis is unique,
-so the result is the one Buchberger's algorithm returns.
+pruned by the Gebauer–Möller criteria of the packed engine; the reduced basis
+is unique, so the result is the one Buchberger's algorithm returns. The
+elements' terms are kept once, compactly: each term is the number of a
+monomial in a table every element shares, and a residue.
 
 Every row is a multiple of a basis element, so a row stores only its column
 numbers, concatenated with the other rows'; its residues are the element's,
@@ -82,37 +83,71 @@ def _times[W: Int](a: _Packed[W], b: _Packed[W]) -> _Packed[W]:
 
 
 struct _Store[W: Int](Movable):
-    """Each basis element's term hashes and, over a prime field, residues, leading term first."""
-    var hashes: List[List[UInt64]]
+    """Each basis element's terms, leading term first, as numbers of distinct monomials, and over a prime field their residues.
+
+    The monomials of all elements are kept once, with their hashes: elements
+    share most of their monomials, so a term costs a 32-bit number and a
+    32-bit residue, and F4 can drop the engine's own term lists (`release`).
+    """
+    var monomials: _Columns[Self.W]
+    var hashes: List[UInt64]
+    """The raw hash of each distinct monomial."""
+    var terms: List[List[UInt32]]
     var values: List[List[UInt32]]
     var tops: List[_Packed[Self.W]]
     """The greatest exponent of each variable among each element's terms."""
 
     def __init__(out self):
-        self.hashes = List[List[UInt64]]()
+        self.monomials = _Columns[Self.W]()
+        self.hashes = List[UInt64]()
+        self.terms = List[List[UInt32]]()
         self.values = List[List[UInt32]]()
         self.tops = List[_Packed[Self.W]]()
 
     def extend[C: CoefficientRing, integral: Bool](mut self, engine: _Engine[C, Self.W, integral], mut budget: Budget) raises PolyError:
         """Add the elements inserted since the last call; residues only over a prime field."""
-        for i in range(len(self.hashes), len(engine.polys)):
+        for i in range(len(self.terms), len(engine.polys)):
             ref p = engine.polys[i]
             var n = len(p)
             budget.charge(UInt64(n))
-            _allocation[UInt64](n, budget)
-            _allocation[UInt32](n, budget)
-            var h = List[UInt64](capacity=n)
+            _allocation[UInt32](2 * n, budget)
+            self.monomials.reserve(n, budget)
+            var numbers = List[UInt32](capacity=n)
             var v = List[UInt32](capacity=n)
             var top = SIMD[DType.uint32, Self.W](0)
             for k in range(n - 1, -1, -1):
                 ref t = p[k]
-                h.append(_raw_hash(t.monomial))
+                var raw = _raw_hash(t.monomial)
+                var number = Int(self.monomials.find(t.monomial, raw))
+                if number == len(self.hashes):
+                    self.hashes.append(raw)
+                numbers.append(UInt32(number))
                 comptime if C == ModInt:
                     v.append(UInt32(rebind[ModInt](t.coefficient).value))
                 top = max(top, t.monomial.exponents())
-            self.hashes.append(h^)
+            self.terms.append(numbers^)
             self.values.append(v^)
             self.tops.append(_packed(top))
+
+    def release[C: CoefficientRing, integral: Bool](self, mut engine: _Engine[C, Self.W, integral]):
+        """Drop the engine's term lists of the stored elements; `restore` brings them back."""
+        for i in range(len(self.terms)):
+            engine.polys[i] = List[_Term[C, Self.W]]()
+
+    def restore(self, mut engine: _Engine[ModInt, Self.W, False], indices: List[Int], mut budget: Budget) raises PolyError:
+        """Rebuild the engine's term lists of the elements `indices`, in increasing order."""
+        for i in indices:
+            if i >= len(self.terms):
+                continue  # Not stored yet, so never released.
+            ref numbers = self.terms[i]
+            ref v = self.values[i]
+            var n = len(numbers)
+            budget.charge(UInt64(n))
+            _allocation[_Term[ModInt, Self.W]](n, budget)
+            var p = List[_Term[ModInt, Self.W]](capacity=n)
+            for k in range(n - 1, -1, -1):
+                p.append(_Term[ModInt, Self.W](self.monomials.monomials[Int(numbers[k])], ModInt(UInt64(v[k]), engine.ring)))
+            engine.polys[i] = p^
 
 
 struct _Columns[W: Int](Movable):
@@ -305,10 +340,10 @@ struct _Matrix[W: Int](Movable):
         self.entries = List[Int32]()
 
     def add_row[C: CoefficientRing, integral: Bool](mut self, engine: _Engine[C, Self.W, integral], store: _Store[Self.W], source: Int, shift: _Packed[Self.W], mut budget: Budget) raises PolyError:
-        """Add shift * engine.polys[source]."""
-        ref p = engine.polys[source]
-        ref h = store.hashes[source]
-        var n = len(p)
+        """Add shift * engine.polys[source], from its stored terms."""
+        ref numbers = store.terms[source]
+        ref monomials = store.monomials.monomials
+        var n = len(numbers)
         # Some product's exponent overflows exactly when the greatest exponents' does.
         _ = _mul(store.tops[source], shift)
         budget.charge(UInt64(n))
@@ -317,7 +352,8 @@ struct _Matrix[W: Int](Movable):
         var base = _raw_hash(shift)
         var first = len(self.entries)
         for k in range(n):
-            self.entries.append(self.columns.find(_times(p.unsafe_get(n - 1 - k).monomial, shift), base + h.unsafe_get(k)))
+            var number = Int(numbers.unsafe_get(k))
+            self.entries.append(self.columns.find(_times(monomials.unsafe_get(number), shift), base + store.hashes.unsafe_get(number)))
         self.columns.covered[Int(self.entries[first])] = True
         self.sources.append(source)
         self.starts.append(len(self.entries))
@@ -667,7 +703,7 @@ def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _
     return fresh^
 
 
-def _interreduce[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _Store[W], prime: UInt64, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
+def _interreduce[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _Store[W], prime: UInt64, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> _Final[W]:
     """The reduced basis from the active elements, by one matrix, in decreasing leading-monomial order.
 
     Every active element is a row, and symbolic preprocessing adds a reducer
@@ -708,18 +744,42 @@ def _interreduce[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], st
                 monomials.append(matrix.columns.monomials[order[Int(found.columns[k])]])
             step.monomials.append(monomials^)
         trace.steps.append(step^)
-    var basis = List[List[_Term[ModInt, W]]](capacity=basis_rows)
-    for r in range(basis_rows):
-        var n = found.starts[r + 1] - found.starts[r]
-        _allocation[_Term[ModInt, W]](n, budget)
-        var terms = List[_Term[ModInt, W]](capacity=n)
-        for k in range(found.starts[r + 1] - 1, found.starts[r] - 1, -1):
-            terms.append(_Term[ModInt, W](matrix.columns.monomials[order[Int(found.columns[k])]], ModInt(UInt64(found.values[k]), ring)))
-        basis.append(terms^)
-    return basis^
+    var final = _Final[W](ring)
+    swap(final.found, found)
+    swap(final.monomials, matrix.columns.monomials)
+    final.order = order^
+    return final^
 
 
-def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
+struct _Final[W: Int](Movable):
+    """The reduced basis as the final matrix leaves it: one row of `found` per element, in decreasing leading-monomial order."""
+    var found: _Rows
+    var monomials: List[_Packed[Self.W]]
+    """The matrix's monomials, in order of first appearance."""
+    var order: List[Int]
+    """The monomial at each column."""
+    var ring: Modulus
+
+    def __init__(out self, ring: Modulus):
+        self.found = _Rows()
+        self.monomials = List[_Packed[Self.W]]()
+        self.order = List[Int]()
+        self.ring = ring
+
+    def packed(self, mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, Self.W]]]:
+        """The elements as increasing term lists."""
+        var basis = List[List[_Term[ModInt, Self.W]]](capacity=len(self.found.starts) - 1)
+        for r in range(len(self.found.starts) - 1):
+            var n = self.found.starts[r + 1] - self.found.starts[r]
+            _allocation[_Term[ModInt, Self.W]](n, budget)
+            var terms = List[_Term[ModInt, Self.W]](capacity=n)
+            for k in range(self.found.starts[r + 1] - 1, self.found.starts[r] - 1, -1):
+                terms.append(_Term[ModInt, Self.W](self.monomials[self.order[Int(self.found.columns[k])]], ModInt(UInt64(self.found.values[k]), self.ring)))
+            basis.append(terms^)
+        return basis^
+
+
+def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> _Final[W]:
     var prime = ring.value
     var engine = _Engine[ModInt, W, False](kind, ring)
     engine.start(generators^, budget)
@@ -734,7 +794,10 @@ def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], 
         budget.charge(1)
         engine.sort_active(budget)
         store.extend(engine, budget)
+        store.release(engine)
         var fresh = _round[W, record](engine, store, prime, ring, trace, budget)
+        # The released term lists come back once a round, when the first element needs them.
+        var restored = False
         for k in range(len(fresh)):
             var p = List[_Term[ModInt, W]]()
             swap(p, fresh[k])
@@ -749,11 +812,15 @@ def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], 
                 # Reduced outside the matrices, so a replay could not follow.
                 trace.usable = False
                 engine.sort_active(budget)
+                if not restored:
+                    store.restore(engine, engine.active.copy(), budget)
+                    restored = True
                 p = engine.reduce_base(p^, engine.active, budget)
                 if len(p) == 0:
                     continue
             engine.insert(p^, budget)
     store.extend(engine, budget)
+    store.release(engine)
     return _interreduce[W, record](engine, store, prime, ring, trace, budget)
 
 
@@ -764,13 +831,13 @@ def _f4_packed[W: Int](var generators: List[List[_Term[ModInt, W]]], kind: UInt8
     prime below 2^31; zero generators are allowed.
     """
     var trace = _Trace[W]()
-    return _f4_run[W, False](generators^, kind, ring, trace, budget)
+    return _f4_run[W, False](generators^, kind, ring, trace, budget).packed(budget)
 
 
 def _f4_learn[W: Int](var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
     """As `_f4_packed`, recording the run in `trace` for `_f4_replay`."""
     trace = _Trace[W]()
-    return _f4_run[W, True](generators^, kind, ring, trace, budget)
+    return _f4_run[W, True](generators^, kind, ring, trace, budget).packed(budget)
 
 
 def _replay_rows(found: _Rows, results: List[Int], supports: List[List[Int32]], mut values: List[List[UInt32]], mut budget: Budget) raises PolyError -> Bool:
@@ -1204,8 +1271,11 @@ def _f4_basis[W: Int](generators: List[SparsePoly[ModInt]], order: MonomialOrder
     var by_index = _priorities(order, budget)
     _allocation[SparsePoly[ModInt]](len(basis), budget)
     var result = List[SparsePoly[ModInt]](capacity=len(basis))
-    for p in basis:
+    for i in range(len(basis)):
         budget.charge(1)
+        # Each packed element goes as soon as it is unpacked.
+        var p = List[_Term[ModInt, W]]()
+        swap(p, basis[i])
         result.append(_unpack(p, order, ring, by_index, budget))
     return result^
 
