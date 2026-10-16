@@ -28,13 +28,14 @@ tells whether the division is exact. Products of long factors go through
 52-bit digits and AVX-512 IFMA where the target has it.
 """
 from std.bit import count_leading_zeros, count_trailing_zeros
+from std.collections import Dict
 from std.math import max, min
 from std.sys import CompilationTarget, llvm_intrinsic
 from std.time import perf_counter_ns
 from apn_mojo import Integer, div_rem_trunc, gcd as integer_gcd
 from .coefficients import Modulus, ZZ, _prime
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product
-from ._f4 import _LANES, _Lanes, _Matrix, _Primes, _Store, _mod_lanes
+from ._f4 import _LANES, _Lanes, _Matrix, _Primes, _Store, _mod_lanes, _raw_hash
 from ._packed_groebner import _Engine, _Packed, _Term, _div
 
 comptime _SLACK = 16
@@ -1134,12 +1135,26 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
     while len(engine.pairs):
         var degree = engine.pairs[0].lcm.degree
         var matrix = _Matrix[W]()
-        var halves = List[Int]()
+        # Both halves of every pair, as rows. A half is fixed by its element
+        # and its leading monomial, the pair's LCM, so equal halves share a row.
+        var halves = List[Tuple[Int, Int]]()
+        var seen = Dict[Int, Int]()
+        var stride = len(engine.polys)
         while len(engine.pairs) and engine.pairs[0].lcm.degree == degree:
             var pair = engine.select(budget)
-            halves.append(len(matrix.sources))
-            matrix.add_row(engine, store, pair.first, _div(pair.lcm, engine.leads[pair.first]), budget)
-            matrix.add_row(engine, store, pair.second, _div(pair.lcm, engine.leads[pair.second]), budget)
+            matrix.columns.reserve(1, budget)
+            var lead = Int(matrix.columns.find(pair.lcm, _raw_hash(pair.lcm)))
+            var rows = List[Int](capacity=2)
+            for source in [pair.first, pair.second]:
+                var key = lead * stride + source
+                var known = seen.get(key)
+                if known:
+                    rows.append(known.value())
+                    continue
+                seen[key] = len(matrix.sources)
+                rows.append(len(matrix.sources))
+                matrix.add_row(engine, store, source, _div(pair.lcm, engine.leads[source]), budget)
+            halves.append((rows[0], rows[1]))
         matrix.preprocess(engine, store, budget)
         var order = matrix.number(engine.kind, budget)
         var ncols = len(order)
@@ -1163,7 +1178,9 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
         var sample_modular = 0
         var sample_exact = 0
         var hint = 0
-        for a in halves:
+        for half in halves:
+            var a = half[0]
+            var b = half[1]
             var cheaper = sampled < _TIMED or 100 * sample_modular <= _RATIO * sample_exact
             var exactly = True
             var attempted = False
@@ -1179,7 +1196,7 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
                 var before = budget.remaining()
                 var t0 = _clock()
                 # The primes the last pair needed: attempts start a batch below.
-                k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, max(_FIRST_PRIMES, hint - _LANES), allowance, counts, budget)
+                k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, b, max(_FIRST_PRIMES, hint - _LANES), allowance, counts, budget)
                 spent = _weighted(Int(before - budget.remaining()) - (images.setup - setup))
                 counts[6] += Int(before - budget.remaining()) - (images.setup - setup)
                 counts[7] += _clock() - t0
@@ -1197,7 +1214,7 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
                 exact += 1
             var before = budget.remaining()
             var t = _clock()
-            if not _reduces(row, matrix, pivot, coefficients, a, quotient, budget):
+            if not _reduces(row, matrix, pivot, coefficients, a, b, quotient, budget):
                 return _Routes(False, modular, exact, used, counts.copy())
             var e = Int(before - budget.remaining())
             counts[8] += e
@@ -1210,9 +1227,8 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
     return _Routes(True, modular, exact, used, counts.copy())
 
 
-def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, a: Int, mut quotient: List[UInt64], mut budget: Budget) raises PolyError -> Bool:
-    """Whether the S-polynomial of matrix rows a and a + 1, which lead in one column, reduces to zero."""
-    var b = a + 1
+def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, a: Int, b: Int, mut quotient: List[UInt64], mut budget: Budget) raises PolyError -> Bool:
+    """Whether the S-polynomial of matrix rows a and b, which lead in one column, reduces to zero."""
     var ga = matrix.sources[a]
     var gb = matrix.sources[b]
     var lead_a: Integer
@@ -1801,15 +1817,14 @@ struct _LaneRow(Movable):
             word.unsafe_store(word.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
 
 
-def _lane_pass_two[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], values: List[List[UInt32]], others: List[List[UInt32]], primes: _Primes, more: _Primes, a: Int, batch: Int, limit: Int, mut budget: Budget) raises PolyError -> Bool:
+def _lane_pass_two[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], values: List[List[UInt32]], others: List[List[UInt32]], primes: _Primes, more: _Primes, a: Int, b: Int, batch: Int, limit: Int, mut budget: Budget) raises PolyError -> Bool:
     """As `_lane_pass` for batches `batch` and `batch` + 1 in one sweep, two `_LANES` apart in each column."""
     comptime S = 2 * _LANES
     var data = lanes.data.unsafe_ptr()
     var marks = lanes.marks.unsafe_ptr()
-    var b = a + 1
     var first = Int(matrix.entries[matrix.starts[a]])
     for half in range(2):
-        var r = a + half
+        var r = a if half == 0 else b
         var s = matrix.starts[r]
         var n = matrix.starts[r + 1] - s
         var columns = matrix.entries.unsafe_ptr().unsafe_offset(s)
@@ -1825,7 +1840,7 @@ def _lane_pass_two[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[
             at1.unsafe_store[width=_LANES](at1.unsafe_load[width=_LANES]() + f1 * v1.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]())
             var word = marks.unsafe_offset(c >> 6)
             word.unsafe_store(word.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
-    budget.charge(UInt64(S * (matrix.starts[b + 1] - matrix.starts[a])))
+    budget.charge(UInt64(S * (matrix.starts[a + 1] - matrix.starts[a] + matrix.starts[b + 1] - matrix.starts[b])))
     data.unsafe_offset(S * first).unsafe_store[width=_LANES](_Lanes(0))
     data.unsafe_offset(S * first + _LANES).unsafe_store[width=_LANES](_Lanes(0))
     lanes.marks.unsafe_get(first // 64) &= ~(UInt64(1) << UInt64(first % 64))
@@ -1874,8 +1889,8 @@ def _lane_pass_two[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[
     return True
 
 
-def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], values: List[List[UInt32]], primes: _Primes, a: Int, batch: Int, limit: Int, mut budget: Budget) raises PolyError -> Bool:
-    """Reduce S / L, for the S-polynomial of rows a and a + 1, in every lane, recording the entries reducers meet.
+def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], values: List[List[UInt32]], primes: _Primes, a: Int, b: Int, batch: Int, limit: Int, mut budget: Budget) raises PolyError -> Bool:
+    """Reduce S / L, for the S-polynomial of rows a and b, in every lane, recording the entries reducers meet.
 
     With L = la * lc(g_a) = lb * lc(g_b), S / L is the difference of the two
     monic rows. Returns False, with the row cleared, when a nonzero residue
@@ -1883,12 +1898,11 @@ def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int]
     exact check decides. Otherwise the row is zero again.
     """
     var data = lanes.data.unsafe_ptr()
-    var b = a + 1
     var sa = matrix.starts[a]
     var sb = matrix.starts[b]
     lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sa), values[matrix.sources[a]].unsafe_ptr(), matrix.starts[a + 1] - sa, _Lanes(1), primes.squares, 0)
     lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sb), values[matrix.sources[b]].unsafe_ptr(), matrix.starts[b + 1] - sb, primes.primes - 1, primes.squares, 0)
-    budget.charge(UInt64(_LANES * (matrix.starts[b + 1] - sa)))
+    budget.charge(UInt64(_LANES * (matrix.starts[a + 1] - sa + matrix.starts[b + 1] - sb)))
     var first = Int(matrix.entries[sa])
     data.unsafe_offset(_LANES * first).unsafe_store[width=_LANES](_Lanes(0))
     lanes.marks.unsafe_get(first // 64) &= ~(UInt64(1) << UInt64(first % 64))
@@ -1920,8 +1934,8 @@ def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int]
     return True
 
 
-def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, mut images: _PairPrimes, a: Int, first: Int, allowance: Int, mut counts: List[Int], mut budget: Budget) raises PolyError -> Int:
-    """The number of primes that proved the S-polynomial of rows a and a + 1 reduces to zero, or 0 if they did not.
+def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, mut images: _PairPrimes, a: Int, b: Int, first: Int, allowance: Int, mut counts: List[Int], mut budget: Budget) raises PolyError -> Int:
+    """The number of primes that proved the S-polynomial of rows a and b reduces to zero, or 0 if they did not.
 
     Modulo each prime p the reduction gives S = sum r_c R_c, R_c the row
     leading in column c. A denominator D and integers n_c = D r_c modulo the
@@ -1938,7 +1952,6 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
     besides those preparing primes. Every decision follows budget charges,
     so a route never depends on timing.
     """
-    var b = a + 1
     var ga = matrix.sources[a]
     var gb = matrix.sources[b]
     var la: Integer
@@ -1965,9 +1978,9 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
         var t0 = _clock()
         var passed: Bool
         if two:
-            passed = _lane_pass_two(lanes, matrix, pivot, images.values[batch], images.values[batch + 1], images.batches[batch], images.batches[batch + 1], a, batch, limit, budget)
+            passed = _lane_pass_two(lanes, matrix, pivot, images.values[batch], images.values[batch + 1], images.batches[batch], images.batches[batch + 1], a, b, batch, limit, budget)
         else:
-            passed = _lane_pass(lanes, matrix, pivot, images.values[batch], images.batches[batch], a, batch, limit, budget)
+            passed = _lane_pass(lanes, matrix, pivot, images.values[batch], images.batches[batch], a, b, batch, limit, budget)
         counts[0] += _clock() - t0
         if not passed:
             return 0
