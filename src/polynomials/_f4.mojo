@@ -548,7 +548,7 @@ def _reduce_row_in[small: Bool, W: Int](mut dense: List[UInt64], start: Int, piv
         c += 1
 
 
-comptime _BLOCK = 8
+comptime _BLOCK = 16
 """Rows `_eliminate` reduces at once, one per SIMD lane."""
 
 comptime _Block = SIMD[DType.uint64, _BLOCK]
