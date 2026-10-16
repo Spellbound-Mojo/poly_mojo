@@ -7,7 +7,9 @@ for every monomial a basis element's leading monomial divides (symbolic
 preprocessing), and row-reduces the resulting sparse matrix. Rows whose
 leading monomial no pivot covers are new basis elements; they are reduced by
 one another too, so each round's new elements are in reduced row echelon
-form, which keeps the rows they later contribute sparse. Pairs are still
+form, which keeps the rows they later contribute sparse. A new element whose
+leading monomial another new element's divides stays out of the active basis,
+and the next matrix reduces it as the pair of the two. Pairs are still
 pruned by the Gebauer–Möller criteria of the packed engine, which also stores
 the basis and computes the final reduced basis; the reduced basis is unique,
 so the result is the one Buchberger's algorithm returns.
@@ -47,7 +49,7 @@ from .coefficients import CoefficientRing, ModInt, Modulus
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product, _sum
 from .monomial import MonomialOrder
 from .sparse import SparsePoly
-from ._packed_groebner import _Engine, _Packed, _Term, _compare, _div, _divides, _equal, _mul, _pack, _packed, _priorities, _unpack
+from ._packed_groebner import _Engine, _Packed, _Pair, _Term, _compare, _div, _divides, _equal, _mul, _pack, _packed, _priorities, _unpack
 
 comptime _F4_PRIME_LIMIT = UInt64(1) << 31
 comptime _COLUMN_LIMIT = Int(Int32.MAX)
@@ -707,13 +709,10 @@ struct _Trace[W: Int](Movable):
     var inputs: List[List[_Packed[Self.W]]]
     """Each element's monomials after the start, in increasing order."""
     var steps: List[_Step[Self.W]]
-    var usable: Bool
-    """False when the run inserted an element outside its matrices."""
 
     def __init__(out self):
         self.inputs = List[List[_Packed[Self.W]]]()
         self.steps = List[_Step[Self.W]]()
-        self.usable = True
 
 
 def _eliminate[W: Int](matrix: _Matrix[W], mut pivot: List[Int], reduce: List[Int], values: List[List[UInt32]], prime: UInt64, ring: Modulus, mut found: _Rows, mut kept: List[Int], mut budget: Budget) raises PolyError -> List[Int]:
@@ -808,16 +807,20 @@ def _supports(found: _Rows, rows: List[Int], mut budget: Budget) raises PolyErro
     return supports^
 
 
-def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _Store[W], prime: UInt64, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
-    """Run one F4 round on the pairs of least LCM degree; return the new elements, monic."""
-    var degree = engine.pairs[0].lcm.degree
+def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _Store[W], var pairs: List[_Pair[W]], prime: UInt64, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
+    """Run one F4 round on `pairs`, then the pairs of least LCM degree; return the new elements, monic."""
+    if len(engine.pairs):
+        var degree = engine.pairs[0].lcm.degree
+        while len(engine.pairs) and engine.pairs[0].lcm.degree == degree:
+            _allocation[_Pair[W]](1, budget)
+            pairs.append(engine.select(budget))
     var matrix = _Matrix[W]()
-    # Both halves of every selected pair. A half is fixed by its element and
-    # its leading monomial, the pair's LCM, so equal halves are added once.
+    # Both halves of every pair. A half is fixed by its element and its
+    # leading monomial, the pair's LCM, so equal halves are added once; the
+    # first half added for a leading monomial is a pivot.
     var seen = Dict[Int, Bool]()
     var stride = len(engine.polys)
-    while len(engine.pairs) and engine.pairs[0].lcm.degree == degree:
-        var pair = engine.select(budget)
+    for pair in pairs:
         matrix.columns.reserve(1, budget)
         var lead = Int(matrix.columns.find(pair.lcm, _raw_hash(pair.lcm)))
         for source in [pair.first, pair.second]:
@@ -936,28 +939,35 @@ def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], 
                 monomials.append(t.monomial)
             trace.inputs.append(monomials^)
     var store = _Store[W]()
-    while len(engine.pairs):
+    var pending = List[_Pair[W]]()
+    while len(engine.pairs) or len(pending):
         budget.charge(1)
         engine.sort_active(budget)
         store.extend(engine, budget)
-        var fresh = _round[W, record](engine, store, prime, ring, trace, budget)
+        var fresh = _round[W, record](engine, store, pending^, prime, ring, trace, budget)
+        pending = List[_Pair[W]]()
         for k in range(len(fresh)):
             var p = List[_Term[ModInt, W]]()
             swap(p, fresh[k])
-            # An element found earlier in this round may divide this one's leading monomial.
-            var divided = False
+            # An element found earlier in this round may divide this one's
+            # leading monomial. The element then joins the basis outside the
+            # active ones, and the next matrix reduces it as the pair of the
+            # two, whose remainder holds what it adds; its own pairs would
+            # add nothing more.
+            var divisor = -1
             for g in engine.active:
                 budget.charge(1)
                 if _divides(engine.leads[g], p[len(p) - 1].monomial):
-                    divided = True
+                    divisor = g
                     break
-            if divided:
-                # Reduced outside the matrices, so a replay could not follow.
-                trace.usable = False
-                engine.sort_active(budget)
-                p = engine.reduce_base(p^, engine.active, budget)
-                if len(p) == 0:
-                    continue
+            if divisor >= 0:
+                var lead = p[len(p) - 1].monomial
+                _allocation[List[_Term[ModInt, W]]](1, budget)
+                engine.leads.append(lead)
+                engine.polys.append(p^)
+                _allocation[_Pair[W]](1, budget)
+                pending.append(_Pair[W](divisor, len(engine.polys) - 1, lead))
+                continue
             engine.insert(p^, budget)
     store.extend(engine, budget)
     return _interreduce[W, record](engine, store, prime, ring, trace, budget)
