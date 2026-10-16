@@ -1830,8 +1830,9 @@ def _exact_cost(units: Int, terms: Int, columns: Int) -> Int:
     """The exact check's cost model, in hundredths of a nanosecond on the
     calibration machine: from its budget units, the row terms it loaded and
     the columns after the pair's leading one (fitted over cyclic-7/8,
-    katsura-9/10, eco-10/11 and noon-8 to a few percent)."""
-    return 79 * units + 1030 * terms + 165 * columns
+    katsura-9/10, eco-10/11 and noon-8 to about fifteen percent, with the
+    ADX row kernels; refit with experiments/cert_reconstruct/calibrate_routes.py)."""
+    return 53 * units + 1258 * terms + 166 * columns
 
 
 def _modular_cost(lane_units: Int, crt_units: Int, slots: Int) -> Int:
@@ -1840,7 +1841,7 @@ def _modular_cost(lane_units: Int, crt_units: Int, slots: Int) -> Int:
     its attempts combine. Fitted as `_exact_cost`, refitted after the limb
     reconstruction of the proofs, to about twenty percent, and scaled up by a
     fifth so that close calls go to the exact check."""
-    return 25 * lane_units + 110 * crt_units + 20000 * slots
+    return 27 * lane_units + 106 * crt_units + 16760 * slots
 
 
 def _remainder_of(limbs: Pointer[mut=False, UInt64, _], n: Int, d: UInt64) -> UInt64:
