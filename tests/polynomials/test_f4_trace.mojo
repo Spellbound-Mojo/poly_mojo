@@ -89,9 +89,7 @@ def check_system(generators: List[SparsePoly[QQ]], order: MonomialOrder, name: S
     var first = Modulus(primes[0], work)
     var trace = _Trace[8]()
     var learned = _f4_learn[8](packed_mod(generators, first, order, work), order.kind, first, trace, work)
-    c.check(same(learned.packed[8](trace), _f4_packed[8](packed_mod(generators, first, order, work), order.kind, first, work)), name + ": recording leaves the run unchanged")
-    if not trace.usable:
-        return
+    c.check(same(learned, _f4_packed[8](packed_mod(generators, first, order, work), order.kind, first, work)), name + ": recording leaves the run unchanged")
     var replays = 0
     for i in range(1, len(primes)):
         var ctx = Modulus(primes[i], work)
@@ -115,12 +113,12 @@ def check_system(generators: List[SparsePoly[QQ]], order: MonomialOrder, name: S
             rings.append(Modulus(prime, work))
             batch.append(packed_mod(generators, rings[l], order, work))
         var bases = _f4_replay_lanes[8](trace, batch^, order.kind, rings, work)
-        c.check(bases.count <= _LANES, name + ": a batch has a basis per lane at most")
-        for l in range(min(bases.count + 1, _LANES)):
+        c.check(len(bases) <= _LANES, name + ": a batch has a basis per lane at most")
+        for l in range(min(len(bases) + 1, _LANES)):
             var single = _f4_replay[8](trace, packed_mod(generators, rings[l], order, work), order.kind, rings[l], work)
             var label = name + ": batch " + String(shift) + ", lane " + String(l)
-            if l < bases.count:
-                c.check(Bool(single) and same(single.value(), bases.basis[8](l, trace)), label + " replays as alone")
+            if l < len(bases):
+                c.check(Bool(single) and same(single.value(), bases[l]), label + " replays as alone")
             else:
                 c.check(not single, label + ", the first left out, declines alone")
 

@@ -37,7 +37,7 @@ are corrected once at the end.
 cofactors are tracked, and converts the basis back to sparse polynomials.
 """
 from std.bit import pop_count
-from std.math import iota, max
+from std.math import iota, max, min
 from apn_mojo import Integer, Rational
 from .coefficients import CoefficientField, CoefficientRing, ModInt, NoContext, QQ, ZZ, _work
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
@@ -256,9 +256,10 @@ def _pack[C: CoefficientRing, W: Int](p: SparsePoly[C], order: MonomialOrder, mu
 
 
 def _monomial[W: Int](packed: _Packed[W], order: MonomialOrder, by_index: List[Int], mut budget: Budget) raises PolyError -> Monomial:
+    var exponents = packed.exponents()
     var pairs = List[Tuple[Int64, UInt32]](capacity=Int(pop_count(packed.support)))
     for lane in by_index:
-        var e = packed.exponents()[lane]
+        var e = exponents[lane]
         if e:
             pairs.append((order.variables[lane], e))
     _allocation[Tuple[Int64, UInt32]](len(pairs), budget)
@@ -670,21 +671,43 @@ struct _Engine[C: CoefficientRing, W: Int, integral: Bool](Movable):
         var mh = self.leads[index]
         _allocation[_Packed[Self.W]](len(self.active), budget)
         var lcms = List[_Packed[Self.W]](capacity=len(self.active))
+        # The supports and degrees apart, to rule out most divisions cheaply.
+        _allocation[UInt64](len(self.active), budget)
+        var keys = List[UInt64](capacity=len(self.active) + 8)
         for old in self.active:
             budget.charge(1)
-            lcms.append(_lcm(mh, self.leads[old]))
+            var lcm = _lcm(mh, self.leads[old])
+            keys.append((lcm.degree << 32) | UInt64(lcm.support))
+            lcms.append(lcm)
+        # Padding no key passes: its degree exceeds every degree.
+        for _ in range(8):
+            keys.append(UInt64.MAX)
         _allocation[Int](len(self.active), budget)
         var kept = List[Int](capacity=len(self.active))
-        for i in range(len(self.active)):
+        var count = len(self.active)
+        for i in range(count):
             budget.charge(1)
             var product = _equal(_mul(mh, self.leads[self.active[i]]), lcms[i])
             var redundant = False
             if not product:
-                for j in range(i + 1, len(self.active)):
-                    budget.charge(1)
-                    if _divides(lcms[j], lcms[i]):
-                        redundant = True
-                        break
+                var key = keys.unsafe_get(i)
+                var degree = key >> 32
+                var outside = ~key & 0xFFFFFFFF
+                var j = i + 1
+                while j < count:
+                    # Eight keys at a time; the first that passes and divides counts.
+                    var block = keys.unsafe_ptr().unsafe_offset(j).unsafe_load[width=8]()
+                    var passing = (block >> 32).le(degree) & (block & outside).eq(0)
+                    if passing.reduce_or():
+                        for k in range(min(8, count - j)):
+                            if passing[k] and _divides(lcms.unsafe_get(j + k), lcms.unsafe_get(i)):
+                                redundant = True
+                                j += k
+                                break
+                        if redundant:
+                            break
+                    j += 8
+                budget.charge(UInt64(min(j + 1, count) - (i + 1)))
                 if not redundant:
                     for j in kept:
                         budget.charge(1)
@@ -746,14 +769,19 @@ struct _Engine[C: CoefficientRing, W: Int, integral: Bool](Movable):
             self._sift_pairs(0, budget)
         return selected
 
-    def insert(mut self, var p: List[_Term[Self.C, Self.W]], mut budget: Budget) raises PolyError:
-        """Normalize p, add it to the basis, and install its pairs."""
+    def insert(mut self, var p: List[_Term[Self.C, Self.W]], mut budget: Budget, heap: Bool = True) raises PolyError:
+        """Normalize p, add it to the basis, and install its pairs.
+
+        Without `heap` the pairs are left unordered, for a caller that
+        inserts several elements and then calls `heapify_pairs` once.
+        """
         _normalize[Self.C, Self.W, Self.integral](p, self.ring, budget)
         _allocation[List[_Term[Self.C, Self.W]]](1, budget)
         self.leads.append(p[len(p) - 1].monomial)
         self.polys.append(p^)
         self.install(len(self.polys) - 1, budget)
-        self.heapify_pairs(budget)
+        if heap:
+            self.heapify_pairs(budget)
 
     def start(mut self, var generators: List[List[_Term[Self.C, Self.W]]], mut budget: Budget) raises PolyError:
         """Reduce each generator against the basis so far and insert the nonzero ones."""

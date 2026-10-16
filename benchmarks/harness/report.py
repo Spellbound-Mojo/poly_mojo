@@ -139,9 +139,7 @@ def summary_table(records, tools, key, floor, title):
              '|---|' + '---|' * len(competitors)]
     for group in sorted(totals):
         row = []
-        for t in tools:
-            if t == BASE:
-                continue
+        for t in competitors:
             values = groups[group].get(t, [])
             g = geomean(values)
             row.append(f'{g:.3g} (*n* = {len(values)})' if g else '—')
