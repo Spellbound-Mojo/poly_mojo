@@ -172,6 +172,11 @@ struct _Columns[W: Int](Movable):
 
 def _sort_descending[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) raises PolyError -> List[Int]:
     """Indices of `monomials` from greatest to least, by bottom-up merge sort."""
+    comptime if W <= 8:
+        if len(monomials) < (1 << 32):
+            var keys = _keys(kind, monomials, budget)
+            if keys:
+                return _sort_keys(keys.take(), budget)
     var n = len(monomials)
     _allocation[Int](2 * n, budget)
     var order = List[Int](capacity=n)
@@ -207,6 +212,76 @@ def _sort_descending[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budge
             start = end
         swap(order, scratch)
         width *= 2
+    return order^
+
+
+def _keys[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) raises PolyError -> Optional[List[UInt128]]:
+    """Keys whose integer order is the monomial order, each with its index in the low 32 bits; None unless every exponent is below 2^8 and every degree below 2^16.
+
+    From the top: the degree (zero under LEX), then one byte per lane in
+    the order that decides, which under GREVLEX is from the last lane up,
+    with the exponent complemented, since a smaller one there is greater.
+    """
+    comptime assert W <= 8, "one byte per lane in 64 bits"
+    var n = len(monomials)
+    _allocation[UInt128](n, budget)
+    budget.charge(UInt64(n))
+    var keys = List[UInt128](capacity=n)
+    for i in range(n):
+        ref m = monomials.unsafe_get(i)
+        var e = m.exponents()
+        if m.degree >= (1 << 16) or e.reduce_max() >= 256:
+            return None
+        var digits = UInt64(0)
+        comptime for j in range(W):
+            var lane = UInt64(e[W - 1 - j]) if kind == MonomialOrder.GREVLEX else UInt64(e[j])
+            var digit = UInt64(255) - lane if kind == MonomialOrder.GREVLEX else lane
+            digits |= digit << UInt64(8 * (7 - j))
+        var degree = UInt128(0) if kind == MonomialOrder.LEX else UInt128(m.degree)
+        keys.append((degree << 112) | (UInt128(digits) << 48) | UInt128(i))
+    return keys^
+
+
+def _sort_keys(var keys: List[UInt128], mut budget: Budget) raises PolyError -> List[Int]:
+    """The indices in the low 32 bits of distinct keys, by decreasing key."""
+    var n = len(keys)
+    _allocation[UInt128](n, budget)
+    var scratch = List[UInt128](length=n, fill=0)
+    var width = 1
+    while width < n:
+        budget.charge(UInt64(n))
+        var start = 0
+        while start < n:
+            var middle = min(start + width, n)
+            var end = min(start + 2 * width, n)
+            var i = start
+            var j = middle
+            var k = start
+            while i < middle and j < end:
+                var x = keys.unsafe_get(i)
+                var y = keys.unsafe_get(j)
+                if y > x:
+                    scratch.unsafe_get(k) = y
+                    j += 1
+                else:
+                    scratch.unsafe_get(k) = x
+                    i += 1
+                k += 1
+            while i < middle:
+                scratch.unsafe_get(k) = keys.unsafe_get(i)
+                i += 1
+                k += 1
+            while j < end:
+                scratch.unsafe_get(k) = keys.unsafe_get(j)
+                j += 1
+                k += 1
+            start = end
+        swap(keys, scratch)
+        width *= 2
+    _allocation[Int](n, budget)
+    var order = List[Int](capacity=n)
+    for k in range(n):
+        order.append(Int(keys.unsafe_get(k) & UInt128(0xFFFFFFFF)))
     return order^
 
 

@@ -8,8 +8,8 @@ primes; and recording must not change the run it records.
 """
 from apn_mojo import Rational
 from polynomials import Budget, QQ, ModInt, Modulus, NoContext, SparsePoly, Term, Monomial, MonomialOrder
-from polynomials._f4 import _Trace, _f4_learn, _f4_packed, _f4_replay
-from polynomials._packed_groebner import _Term, _equal, _pack
+from polynomials._f4 import _Trace, _f4_learn, _f4_packed, _f4_replay, _sort_descending
+from polynomials._packed_groebner import _Packed, _Term, _compare, _equal, _pack, _packed
 from support.check import Checker
 from support.corpus import as_mod
 from support.rng import SplitMix64
@@ -101,9 +101,37 @@ def check_system(generators: List[SparsePoly[QQ]], order: MonomialOrder, name: S
     c.check(replays > 0, name + ": some replay succeeds")
 
 
+def check_column_order(mut c: Checker, mut work: Budget) raises:
+    """Column sorting puts distinct monomials in strictly decreasing order, by keys or comparisons."""
+    var rng = SplitMix64(23)
+    for kind in [MonomialOrder.LEX, MonomialOrder.GRLEX, MonomialOrder.GREVLEX]:
+        for large in [False, True]:
+            var monomials = List[_Packed[8]]()
+            for i in range(600):
+                var e = SIMD[DType.uint32, 8](0)
+                for lane in range(6):
+                    e[lane] = UInt32(rng.below(4))
+                # Exponents of 256 and more take the comparison sort.
+                if large and i % 50 == 0:
+                    e[0] = UInt32(300)
+                var fresh = True
+                for m in monomials:
+                    if _equal(m, _packed[8](e)):
+                        fresh = False
+                if fresh:
+                    monomials.append(_packed[8](e))
+            var order = _sort_descending(kind, monomials, work)
+            var decreasing = len(order) == len(monomials)
+            for k in range(1, len(order)):
+                if _compare(kind, monomials[order[k - 1]], monomials[order[k]]) <= 0:
+                    decreasing = False
+            c.check(decreasing, "column order, kind " + String(kind) + (" with large exponents" if large else ""))
+
+
 def main() raises:
     var work = Budget()
     var c = Checker("f4 trace")
+    check_column_order(c, work)
     var o5 = MonomialOrder(MonomialOrder.GREVLEX, [0, 1, 2, 3, 4], work)
     var o6 = MonomialOrder(MonomialOrder.GREVLEX, [0, 1, 2, 3, 4, 5], work)
     var g6 = MonomialOrder(MonomialOrder.GRLEX, [0, 1, 2, 3, 4, 5], work)
