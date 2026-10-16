@@ -1142,6 +1142,21 @@ def _reduced_tails[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget)
     var quotient = List[UInt64]()
     var result = List[List[_Term[ZZ, W]]](capacity=basis_rows)
     for r in range(basis_rows):
+        # A row with no tail column that some row leads is already reduced.
+        var reducible = False
+        budget.charge(UInt64(matrix.starts[r + 1] - matrix.starts[r]))
+        for k in range(matrix.starts[r] + 1, matrix.starts[r + 1]):
+            if pivot[Int(matrix.entries[k])] >= 0:
+                reducible = True
+                break
+        if not reducible:
+            ref p = engine.polys[matrix.sources[r]]
+            _allocation[_Term[ZZ, W]](len(p), budget)
+            var terms = List[_Term[ZZ, W]](capacity=len(p))
+            for t in p:
+                terms.append(_Term[ZZ, W](t.monomial, t.coefficient.copy()))
+            result.append(terms^)
+            continue
         row.prepare(coefficients.bits[matrix.sources[r]] + 1, budget)
         _load(row, matrix, coefficients, r, unit, False, False, budget)
         var first = Int(matrix.entries[matrix.starts[r]])
