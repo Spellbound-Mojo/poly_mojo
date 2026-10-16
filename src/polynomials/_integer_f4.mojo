@@ -30,10 +30,11 @@ tells whether the division is exact. Products of long factors go through
 from std.bit import count_leading_zeros, count_trailing_zeros
 from std.math import max, min
 from std.sys import CompilationTarget, llvm_intrinsic
+from std.time import perf_counter_ns
 from apn_mojo import Integer, div_rem_trunc, gcd as integer_gcd
-from .coefficients import ZZ
+from .coefficients import Modulus, ZZ, _prime
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product
-from ._f4 import _Matrix, _Store
+from ._f4 import _LANES, _Lanes, _Matrix, _Primes, _Store, _mod_lanes
 from ._packed_groebner import _Engine, _Packed, _Term, _div
 
 comptime _SLACK = 16
@@ -1054,11 +1055,43 @@ def _pairs_reduce_to_zero[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: 
 
     The active elements must have mutually nondividing leading monomials.
     """
+    var routes = _pair_routes(engine, budget, _PAIR_PRIMES)
+    comptime if _CERT_STATS:
+        print("CERT pass_ms", routes.counts[0] // 1000000, "prove_ms", routes.counts[1] // 1000000, "attempts", routes.counts[2], "fractions", routes.counts[3], "slots combined", routes.counts[4], "fraction_ms", routes.counts[5] // 1000000)
+        print("CERT pairs", routes.modular + routes.exact, "modular", routes.modular, "exact", routes.exact, "primes/modular pair", Float64(routes.primes) / Float64(max(routes.modular, 1)))
+    return routes.zero
+
+
+@fieldwise_init
+struct _Routes(Copyable, Movable):
+    """How `_pair_routes` decided: whether every pair reduced to zero, and how many pairs each route proved."""
+    var zero: Bool
+    var modular: Int
+    var exact: Int
+    var primes: Int
+    """Primes the modularly proved pairs used, in all."""
+    var counts: List[Int]
+
+
+def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, primes: Int) raises PolyError -> _Routes:
+    """As `_pairs_reduce_to_zero`, which it decides, with up to `primes` primes per pair.
+
+    Each pair first tries a standard representation found modulo up to
+    `primes` primes (`_modular_pair`); a pair it does not prove, and every
+    pair when `primes` is below `_LANES`, is reduced exactly over the
+    integers. Stops at the first pair that does not reduce to zero.
+    """
     engine.sort_active(budget)
     var store = _Store[W]()
     store.extend(engine, budget)
     var coefficients = _Coefficients(engine, budget)
+    var images = _PairPrimes(coefficients, primes, budget)
+    var counts = List[Int](length=6, fill=0)
+    # With `_CERT_STATS`: nanoseconds in passes and in proofs, attempts, fractions, slots combined.
     var quotient = List[UInt64]()
+    var modular = 0
+    var exact = 0
+    var used = 0
     while len(engine.pairs):
         var degree = engine.pairs[0].lcm.degree
         var matrix = _Matrix[W]()
@@ -1077,10 +1110,26 @@ def _pairs_reduce_to_zero[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: 
         for r in range(nrows - 1, -1, -1):
             pivot[Int(matrix.entries[matrix.starts[r]])] = r
         var row = _Row(ncols)
+        var lanes = _LaneRow(ncols, budget)
+        # Once most of a degree's pairs need the exact check, its other pairs go there directly.
+        var tried = 0
+        var failed = 0
+        # The primes the last pair needed: the next attempts start a batch below.
+        var hint = 0
         for a in halves:
+            if images.limit > 0 and (failed < _GIVE_UP or 2 * failed <= tried):
+                tried += 1
+                var k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, max(_FIRST_PRIMES, hint - _LANES), counts, budget)
+                if k > 0:
+                    modular += 1
+                    used += k
+                    hint = k
+                    continue
+                failed += 1
+            exact += 1
             if not _reduces(row, matrix, pivot, coefficients, a, quotient, budget):
-                return False
-    return True
+                return _Routes(False, modular, exact, used, counts.copy())
+    return _Routes(True, modular, exact, used, counts.copy())
 
 
 def _reduces[W: Int](mut row: _Row, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, a: Int, mut quotient: List[UInt64], mut budget: Budget) raises PolyError -> Bool:
@@ -1303,3 +1352,515 @@ def _long_terms[W: Int, minus: Bool](mut row: _Row, matrix: _Matrix[W], coeffici
             row.subtract_product(c, factor, limbs, starts.unsafe_get(k), starts.unsafe_get(k + 1), bits)
         else:
             row.add_product(c, factor, limbs, starts.unsafe_get(k), starts.unsafe_get(k + 1), bits)
+
+
+comptime _PAIR_PRIMES = 128
+"""Primes a pair's modular standard representation may use before the pair is reduced exactly."""
+
+comptime _FIRST_PRIMES = _LANES
+"""Primes of a pair's first attempt; each later batch of `_LANES` primes makes another."""
+
+comptime _GIVE_UP = 4
+"""Pairs of a degree that must fail modularly, and be most of those tried, before the rest skip the modular attempt."""
+
+comptime _CERT_STATS = False
+"""Whether certification prints how many pairs each route proved."""
+
+
+def _remainder_of(limbs: Pointer[mut=False, UInt64, _], n: Int, d: UInt64) -> UInt64:
+    var r = UInt128(0)
+    for l in range(n - 1, -1, -1):
+        r = ((r << 64) | UInt128(limbs.unsafe_offset(l).unsafe_load())) % UInt128(d)
+    return UInt64(r)
+
+
+def _power(var b: UInt64, var e: UInt64, p: UInt64) -> UInt64:
+    var r = UInt64(1)
+    b %= p
+    while e:
+        if e & 1:
+            r = r * b % p
+        b = b * b % p
+        e >>= 1
+    return r
+
+
+def _residue_of(value: Integer, p: UInt64) -> UInt64:
+    var limbs = _limbs_of(value)
+    var x = _remainder_of(limbs.unsafe_ptr(), len(limbs), p)
+    if value.sign() < 0 and x != 0:
+        x = p - x
+    return x
+
+
+struct _Basis(Movable):
+    """The CRT basis of the first k primes, as `_Crt` in `_rational_groebner`: for
+    product Q, Q_i = Q / p_i and c_i = Q_i^-1 modulo p_i, residues r_i give
+    x = sum r_i e_i - m Q with e_i = c_i Q_i and m = floor(sum r_i c_i / p_i)."""
+    var product: List[UInt64]
+    var basis: List[UInt64]
+    var weights: List[Float64]
+    var limbs: Int
+    var modulus: Integer
+    var bits: Int
+    """The bit length of Q."""
+
+    def __init__(out self, primes: List[UInt64], k: Int, mut budget: Budget) raises PolyError:
+        self.product = [UInt64(1)]
+        for i in range(k):
+            budget.charge(UInt64(len(self.product)))
+            var carry = UInt128(0)
+            for l in range(len(self.product)):
+                var x = UInt128(self.product[l]) * UInt128(primes[i]) + carry
+                self.product[l] = UInt64(x & UInt128(UInt64.MAX))
+                carry = x >> 64
+            if carry:
+                self.product.append(UInt64(carry))
+        self.limbs = len(self.product)
+        self.bits = _bits(self.product)
+        _allocation[UInt64](_product(k, self.limbs), budget)
+        self.basis = List[UInt64](length=k * self.limbs, fill=0)
+        self.weights = List[Float64](capacity=k)
+        for i in range(k):
+            var prime = primes[i]
+            budget.charge(UInt64(3 * self.limbs))
+            var cofactor = self.product.copy()
+            _divide(cofactor, prime)
+            var c = _power(_remainder(cofactor, prime), prime - 2, prime)
+            var carry = UInt128(0)
+            for l in range(self.limbs):
+                var x = (UInt128(cofactor[l]) if l < len(cofactor) else UInt128(0)) * UInt128(c) + carry
+                self.basis[i * self.limbs + l] = UInt64(x & UInt128(UInt64.MAX))
+                carry = x >> 64
+            self.weights.append(Float64(c) / Float64(prime))
+        var bytes = List[UInt8](length=8 * self.limbs, fill=0)
+        for l in range(self.limbs):
+            comptime for shift in range(8):
+                bytes[8 * l + shift] = UInt8((self.product[l] >> UInt64(8 * shift)) & 0xFF)
+        self.modulus = Integer.from_bytes(bytes)
+
+    def value(self, residues: List[UInt64], mut work: List[UInt64], mut budget: Budget) raises PolyError:
+        """Set work (limbs + 2 limbs) to the number below Q with the given residues."""
+        var k = len(self.weights)
+        budget.charge(UInt64(_product(k, self.limbs)))
+        var n = self.limbs + 2
+        var data = work.unsafe_ptr()
+        for l in range(n):
+            data.unsafe_offset(l).unsafe_store(0)
+        var estimate = Float64(0)
+        for i in range(k):
+            var r = residues.unsafe_get(i)
+            if r == 0:
+                continue
+            _add_mul_1(data, n, r, self.basis.unsafe_ptr().unsafe_offset(i * self.limbs), self.limbs)
+            estimate += Float64(r) * self.weights.unsafe_get(i)
+        var m = UInt64(estimate)
+        if m:
+            _sub_mul_1(data, n, m, self.product.unsafe_ptr(), self.limbs)
+        while (data.unsafe_offset(n - 1).unsafe_load() >> 63) != 0:
+            _add_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
+        while _compare_limbs(work, self.product) >= 0:
+            _sub_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
+
+
+def _compare_limbs(x: List[UInt64], y: List[UInt64]) -> Int:
+    """The sign of x - y for nonnegative limb strings, ignoring lengths."""
+    for l in range(max(len(x), len(y)) - 1, -1, -1):
+        var a = x[l] if l < len(x) else UInt64(0)
+        var b = y[l] if l < len(y) else UInt64(0)
+        if a != b:
+            return 1 if a > b else -1
+    return 0
+
+
+def _limbs_to_integer(limbs: List[UInt64], n: Int) -> Integer:
+    var bytes = List[UInt8](length=8 * n, fill=0)
+    for l in range(n):
+        comptime for shift in range(8):
+            bytes[8 * l + shift] = UInt8((limbs[l] >> UInt64(8 * shift)) & 0xFF)
+    return Integer.from_bytes(bytes)
+
+
+struct _PairPrimes(Movable):
+    """Primes below 2^31 that divide no leading coefficient, `_LANES` at a time,
+    with each element's coefficients modulo them made monic, and the CRT basis
+    of each attempt's primes."""
+    var limit: Int
+    """Primes a pair may use: a multiple of `_LANES`, or zero."""
+    var primes: List[UInt64]
+    var batches: List[_Primes]
+    var values: List[List[List[UInt32]]]
+    """Per batch and element, its monic coefficients, `_LANES` residues per term."""
+    var inverses: List[List[UInt64]]
+    """Per batch, each element's leading coefficient inverse, `_LANES` per element."""
+    var bases: List[_Basis]
+    """The CRT basis of the first `_LANES` * (i + 1) primes."""
+
+    def __init__(out self, coefficients: _Coefficients, limit: Int, mut budget: Budget) raises PolyError:
+        self.limit = (limit // _LANES) * _LANES
+        self.primes = List[UInt64]()
+        self.batches = List[_Primes]()
+        self.values = List[List[List[UInt32]]]()
+        self.inverses = List[List[UInt64]]()
+        self.bases = List[_Basis]()
+        var candidate = UInt64(1) << 31
+        while len(self.primes) < self.limit:
+            candidate -= 1
+            budget.charge(1)
+            if not _prime(candidate, budget):
+                continue
+            var divides = False
+            for lead in coefficients.leads:
+                if _residue_of(lead, candidate) == 0:
+                    divides = True
+                    break
+            if not divides:
+                self.primes.append(candidate)
+
+    def ensure(mut self, batch: Int, coefficients: _Coefficients, mut budget: Budget) raises PolyError:
+        """Prepare the residues of batches up to `batch`."""
+        while len(self.batches) <= batch:
+            var b = len(self.batches)
+            var rings = List[Modulus]()
+            for l in range(_LANES):
+                rings.append(Modulus(_prime_value=self.primes[_LANES * b + l]))
+            var lanes = _Primes(rings)
+            var values = List[List[UInt32]]()
+            var inverses = List[UInt64](length=_LANES * len(coefficients.limbs), fill=0)
+            for g in range(len(coefficients.limbs)):
+                var n = len(coefficients.starts[g]) - 1
+                budget.charge(UInt64(_product(_LANES, len(coefficients.limbs[g]) + n)))
+                _allocation[UInt32](_LANES * n, budget)
+                var r = List[UInt32](length=_LANES * n, fill=0)
+                ref limbs = coefficients.limbs[g]
+                ref starts = coefficients.starts[g]
+                for l in range(_LANES):
+                    var p = lanes.primes[l]
+                    var lead = _remainder_of(limbs.unsafe_ptr().unsafe_offset(starts[0]), starts[1] - starts[0], p)
+                    var inverse = _power(lead, p - 2, p)
+                    inverses[_LANES * g + l] = inverse
+                    for k in range(n):
+                        var x = _remainder_of(limbs.unsafe_ptr().unsafe_offset(starts[k]), starts[k + 1] - starts[k], p)
+                        if coefficients.negative[g][k] and x != 0:
+                            x = p - x
+                        r[_LANES * k + l] = UInt32(x * inverse % p)
+                values.append(r^)
+            self.batches.append(lanes^)
+            self.values.append(values^)
+            self.inverses.append(inverses^)
+
+    def basis(mut self, attempt: Int, mut budget: Budget) raises PolyError:
+        """Prepare the CRT basis of attempt `attempt`."""
+        while len(self.bases) <= attempt:
+            self.bases.append(_Basis(self.primes, _LANES * (len(self.bases) + 1), budget))
+
+
+struct _LaneRow(Movable):
+    """A dense row with a residue per lane prime in each column, and a mark per written column."""
+    var data: List[UInt64]
+    var marks: List[UInt64]
+    var ncols: Int
+    var slot: List[Int]
+    """Per column, the quotient slot of the pair being reduced, or -1."""
+    var columns: List[Int]
+    """Per slot, its column."""
+    var residues: List[UInt32]
+    """Per slot, `limit` residues of the entry the reducer met, prime by prime."""
+
+    def __init__(out self, ncols: Int, mut budget: Budget) raises PolyError:
+        _allocation[UInt64](_product(_LANES + 1, ncols), budget)
+        self.ncols = ncols
+        self.data = List[UInt64](length=_LANES * ncols, fill=0)
+        self.marks = List[UInt64](length=ncols // 64 + 1, fill=0)
+        self.slot = List[Int](length=ncols, fill=-1)
+        self.columns = List[Int]()
+        self.residues = List[UInt32]()
+
+    @always_inline
+    def mark(mut self, c: Int):
+        self.marks.unsafe_get(c // 64) |= UInt64(1) << UInt64(c % 64)
+
+    def next_marked(self, c: Int) -> Int:
+        if c >= self.ncols:
+            return self.ncols
+        var w = c // 64
+        var word = self.marks.unsafe_get(w) & (UInt64.MAX << UInt64(c % 64))
+        while word == 0:
+            w += 1
+            if w >= len(self.marks):
+                return self.ncols
+            word = self.marks.unsafe_get(w)
+        return min(64 * w + Int(count_trailing_zeros(word)), self.ncols)
+
+    def clear(mut self):
+        """Zero every marked column and forget the slots."""
+        for w in range(len(self.marks)):
+            var word = self.marks.unsafe_get(w)
+            while word != 0:
+                var c = 64 * w + Int(count_trailing_zeros(word))
+                self.data.unsafe_ptr().unsafe_offset(_LANES * c).unsafe_store[width=_LANES](_Lanes(0))
+                word &= word - 1
+            self.marks.unsafe_get(w) = 0
+        for c in self.columns:
+            self.slot.unsafe_get(c) = -1
+        self.columns.clear()
+        self.residues.clear()
+
+    def add(mut self, columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factor: _Lanes, squares: _Lanes, skip: Int):
+        """Add factor times a row of residues, after its first `skip` entries; entries stay below p^2."""
+        var data = self.data.unsafe_ptr()
+        var marks = self.marks.unsafe_ptr()
+        for k in range(skip, n):
+            var c = Int(columns.unsafe_offset(k).unsafe_load())
+            var at = data.unsafe_offset(_LANES * c)
+            var x = at.unsafe_load[width=_LANES]() + factor * values.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
+            at.unsafe_store[width=_LANES](x.ge(squares).select(x - squares, x))
+            var word = marks.unsafe_offset(c >> 6)
+            word.unsafe_store(word.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
+
+
+def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], values: List[List[UInt32]], primes: _Primes, a: Int, batch: Int, limit: Int, mut budget: Budget) raises PolyError -> Bool:
+    """Reduce S / L, for the S-polynomial of rows a and a + 1, in every lane, recording the entries reducers meet.
+
+    With L = la * lc(g_a) = lb * lc(g_b), S / L is the difference of the two
+    monic rows. Returns False, with the row cleared, when a nonzero residue
+    meets a column no row leads in: then S does not reduce to zero, and the
+    exact check decides. Otherwise the row is zero again.
+    """
+    var data = lanes.data.unsafe_ptr()
+    var b = a + 1
+    var sa = matrix.starts[a]
+    var sb = matrix.starts[b]
+    lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sa), values[matrix.sources[a]].unsafe_ptr(), matrix.starts[a + 1] - sa, _Lanes(1), primes.squares, 0)
+    lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sb), values[matrix.sources[b]].unsafe_ptr(), matrix.starts[b + 1] - sb, primes.primes - 1, primes.squares, 0)
+    budget.charge(UInt64(_LANES * (matrix.starts[b + 1] - sa)))
+    var first = Int(matrix.entries[sa])
+    data.unsafe_offset(_LANES * first).unsafe_store[width=_LANES](_Lanes(0))
+    lanes.marks.unsafe_get(first // 64) &= ~(UInt64(1) << UInt64(first % 64))
+    var c = lanes.next_marked(first + 1)
+    while c < lanes.ncols:
+        lanes.marks.unsafe_get(c // 64) &= ~(UInt64(1) << UInt64(c % 64))
+        var at = data.unsafe_offset(_LANES * c)
+        var v = _mod_lanes(at.unsafe_load[width=_LANES](), primes)
+        at.unsafe_store[width=_LANES](_Lanes(0))
+        if v.ne(0).reduce_or():
+            var q = pivot.unsafe_get(c)
+            if q < 0:
+                lanes.clear()
+                return False
+            var slot = lanes.slot.unsafe_get(c)
+            if slot < 0:
+                slot = len(lanes.columns)
+                lanes.slot.unsafe_get(c) = slot
+                lanes.columns.append(c)
+                lanes.residues.resize(len(lanes.residues) + limit, 0)
+            var to = lanes.residues.unsafe_ptr().unsafe_offset(slot * limit + _LANES * batch)
+            to.unsafe_store[width=_LANES](v.cast[DType.uint32]())
+            var s = matrix.starts.unsafe_get(q)
+            var n = matrix.starts.unsafe_get(q + 1) - s
+            budget.charge(UInt64(_LANES * n))
+            var factor = v.eq(0).select(_Lanes(0), primes.primes - v)
+            lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(s), values[matrix.sources.unsafe_get(q)].unsafe_ptr(), n, factor, primes.squares, 1)
+        c = lanes.next_marked(c + 1)
+    return True
+
+
+def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, mut images: _PairPrimes, a: Int, first: Int, mut counts: List[Int], mut budget: Budget) raises PolyError -> Int:
+    """The number of primes that proved the S-polynomial of rows a and a + 1 reduces to zero, or 0 if they did not.
+
+    Modulo each prime p the reduction gives S = sum r_c R_c, R_c the row
+    leading in column c. A denominator D and integers n_c = D r_c modulo the
+    product Q of the primes are found by rational reconstruction; when Q
+    exceeds twice a bound on the coefficients of D S - sum n_c R_c, that
+    difference, zero modulo Q, is zero, so S has the standard representation
+    sum (n_c / D) R_c. Nothing else is assumed, so a wrong reconstruction can
+    only fail.
+    """
+    var b = a + 1
+    var ga = matrix.sources[a]
+    var gb = matrix.sources[b]
+    var la: Integer
+    var lb: Integer
+    var multiple: Integer
+    try:
+        var common = integer_gcd(coefficients.leads[ga], coefficients.leads[gb])
+        la = div_rem_trunc(coefficients.leads[gb], common)[0].copy()
+        lb = div_rem_trunc(coefficients.leads[ga], common)[0].copy()
+        multiple = la * coefficients.leads[ga]
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    # S = la R_a - lb R_b bounds its coefficients by 2^s.
+    var s_bits = max(coefficients.bits[ga] + la.magnitude_bit_length(), coefficients.bits[gb] + lb.magnitude_bit_length()) + 1
+    var limit = images.limit
+    var batch = 0
+    var proved = 0
+    while True:
+        images.ensure(batch, coefficients, budget)
+        var t0 = perf_counter_ns()
+        var passed = _lane_pass(lanes, matrix, pivot, images.values[batch], images.batches[batch], a, batch, limit, budget)
+        comptime if _CERT_STATS:
+            counts[0] += Int(perf_counter_ns() - t0)
+        if not passed:
+            return 0
+        batch += 1
+        var k = _LANES * batch
+        if k >= first:
+            var attempt = batch - 1
+            images.basis(attempt, budget)
+            var t1 = perf_counter_ns()
+            var proves = _proves(lanes, matrix, pivot, coefficients, images, attempt, multiple, s_bits, counts, budget)
+            comptime if _CERT_STATS:
+                counts[1] += Int(perf_counter_ns() - t1)
+                counts[2] += 1
+            if proves:
+                proved = k
+                break
+        if _LANES * batch >= limit:
+            break
+    lanes.clear()
+    return proved
+
+
+def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, images: _PairPrimes, attempt: Int, multiple: Integer, s_bits: Int, mut counts: List[Int], mut budget: Budget) raises PolyError -> Bool:
+    """Whether the recorded residues modulo the attempt's primes prove the standard representation (see `_modular_pair`)."""
+    ref basis = images.bases[attempt]
+    var k = len(basis.weights)
+    var limit = images.limit
+    var nslots = len(lanes.columns)
+    # r_c = L v_c / lc(g_c) modulo p, with D folded in: D r_c.
+    var scaled = List[UInt64](length=k, fill=0)
+    # L D modulo each prime, `_LANES` at a time.
+    var factors = List[UInt64](length=k, fill=0)
+    var multiple_limbs = _limbs_of(multiple)
+    for i in range(k):
+        var p = images.primes[i]
+        var x = _remainder_of(multiple_limbs.unsafe_ptr(), len(multiple_limbs), p)
+        factors[i] = p - x if multiple.sign() < 0 and x != 0 else x
+    var work = List[UInt64](length=basis.limbs + 2, fill=0)
+    var other = List[UInt64](length=basis.limbs + 2, fill=0)
+    var half = (basis.bits - 2) // 2
+    var d = Integer(1)
+    var d_bits = 1
+    var worst = d_bits + s_bits
+    var log = 0
+    while (1 << log) < nslots + 1:
+        log += 1
+    # Later columns first: their denominators tend to contain the earlier ones'.
+    for slot in range(nslots - 1, -1, -1):
+        var g = matrix.sources[pivot[lanes.columns[slot]]]
+        var from_ = lanes.residues.unsafe_ptr().unsafe_offset(slot * limit)
+        for batch in range(k // _LANES):
+            ref primes = images.batches[batch]
+            var v = from_.unsafe_offset(_LANES * batch).unsafe_load[width=_LANES]().cast[DType.uint64]()
+            var inverse = images.inverses[batch].unsafe_ptr().unsafe_offset(_LANES * g).unsafe_load[width=_LANES]()
+            var x = _mod_lanes(v * factors.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_load[width=_LANES](), primes)
+            scaled.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_store[width=_LANES](_mod_lanes(x * inverse, primes))
+        basis.value(scaled, work, budget)
+        comptime if _CERT_STATS:
+            counts[4] += 1
+        # The symmetric representative: x or x - Q, whichever is smaller.
+        for l in range(basis.limbs + 2):
+            other[l] = basis.product[l] if l < basis.limbs else UInt64(0)
+        _ = _subtract_limbs(other.unsafe_ptr(), basis.limbs + 2, work.unsafe_ptr(), basis.limbs + 2)
+        var size = min(_bits(work), _bits(other))
+        var n_bits: Int
+        if max(worst, size + coefficients.bits[g]) + log + 1 < basis.bits - 1:
+            # Small enough for the bound as it is: n_c is this value.
+            n_bits = size
+        else:
+            # A new denominator: a / b = x modulo Q with |a|, b below 2^half.
+            comptime if _CERT_STATS:
+                counts[3] += 1
+            var t0 = perf_counter_ns()
+            var found = _fraction(_limbs_to_integer(work, basis.limbs), basis.modulus, half)
+            comptime if _CERT_STATS:
+                counts[5] += Int(perf_counter_ns() - t0)
+            if not found:
+                return False
+            var b = found.value()[1].copy()
+            n_bits = found.value()[0].magnitude_bit_length()
+            d = _times(d, b)
+            d_bits = d.magnitude_bit_length()
+            var b_limbs = _limbs_of(b)
+            for i in range(k):
+                var p = images.primes[i]
+                factors[i] = factors[i] * _remainder_of(b_limbs.unsafe_ptr(), len(b_limbs), p) % p
+            # Earlier n_c grow by the new factor; account for it in the bound now.
+            worst += b.magnitude_bit_length()
+        # n_c times D / D_now, which is below 2^(bits D - bits D_now + 1) at the end:
+        # counted here by charging the later growth to `worst` as it happens.
+        worst = max(worst, n_bits + coefficients.bits[g])
+        if worst + log + 1 >= basis.bits - 1:
+            return False
+    worst = max(worst, d_bits + s_bits)
+    # |D S - sum n_c R_c| <= (nslots + 1) 2^worst, and must stay below Q / 2.
+    return worst + log + 1 < basis.bits - 1
+
+
+def _times(x: Integer, y: Integer) raises PolyError -> Integer:
+    try:
+        return x * y
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+def _fraction(x: Integer, modulus: Integer, bits: Int) raises PolyError -> Optional[Tuple[Integer, Integer]]:
+    """A fraction a / b = x modulo `modulus` with |a| and 0 < b below 2^bits, if the Euclidean remainders give one."""
+    try:
+        return _euclid(x, modulus, bits)
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+def _euclid(x: Integer, modulus: Integer, bits: Int) raises -> Optional[Tuple[Integer, Integer]]:
+    """As `_fraction`, with Lehmer steps while the remainders are long (as `_reconstruct` in `_rational_groebner`)."""
+    var bound = Integer(1) << Integer(bits)
+    var r0 = modulus.copy()
+    var r1 = x.copy()
+    var t0 = Integer(0)
+    var t1 = Integer(1)
+    var stop = bits + 128
+    while r1 >= bound:
+        if r1.magnitude_bit_length() > stop:
+            # The quotients of the leading 62 bits, while they are certainly
+            # the true ones, as one matrix; a batch shortens r1 by less than
+            # 128 bits, so every remainder it skips stays above the bound.
+            var shift = Integer(r0.magnitude_bit_length() - 62)
+            var u = Int(r0 >> shift)
+            var w = Int(r1 >> shift)
+            var a = 1
+            var b = 0
+            var c = 0
+            var d = 1
+            while w + c != 0 and w + d != 0:
+                var q = (u + a) // (w + c)
+                if q != (u + b) // (w + d):
+                    break
+                var t = a - q * c
+                a = c
+                c = t
+                t = b - q * d
+                b = d
+                d = t
+                t = u - q * w
+                u = w
+                w = t
+            if b != 0:
+                var next_r0 = r0 * Integer(a) + r1 * Integer(b)
+                r1 = r0 * Integer(c) + r1 * Integer(d)
+                r0 = next_r0^
+                var next_t0 = t0 * Integer(a) + t1 * Integer(b)
+                t1 = t0 * Integer(c) + t1 * Integer(d)
+                t0 = next_t0^
+                continue
+        var qr = div_rem_trunc(r0, r1)
+        var t2 = t0 - qr[0] * t1
+        r0 = r1^
+        r1 = qr[1].copy()
+        t0 = t1^
+        t1 = t2^
+    if t1.sign() == 0 or t1.magnitude_bit_length() > bits:
+        return None
+    if t1.sign() < 0:
+        return (Integer(0) - r1, Integer(0) - t1)
+    return (r1^, t1^)
