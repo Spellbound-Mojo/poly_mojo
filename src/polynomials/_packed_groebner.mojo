@@ -673,12 +673,15 @@ struct _Engine[C: CoefficientRing, W: Int, integral: Bool](Movable):
         var lcms = List[_Packed[Self.W]](capacity=len(self.active))
         # The supports and degrees apart, to rule out most divisions cheaply.
         _allocation[UInt64](len(self.active), budget)
-        var keys = List[UInt64](capacity=len(self.active))
+        var keys = List[UInt64](capacity=len(self.active) + 8)
         for old in self.active:
             budget.charge(1)
             var lcm = _lcm(mh, self.leads[old])
             keys.append((lcm.degree << 32) | UInt64(lcm.support))
             lcms.append(lcm)
+        # Padding no key passes: its degree exceeds every degree.
+        for _ in range(8):
+            keys.append(UInt64.MAX)
         _allocation[Int](len(self.active), budget)
         var kept = List[Int](capacity=len(self.active))
         var count = len(self.active)
@@ -692,11 +695,18 @@ struct _Engine[C: CoefficientRing, W: Int, integral: Bool](Movable):
                 var outside = ~key & 0xFFFFFFFF
                 var j = i + 1
                 while j < count:
-                    var other = keys.unsafe_get(j)
-                    if (other >> 32) <= degree and (other & outside) == 0 and _divides(lcms.unsafe_get(j), lcms.unsafe_get(i)):
-                        redundant = True
-                        break
-                    j += 1
+                    # Eight keys at a time; the first that passes and divides counts.
+                    var block = keys.unsafe_ptr().unsafe_offset(j).unsafe_load[width=8]()
+                    var passing = (block >> 32).le(degree) & (block & outside).eq(0)
+                    if passing.reduce_or():
+                        for k in range(min(8, count - j)):
+                            if passing[k] and _divides(lcms.unsafe_get(j + k), lcms.unsafe_get(i)):
+                                redundant = True
+                                j += k
+                                break
+                        if redundant:
+                            break
+                    j += 8
                 budget.charge(UInt64(min(j + 1, count) - (i + 1)))
                 if not redundant:
                     for j in kept:

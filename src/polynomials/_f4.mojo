@@ -37,13 +37,14 @@ leads elsewhere or a result leaves its recorded support. A replay can also run
 modulo `_LANES` primes at once (`_f4_replay_lanes`): the recorded matrices are
 the same for every prime, so each accumulator column holds a residue per
 prime in one SIMD vector, and every update is one vector operation.
+`_f4_replay_bases` leaves those bases as residues on the recorded supports.
 
 `groebner` uses F4 for untracked bases over primes below 2^31 under GRLEX and
 GREVLEX, over at most sixteen variables; other cases use Buchberger's
 algorithm in the packed or sparse engine.
 """
 from std.bit import count_leading_zeros
-from std.math import max, min
+from std.math import iota, max, min
 from .coefficients import CoefficientRing, ModInt, Modulus
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product, _sum
 from .monomial import MonomialOrder
@@ -324,10 +325,28 @@ def _keys[W: Int](kind: UInt8, monomials: List[_Packed[W]], mut budget: Budget) 
 
 
 def _sort_keys(var keys: List[UInt128], mut budget: Budget) raises PolyError -> List[Int]:
-    """The indices in the low 32 bits of distinct keys, by decreasing key."""
+    """The indices in the low 32 bits of distinct keys, by decreasing key.
+
+    Long lists go by radix sort, 11 bits at a time above the index, which
+    distinct keys need not be sorted by.
+    """
     var n = len(keys)
     _allocation[UInt128](n, budget)
     var scratch = List[UInt128](length=n, fill=0)
+    if n < 2048:
+        _merge_keys(keys, scratch, budget)
+    else:
+        _radix_keys(keys, scratch, budget)
+    _allocation[Int](n, budget)
+    var order = List[Int](capacity=n)
+    for k in range(n):
+        order.append(Int(keys.unsafe_get(k) & UInt128(0xFFFFFFFF)))
+    return order^
+
+
+def _merge_keys(mut keys: List[UInt128], mut scratch: List[UInt128], mut budget: Budget) raises PolyError:
+    """Sort distinct keys decreasingly, by bottom-up merge sort."""
+    var n = len(keys)
     var width = 1
     while width < n:
         budget.charge(UInt64(n))
@@ -359,11 +378,51 @@ def _sort_keys(var keys: List[UInt128], mut budget: Budget) raises PolyError -> 
             start = end
         swap(keys, scratch)
         width *= 2
-    _allocation[Int](n, budget)
-    var order = List[Int](capacity=n)
+
+
+def _radix_keys(mut keys: List[UInt128], mut scratch: List[UInt128], mut budget: Budget) raises PolyError:
+    """Sort distinct keys decreasingly, least significant digit first above the index; charged as the merge sort."""
+    var n = len(keys)
+    var width = 1
+    while width < n:
+        budget.charge(UInt64(n))
+        width *= 2
+    var top = UInt128(0)
     for k in range(n):
-        order.append(Int(keys.unsafe_get(k) & UInt128(0xFFFFFFFF)))
-    return order^
+        top = max(top, keys.unsafe_get(k))
+    var bits = 128 - Int(count_leading_zeros(top >> 32))
+    comptime DIGIT = 11
+    var counts = List[Int](length=1 << DIGIT, fill=0)
+    var shift = 32
+    while shift < 32 + bits:
+        for d in range(1 << DIGIT):
+            counts.unsafe_get(d) = 0
+        for k in range(n):
+            counts.unsafe_get(Int((keys.unsafe_get(k) >> UInt128(shift)) & UInt128((1 << DIGIT) - 1))) += 1
+        # Decreasing digits first, so the pass is stable for a descending order.
+        var at = 0
+        for d in range((1 << DIGIT) - 1, -1, -1):
+            var c = counts.unsafe_get(d)
+            counts.unsafe_get(d) = at
+            at += c
+        for k in range(n):
+            var key = keys.unsafe_get(k)
+            var d = Int((key >> UInt128(shift)) & UInt128((1 << DIGIT) - 1))
+            scratch.unsafe_get(counts.unsafe_get(d)) = key
+            counts.unsafe_get(d) += 1
+        swap(keys, scratch)
+        shift += DIGIT
+
+
+@always_inline
+def _divisibility_mask[W: Int, B: Int](exponents: SIMD[DType.uint32, W], thresholds: List[SIMD[DType.uint32, W]]) -> UInt64:
+    """Bit k * W + lane set when the exponent in the lane reaches thresholds[k] there."""
+    comptime lanes = SIMD[DType.uint64, W](1) << iota[DType.uint64, W]()
+    var mask = UInt64(0)
+    comptime for k in range(B):
+        var reached = exponents.ge(thresholds.unsafe_get(k)).select(lanes, SIMD[DType.uint64, W](0)).reduce_or()
+        mask |= reached << UInt64(k * W)
+    return mask
 
 
 struct _Matrix[W: Int](Movable):
@@ -416,15 +475,27 @@ struct _Matrix[W: Int](Movable):
         """
         var count = len(engine.active)
         _allocation[_Packed[Self.W]](count, budget)
-        _allocation[UInt32](count + 16, budget)
+        _allocation[UInt64](count + 8, budget)
         var leads = List[_Packed[Self.W]](capacity=count)
-        # The supports apart, padded with full masks, to rule out most leading monomials 16 at a time.
-        var supports = List[UInt32](capacity=count + 16)
+        var top = SIMD[DType.uint32, Self.W](0)
         for g in engine.active:
             leads.append(engine.leads[g])
-            supports.append(engine.leads[g].support)
-        for _ in range(16):
-            supports.append(UInt32.MAX)
+            top = max(top, engine.leads[g].exponents())
+        # Divisibility masks: bit k * W + lane says the exponent in the lane
+        # reaches the lane's k-th threshold, the thresholds spread over the
+        # leading monomials' exponents. A leading monomial divides u only if
+        # its mask is inside u's, which rules out most of them 8 at a time.
+        comptime B = 64 // Self.W
+        var thresholds = List[SIMD[DType.uint32, Self.W]](capacity=B)
+        for k in range(B):
+            var t = SIMD[DType.uint32, Self.W](1) + (top * UInt32(k)) // UInt32(B)
+            thresholds.append(top.eq(0).select(SIMD[DType.uint32, Self.W](UInt32.MAX), t))
+        var masks = List[UInt64](capacity=count + 8)
+        for i in range(count):
+            masks.append(_divisibility_mask[Self.W, B](leads[i].exponents(), thresholds))
+        # Padding no monomial's mask contains.
+        for _ in range(8):
+            masks.append(UInt64.MAX)
         # The leading monomials of degree at most `degree` are the first `limit`.
         var degree = UInt64.MAX
         var limit = 0
@@ -440,21 +511,21 @@ struct _Matrix[W: Int](Movable):
                 limit = 0
                 while limit < count and leads[limit].degree <= degree:
                     limit += 1
-            var outside = ~u.support
             var exponents = u.exponents()
+            var outside = ~_divisibility_mask[Self.W, B](exponents, thresholds)
             var found = -1
             var i = 0
             while i < limit:
-                var block = supports.unsafe_ptr().unsafe_offset(i).unsafe_load[width=16]()
+                var block = masks.unsafe_ptr().unsafe_offset(i).unsafe_load[width=8]()
                 var candidates = (block & outside).eq(0)
                 if candidates.reduce_or():
-                    for k in range(min(16, limit - i)):
+                    for k in range(min(8, limit - i)):
                         if candidates[k] and leads.unsafe_get(i + k).exponents().le(exponents).reduce_and():
                             found = i + k
                             break
                     if found >= 0:
                         break
-                i += 16
+                i += 8
             budget.charge(UInt64((found if found >= 0 else limit) + 1))
             if found >= 0:
                 self.add_row(engine, store, engine.active[found], _div(u, leads[found]), budget)
@@ -1439,6 +1510,38 @@ def _replay_rows_lanes(found: _LaneRows, results: List[Int], supports: List[List
         values.append(residues^)
 
 
+struct _LaneBases(Movable):
+    """The bases of a batched replay, over the recorded final supports.
+
+    Element r's residue modulo lane l's prime at the k-th monomial of its
+    support, by decreasing monomial, is values[r][_LANES * k + l]; lanes 0
+    to live - 1 have bases.
+    """
+    var values: List[List[UInt32]]
+    var live: Int
+
+    def __init__(out self):
+        self.values = List[List[UInt32]]()
+        self.live = 0
+
+
+def _lane_basis[W: Int](trace: _Trace[W], bases: _LaneBases, lane: Int, ring: Modulus, mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
+    """The basis of one lane, as `_f4_replay` returns it for the lane's prime."""
+    ref step = trace.steps[len(trace.steps) - 1]
+    var basis = List[List[_Term[ModInt, W]]](capacity=step.basis)
+    for r in range(step.basis):
+        ref residues = bases.values[r]
+        ref monomials = step.monomials[r]
+        _allocation[_Term[ModInt, W]](len(monomials), budget)
+        var terms = List[_Term[ModInt, W]](capacity=len(monomials))
+        for k in range(len(monomials) - 1, -1, -1):
+            var residue = residues[_LANES * k + lane]
+            if residue != 0:
+                terms.append(_Term[ModInt, W](monomials[k], ModInt(UInt64(residue), ring)))
+        basis.append(terms^)
+    return basis^
+
+
 def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_Term[ModInt, W]]]], kind: UInt8, rings: List[Modulus], mut budget: Budget) raises PolyError -> List[List[List[_Term[ModInt, W]]]]:
     """`_f4_replay` modulo `_LANES` primes below 2^31 at once, one per SIMD lane.
 
@@ -1447,6 +1550,15 @@ def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_T
     matrices, and a lane with a zero residue where another has not takes a
     zero multiple.
     """
+    var bases = _f4_replay_bases(trace, generators^, kind, rings, budget)
+    var result = List[List[List[_Term[ModInt, W]]]]()
+    for l in range(bases.live):
+        result.append(_lane_basis(trace, bases, l, rings[l], budget))
+    return result^
+
+
+def _f4_replay_bases[W: Int](trace: _Trace[W], var generators: List[List[List[_Term[ModInt, W]]]], kind: UInt8, rings: List[Modulus], mut budget: Budget) raises PolyError -> _LaneBases:
+    """As `_f4_replay_lanes`, with the bases as residues over the recorded supports."""
     var lanes = _Primes(rings)
     var values = List[List[UInt32]]()
     for l in range(_LANES):
@@ -1476,7 +1588,7 @@ def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_T
         if not follows:
             lanes.depart(l)
             break
-    var bases = List[List[List[_Term[ModInt, W]]]]()
+    var bases = _LaneBases()
     if lanes.live == 0:
         return bases^
     var width = 0
@@ -1518,18 +1630,11 @@ def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_T
             rows.append(r)
         var first = len(values)
         _replay_rows_lanes(found, rows, step.supports, values, lanes, budget)
-        for l in range(lanes.live):
-            var basis = List[List[_Term[ModInt, W]]](capacity=step.basis)
-            for r in range(step.basis):
-                ref residues = values[first + r]
-                ref monomials = step.monomials[r]
-                var terms = List[_Term[ModInt, W]](capacity=len(monomials))
-                for k in range(len(monomials) - 1, -1, -1):
-                    var residue = residues[_LANES * k + l]
-                    if residue != 0:
-                        terms.append(_Term[ModInt, W](monomials[k], ModInt(UInt64(residue), lanes.rings[l])))
-                basis.append(terms^)
-            bases.append(basis^)
+        bases.live = lanes.live
+        for r in range(step.basis):
+            var residues = List[UInt32]()
+            swap(residues, values[first + r])
+            bases.values.append(residues^)
         return bases^
     return bases^
 
