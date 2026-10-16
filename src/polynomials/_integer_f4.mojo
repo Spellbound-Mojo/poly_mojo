@@ -935,6 +935,31 @@ def _remainder_limbs(u: Pointer[mut=True, UInt64, _], length: Int, d: Pointer[mu
         j -= 1
 
 
+def _divide_limbs(u: Pointer[mut=True, UInt64, _], length: Int, d: Pointer[mut=False, UInt64, _], n: Int, q: Pointer[mut=True, UInt64, _]):
+    """`_remainder_limbs`, also writing the length - n + 1 quotient limbs to q."""
+    var top = UInt128(d.unsafe_offset(n - 1).unsafe_load())
+    var second = UInt128(d.unsafe_offset(n - 2).unsafe_load()) if n >= 2 else UInt128(0)
+    var j = length - n
+    while j >= 0:
+        var window = u.unsafe_offset(j)
+        var numerator = (UInt128(window.unsafe_offset(n).unsafe_load()) << 64) | UInt128(window.unsafe_offset(n - 1).unsafe_load())
+        var digit = numerator // top
+        if digit > UInt128(UInt64.MAX):
+            digit = UInt128(UInt64.MAX)
+        var r = numerator - digit * top
+        if n >= 2:
+            while r <= UInt128(UInt64.MAX) and digit * second > ((r << 64) | UInt128(window.unsafe_offset(n - 2).unsafe_load())):
+                digit -= 1
+                r += top
+        if digit != 0:
+            _sub_mul_1(window, n + 1, UInt64(digit), d, n)
+            if window.unsafe_offset(n).unsafe_load() != 0:
+                _add_mul_1(window, n + 1, 1, d, n)
+                digit -= 1
+        q.unsafe_offset(j).unsafe_store(UInt64(digit))
+        j -= 1
+
+
 def _remainder(limbs: List[UInt64], d: UInt64) -> UInt64:
     var r = UInt128(0)
     for l in range(len(limbs) - 1, -1, -1):
@@ -1817,6 +1842,10 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
     var block = List[UInt64](length=_LANES * k, fill=0)
     var block_values = List[UInt64](length=_LANES * n, fill=0)
     var sums = List[UInt64](length=_LANES * (2 * basis.limbs + 2), fill=0)
+    var euclid = _Euclid(basis.limbs, budget)
+    var half_q = List[UInt64](length=basis.limbs, fill=0)
+    for l in range(basis.limbs):
+        half_q[l] = (basis.product[l] >> 1) | ((basis.product[l + 1] << 63) if l + 1 < basis.limbs else UInt64(0))
     var top = nslots
     var ready = 0
     # Later columns first: their denominators tend to contain the earlier ones'.
@@ -1839,16 +1868,19 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
             basis.values(block, block_values, sums)
         # Charged per slot, as one `value` each.
         budget.charge(UInt64(_product(k, basis.limbs)))
-        var lane = top - slot
-        for l in range(n):
-            work.unsafe_get(l) = block_values.unsafe_get(lane * n + l)
+        var x = block_values.unsafe_ptr().unsafe_offset((top - slot) * n)
         comptime if _CERT_STATS:
             counts[4] += 1
-        # The symmetric representative: x or x - Q, whichever is smaller.
-        for l in range(basis.limbs + 2):
-            other[l] = basis.product[l] if l < basis.limbs else UInt64(0)
-        _ = _subtract_limbs(other.unsafe_ptr(), basis.limbs + 2, work.unsafe_ptr(), basis.limbs + 2)
-        var size = min(_bits(work), _bits(other))
+        # The symmetric representative: x or x - Q, whichever is smaller; x
+        # is the smaller exactly when it is at most floor(Q / 2).
+        var size: Int
+        if _compare_at(x, basis.limbs, half_q.unsafe_ptr()) <= 0:
+            size = _bits_at(x, basis.limbs)
+        else:
+            for l in range(basis.limbs):
+                other.unsafe_get(l) = basis.product.unsafe_get(l)
+            _ = _subtract_limbs(other.unsafe_ptr(), basis.limbs, x, basis.limbs)
+            size = _bits_at(other.unsafe_ptr(), basis.limbs)
         var n_bits: Int
         if max(worst, size + coefficients.bits[g]) + log + 1 < basis.bits - 1:
             # Small enough for the bound as it is: n_c is this value.
@@ -1858,7 +1890,9 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
             comptime if _CERT_STATS:
                 counts[3] += 1
             var t0 = perf_counter_ns()
-            var found = _fraction(_limbs_to_integer(work, basis.limbs), basis.modulus, half)
+            for l in range(n):
+                work.unsafe_get(l) = x.unsafe_offset(l).unsafe_load()
+            var found = euclid.fraction(work, basis.product, half)
             comptime if _CERT_STATS:
                 counts[5] += Int(perf_counter_ns() - t0)
             if not found:
@@ -1882,6 +1916,185 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
     worst = max(worst, d_bits + s_bits)
     # |D S - sum n_c R_c| <= (nslots + 1) 2^worst, and must stay below Q / 2.
     return worst + log + 1 < basis.bits - 1
+
+
+def _bits_at(x: Pointer[mut=False, UInt64, _], n: Int) -> Int:
+    """The bit length of the nonnegative x[0:n]."""
+    var l = n - 1
+    while l >= 0 and x.unsafe_offset(l).unsafe_load() == 0:
+        l -= 1
+    if l < 0:
+        return 0
+    return 64 * l + 64 - Int(count_leading_zeros(x.unsafe_offset(l).unsafe_load()))
+
+
+def _compare_at(x: Pointer[mut=False, UInt64, _], n: Int, y: Pointer[mut=False, UInt64, _]) -> Int:
+    """The sign of x[0:n] - y[0:n]."""
+    for l in range(n - 1, -1, -1):
+        var a = x.unsafe_offset(l).unsafe_load()
+        var b = y.unsafe_offset(l).unsafe_load()
+        if a != b:
+            return 1 if a > b else -1
+    return 0
+
+
+def _bits_window(x: Pointer[mut=False, UInt64, _], shift: Int) -> Int:
+    """Bits shift to shift + 61 of the nonnegative x, which has no bit above them."""
+    var w = shift // 64
+    var b = shift % 64
+    var low = x.unsafe_offset(w).unsafe_load() >> UInt64(b)
+    var high = (x.unsafe_offset(w + 1).unsafe_load() << UInt64(64 - b)) if b > 0 and b + 62 > 64 else UInt64(0)
+    return Int((low | high) & ((UInt64(1) << 62) - 1))
+
+
+@always_inline
+def _combine(target: Pointer[mut=True, UInt64, _], n: Int, f: Int, x: Pointer[mut=False, UInt64, _], g: Int, y: Pointer[mut=False, UInt64, _]):
+    """target = f x + g y, all n-limb two's complement, modulo 2^(64 n)."""
+    for l in range(n):
+        target.unsafe_offset(l).unsafe_store(0)
+    if f > 0:
+        _add_mul_1(target, n, UInt64(f), x, n)
+    elif f < 0:
+        _sub_mul_1(target, n, UInt64(-f), x, n)
+    if g > 0:
+        _add_mul_1(target, n, UInt64(g), y, n)
+    elif g < 0:
+        _sub_mul_1(target, n, UInt64(-g), y, n)
+
+
+struct _Euclid(Movable):
+    """`_euclid` in limbs, for values below a modulus of `limbs` limbs.
+
+    The remainders r and cofactors t live in n = limbs + 1 limbs of two's
+    complement; every combination is exact modulo 2^(64 n) and the true
+    values fit. The steps are `_euclid`'s: the same Lehmer matrices from the
+    same leading bits while r1 is long, then one exact division at a time,
+    so the remainder sequence, and where it stops, are the same.
+    """
+    var n: Int
+    var r0: List[UInt64]
+    var r1: List[UInt64]
+    var t0: List[UInt64]
+    var t1: List[UInt64]
+    var next0: List[UInt64]
+    var next1: List[UInt64]
+    var dividend: List[UInt64]
+    var divisor: List[UInt64]
+    var quotient: List[UInt64]
+
+    def __init__(out self, limbs: Int, mut budget: Budget) raises PolyError:
+        self.n = limbs + 1
+        _allocation[UInt64](_product(10, self.n + 2), budget)
+        self.r0 = List[UInt64](length=self.n, fill=0)
+        self.r1 = List[UInt64](length=self.n, fill=0)
+        self.t0 = List[UInt64](length=self.n, fill=0)
+        self.t1 = List[UInt64](length=self.n, fill=0)
+        self.next0 = List[UInt64](length=self.n, fill=0)
+        self.next1 = List[UInt64](length=self.n, fill=0)
+        self.dividend = List[UInt64](length=self.n + 2, fill=0)
+        self.divisor = List[UInt64](length=self.n, fill=0)
+        self.quotient = List[UInt64](length=self.n + 1, fill=0)
+
+    def fraction(mut self, x: List[UInt64], modulus: List[UInt64], bits: Int) -> Optional[Tuple[Integer, Integer]]:
+        """As `_euclid(x, modulus, bits)`, for 0 <= x < modulus, both given in limbs."""
+        var n = self.n
+        for l in range(n):
+            self.r0.unsafe_get(l) = modulus[l] if l < len(modulus) else UInt64(0)
+            self.r1.unsafe_get(l) = x[l] if l < n - 1 else UInt64(0)
+            self.t0.unsafe_get(l) = 0
+            self.t1.unsafe_get(l) = 1 if l == 0 else UInt64(0)
+        var stop = bits + 128
+        while True:
+            var length1 = _bits_at(self.r1.unsafe_ptr(), n)
+            if length1 <= bits:
+                break
+            if length1 > stop:
+                var shift = _bits_at(self.r0.unsafe_ptr(), n) - 62
+                var u = _bits_window(self.r0.unsafe_ptr(), shift)
+                var w = _bits_window(self.r1.unsafe_ptr(), shift)
+                var a = 1
+                var b = 0
+                var c = 0
+                var d = 1
+                while w + c != 0 and w + d != 0:
+                    var q = (u + a) // (w + c)
+                    if q != (u + b) // (w + d):
+                        break
+                    var t = a - q * c
+                    a = c
+                    c = t
+                    t = b - q * d
+                    b = d
+                    d = t
+                    t = u - q * w
+                    u = w
+                    w = t
+                if b != 0:
+                    _combine(self.next0.unsafe_ptr(), n, a, self.r0.unsafe_ptr(), b, self.r1.unsafe_ptr())
+                    _combine(self.next1.unsafe_ptr(), n, c, self.r0.unsafe_ptr(), d, self.r1.unsafe_ptr())
+                    swap(self.r0, self.next0)
+                    swap(self.r1, self.next1)
+                    _combine(self.next0.unsafe_ptr(), n, a, self.t0.unsafe_ptr(), b, self.t1.unsafe_ptr())
+                    _combine(self.next1.unsafe_ptr(), n, c, self.t0.unsafe_ptr(), d, self.t1.unsafe_ptr())
+                    swap(self.t0, self.next0)
+                    swap(self.t1, self.next1)
+                    continue
+            self._step(length1)
+        # r1 is below 2^bits; t1 must be nonzero and as short.
+        var negative = (self.t1.unsafe_get(n - 1) >> 63) != 0
+        if negative:
+            for l in range(n):
+                self.next1.unsafe_get(l) = 0
+            _ = _subtract_limbs(self.next1.unsafe_ptr(), n, self.t1.unsafe_ptr(), n)
+        else:
+            for l in range(n):
+                self.next1.unsafe_get(l) = self.t1.unsafe_get(l)
+        var length = _bits_at(self.next1.unsafe_ptr(), n)
+        if length == 0 or length > bits:
+            return None
+        var bytes = List[UInt8](length=8 * n, fill=0)
+        for l in range(n):
+            comptime for shift in range(8):
+                bytes[8 * l + shift] = UInt8((self.r1.unsafe_get(l) >> UInt64(8 * shift)) & 0xFF)
+        # The sign goes to the numerator, as `_euclid` gives it.
+        return (Integer.from_bytes(bytes, negative=negative), _limbs_to_integer(self.next1, n))
+
+    def _step(mut self, length1: Int):
+        """One Euclidean step: (r0, r1) = (r1, r0 mod r1) and (t0, t1) = (t1, t0 - q t1)."""
+        var n = self.n
+        var m = (length1 + 63) // 64
+        var shift = Int(count_leading_zeros(self.r1.unsafe_get(m - 1)))
+        var length0 = _bits_at(self.r0.unsafe_ptr(), n)
+        var size = max((length0 + shift + 63) // 64, m)
+        # The normalized divisor and dividend, with a zero limb above the dividend.
+        var carry = UInt64(0)
+        for l in range(m):
+            var limb = self.r1.unsafe_get(l)
+            self.divisor.unsafe_get(l) = (limb << UInt64(shift)) | carry
+            carry = limb >> UInt64(64 - shift) if shift > 0 else UInt64(0)
+        carry = 0
+        for l in range(size + 1):
+            var limb = self.r0.unsafe_get(l) if l < n else UInt64(0)
+            self.dividend.unsafe_get(l) = (limb << UInt64(shift)) | carry
+            carry = limb >> UInt64(64 - shift) if shift > 0 else UInt64(0)
+        self.dividend.unsafe_get(size + 1) = 0
+        _divide_limbs(self.dividend.unsafe_ptr(), size, self.divisor.unsafe_ptr(), m, self.quotient.unsafe_ptr())
+        # The remainder, shifted back, becomes r1; r1 becomes r0.
+        for l in range(n):
+            var low = self.dividend.unsafe_get(l) >> UInt64(shift) if l < m else UInt64(0)
+            var high = (self.dividend.unsafe_get(l + 1) << UInt64(64 - shift)) if shift > 0 and l + 1 < m else UInt64(0)
+            self.next1.unsafe_get(l) = low | high
+        swap(self.r0, self.r1)
+        swap(self.r1, self.next1)
+        # t0 - q t1, then the rotation.
+        for l in range(n):
+            self.next0.unsafe_get(l) = self.t0.unsafe_get(l)
+        for j in range(size - m + 1):
+            var digit = self.quotient.unsafe_get(j)
+            if digit != 0 and j < n:
+                _sub_mul_1(self.next0.unsafe_ptr().unsafe_offset(j), n - j, digit, self.t1.unsafe_ptr(), n - j)
+        swap(self.t0, self.t1)
+        swap(self.t1, self.next0)
 
 
 def _times(x: Integer, y: Integer) raises PolyError -> Integer:
