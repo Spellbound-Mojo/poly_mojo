@@ -8,7 +8,7 @@ budget in proportion to its coefficient work before doing it.
 """
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product, _sum
 
-comptime _KARATSUBA = 48
+comptime _KARATSUBA = 128
 """Operand length at which products switch from schoolbook to Karatsuba."""
 
 
@@ -131,10 +131,23 @@ def _schoolbook(a: List[UInt64], b: List[UInt64], limit: Int, f: _Field, mut bud
     var result = List[UInt64](capacity=size)
     var pa = a.unsafe_ptr()
     var pb = reversed.unsafe_ptr()
-    for k in range(size):
-        var lo = max(0, k - m + 1)
-        var hi = min(k, n - 1)
-        result.append(_dot(pa.unsafe_offset(lo), pb.unsafe_offset(m - 1 - k + lo), hi - lo + 1, f))
+    if a.unsafe_ptr() == b.unsafe_ptr() and n == m:
+        # Squares pair a_i a_j with a_j a_i: half the terms, doubled.
+        for k in range(size):
+            var lo = max(0, k - m + 1)
+            var hi = (k - 1) // 2
+            var s = UInt64(0)
+            if hi >= lo:
+                s = _dot(pa.unsafe_offset(lo), pb.unsafe_offset(m - 1 - k + lo), hi - lo + 1, f)
+                s = _addm(s, s, f)
+            if k % 2 == 0:
+                s = _addm(s, _mulm(a[k // 2], a[k // 2], f), f)
+            result.append(s)
+    else:
+        for k in range(size):
+            var lo = max(0, k - m + 1)
+            var hi = min(k, n - 1)
+            result.append(_dot(pa.unsafe_offset(lo), pb.unsafe_offset(m - 1 - k + lo), hi - lo + 1, f))
     _trim(result)
     return result^
 
@@ -319,7 +332,29 @@ def _rem(a: List[UInt64], m: _Modulus, field: _Field, mut budget: Budget) raises
         return a.copy()
     if len(a) > 2 * n:
         return _divmod_classic(a, m.f, False, field, budget)[1].copy()
-    var length = len(a) - n
+    var size = len(a)
+    var length = size - n
+    if n < 8 * _KARATSUBA:
+        # rev(q) = rev(a) * g mod x^length, and r = a - q * f mod x^n. With
+        # q_i = rq_(length-1-i), both sums are forward dot products, so no
+        # operand is reversed.
+        _charge_size(_product(length, n) + 1, budget)
+        _allocation[UInt64](_sum(length, n), budget)
+        var rq = List[UInt64](capacity=length)
+        var pa = a.unsafe_ptr()
+        var pg = m.inverse.unsafe_ptr()
+        for k in range(length):
+            var count = min(k + 1, len(m.inverse))
+            rq.append(_dot(pa.unsafe_offset(size - 1 - k), pg, count, field))
+        var result = List[UInt64](capacity=n)
+        var pq = rq.unsafe_ptr()
+        var pf = m.f.unsafe_ptr()
+        for k in range(n):
+            var t0 = max(0, length - 1 - k)
+            var product = _dot(pq.unsafe_offset(t0), pf.unsafe_offset(t0 + k - length + 1), length - t0, field)
+            result.append(_subm(a[k], product, field))
+        _trim(result)
+        return result^
     # rev(q) = rev(a) * rev(f)^(-1) mod x^length.
     var ra = _reversed(a, len(a), budget)
     var rq = _mullow(ra, m.inverse, length, field, budget)
@@ -352,10 +387,11 @@ def _powmod(a: List[UInt64], e: UInt64, m: _Modulus, field: _Field, mut budget: 
 
 @fieldwise_init
 struct _Composer(Copyable, Movable):
-    """Brent–Kung powers of h modulo f, stored transposed for dot products."""
+    """Brent–Kung powers of h modulo f: h^i for i below `block`, stored
+    transposed for dot products, and the giant powers h^(j*block)."""
     var block: Int
     var columns: List[List[UInt64]]
-    var top: List[UInt64]
+    var giants: List[List[UInt64]]
 
 
 def _composer(h: List[UInt64], m: _Modulus, field: _Field, mut budget: Budget) raises PolyError -> _Composer:
@@ -376,21 +412,28 @@ def _composer(h: List[UInt64], m: _Modulus, field: _Field, mut budget: Budget) r
         for i in range(block):
             column.append(powers[i][c] if c < len(powers[i]) else UInt64(0))
         columns.append(column^)
-    var top = powers[block].copy()
-    return _Composer(block, columns^, top^)
+    var blocks = (n + block - 1) // block
+    _allocation[List[UInt64]](blocks, budget)
+    var giants = List[List[UInt64]](capacity=blocks)
+    giants.append([field.one])
+    for j in range(1, blocks):
+        giants.append(_mulmod(giants[j - 1], powers[block], m, field, budget))
+    return _Composer(block, columns^, giants^)
 
 
 def _compose(g: List[UInt64], c: _Composer, m: _Modulus, field: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
-    """g(h) mod f for the h prepared in c."""
+    """g(h) mod f for the h prepared in c; g has degree below deg(f)."""
     var n = len(m.f) - 1
     if len(g) == 0:
         return List[UInt64]()
+    if len(g) > n:
+        return _compose(_rem(g, m, field, budget), c, m, field, budget)
     var blocks = (len(g) + c.block - 1) // c.block
     _charge_size(_product(n, len(g)), budget)
-    var result = List[UInt64]()
-    var started = False
-    var j = blocks - 1
-    while j >= 0:
+    # Sum the unreduced products G_j(h) * h^(j*block); one reduction follows.
+    _allocation[UInt64](2 * n, budget)
+    var total = List[UInt64](length=max(2 * n - 1, 1), fill=0)
+    for j in range(blocks):
         var start = j * c.block
         var stop = min(len(g), start + c.block)
         var piece = List[UInt64](capacity=n)
@@ -398,13 +441,12 @@ def _compose(g: List[UInt64], c: _Composer, m: _Modulus, field: _Field, mut budg
         for k in range(n):
             piece.append(_dot(gp, c.columns[k].unsafe_ptr(), stop - start, field))
         _trim(piece)
-        if started:
-            result = _add(_mulmod(result, c.top, m, field, budget), piece, field, budget)
+        if j == 0:
+            _accumulate(total, piece, 0, field)
         else:
-            result = piece^
-            started = True
-        j -= 1
-    return result^
+            _accumulate(total, _mul(piece, c.giants[j], field, budget), 0, field)
+    _trim(total)
+    return _rem(total, m, field, budget)
 
 
 def _derivative(a: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
