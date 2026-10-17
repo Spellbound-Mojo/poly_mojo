@@ -130,6 +130,13 @@ def fast_division[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
             # A divisor whose leading coefficient does not divide the quotient's coefficients.
             var tripled = b.scale(word[C](ctx, 3), work)
             agrees(product, tripled, c, "non-unit divisor content")
+    # Sparse operands with few colliding products: the packed chunks decline and the heap divides.
+    var spread = MonomialOrder(MonomialOrder.LEX, [Int64(0), Int64(1), Int64(2), Int64(3), Int64(4)], work)
+    var sa = polynomial[C](ctx, spread, rng, work, terms=60, variables=5, degree=20, coefficient_bound=1000)
+    var sb = polynomial[C](ctx, spread, rng, work, terms=60, variables=5, degree=20, coefficient_bound=1000)
+    if not sb.is_zero():
+        agrees(sa.mul(sb, work), sb, c, "sparse quotient through the heap")
+        agrees(sa.mul(sb, work).add(SparsePoly[C].variable(0, spread, ctx, work), work), sb, c, "sparse refusal through the heap")
     # Quotient coefficients wider than a word, and wide dividend coefficients.
     var order = MonomialOrder(MonomialOrder.LEX, [Int64(0), Int64(1)], work)
     var a = block[C](ctx, order, rng, 2, 12, 1, 12, work)

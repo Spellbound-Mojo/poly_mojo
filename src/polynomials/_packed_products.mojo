@@ -627,6 +627,10 @@ def _packed_divide[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], mut b
             dividend_prefix.append(prefix)
             dividend_start.append(i)
     dividend_start.append(len(f.terms))
+    # Every dividend prefix visits every divisor group. When that exceeds the
+    # dividend's terms, chunks collide too little to pay; a heap division wins.
+    if _product(len(dividend_prefix), len(divisor.group_prefix)) > 8 * len(f.terms):
+        return None
     var window = Int(packing.window)
     _allocation[UInt64](_product(4, window), budget)
     # Each remainder slot sums one dividend coefficient and at most one quotient
