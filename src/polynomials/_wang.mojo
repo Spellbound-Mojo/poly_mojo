@@ -160,6 +160,9 @@ def _eval_tail(f: SparsePoly[ZZ], variables: List[Int64], points: List[Integer],
         powers.append(row^)
     _allocation[Term[ZZ]](len(f.terms), budget)
     var terms = List[Term[ZZ]](capacity=len(f.terms))
+    var univariate = True
+    var variable = Int64(-1)
+    var degree = 0
     for term in f.terms:
         budget.charge(1)
         var c = term.coefficient.value.copy()
@@ -185,8 +188,29 @@ def _eval_tail(f: SparsePoly[ZZ], variables: List[Int64], points: List[Integer],
             c = _imul(c, powers[index][e], budget)
         if vanished:
             continue
+        if len(pairs) > 1 or (len(pairs) == 1 and variable >= 0 and pairs[0][0] != variable):
+            univariate = False
+        if len(pairs) == 1:
+            variable = pairs[0][0]
+            degree = max(degree, Int(pairs[0][1]))
         terms.append(Term[ZZ](Monomial(pairs^, budget), ZZ(c^)))
-    return SparsePoly[ZZ].from_terms(terms^, f.order, NoContext(), budget)
+    if not univariate:
+        return SparsePoly[ZZ].from_terms(terms^, f.order, NoContext(), budget)
+    # A univariate image collects its terms by exponent instead of sorting them all.
+    _allocation[Integer](degree + 1, budget)
+    var sums = List[Integer](length=degree + 1, fill=Integer(0))
+    for t in terms:
+        budget.charge(1)
+        var e = Int(t.monomial.pairs[0][1]) if len(t.monomial.pairs) else 0
+        sums[e] = _iadd(sums[e], t.coefficient.value, budget)
+    var collected = List[Term[ZZ]](capacity=degree + 1)
+    for e in range(degree + 1):
+        if sums[e].sign() != 0:
+            var pairs = List[Tuple[Int64, UInt32]]()
+            if e:
+                pairs.append((variable, UInt32(e)))
+            collected.append(Term[ZZ](Monomial(pairs^, budget), ZZ(sums[e].copy())))
+    return SparsePoly[ZZ].from_terms(collected^, f.order, NoContext(), budget)
 
 
 def _taylor(f: SparsePoly[ZZ], variable: Int64, a: Integer, k: Int, mut budget: Budget) raises PolyError -> SparsePoly[ZZ]:
@@ -743,6 +767,15 @@ def _test_point(f: SparsePoly[ZZ], main: Int64, params: List[Int64], lead: Spars
     var lead_value = _eval_tail(lead, params, points, 0, budget)
     if lead_value.is_zero():
         return None
+    var values = List[Integer]()
+    for t in lead_factors:
+        budget.charge(1)
+        var v = _eval_tail(t.poly, params, points, 0, budget)
+        values.append(v.terms[0].coefficient.value.copy() if len(v.terms) else Integer(0))
+    # A larger content only removes more primes, so failing with content one
+    # rejects the point before f is evaluated.
+    if not _non_divisors(values, Integer(1), ct, budget):
+        return None
     var image = _dense(_eval_tail(f, params, points, 0, budget), main, budget)
     if image.degree() != f.degree_in(main, budget):
         return None
@@ -752,11 +785,6 @@ def _test_point(f: SparsePoly[ZZ], main: Int64, params: List[Int64], lead: Spars
     var primitive = _divide_scalar(image, ZZ(content.copy()), budget)
     if not _modular_squarefree(primitive, budget):
         return None
-    var values = List[Integer]()
-    for t in lead_factors:
-        budget.charge(1)
-        var v = _eval_tail(t.poly, params, points, 0, budget)
-        values.append(v.terms[0].coefficient.value.copy() if len(v.terms) else Integer(0))
     if not _non_divisors(values, content, ct, budget):
         return None
     var factored = factor_integer(primitive, budget)
