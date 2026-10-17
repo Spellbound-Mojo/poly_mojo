@@ -251,7 +251,9 @@ def _sign(c: List[Integer], x: Rational) raises -> Int:
     var shift = _power_shift(q)
     var error = _error_bits(n, p, q)
     var exact_bits = n * (_bits(p) + _bits(q))
-    var extra = 64
+    # Near a root, |c(x)| is about |c'| times the grid step of x, so start
+    # with as many guard bits as x has fractional bits.
+    var extra = 64 + _bits(q)
     while error + extra < exact_bits:
         var t = _fixed(c, p, q, shift, error + extra)
         if t and _bits(t) - 1 > error + 1:
