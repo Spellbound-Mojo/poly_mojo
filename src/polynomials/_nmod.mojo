@@ -9,7 +9,12 @@ budget in proportion to its coefficient work before doing it.
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product, _sum
 
 comptime _KARATSUBA = 128
-"""Operand length at which products switch from schoolbook to Karatsuba."""
+"""Operand length at which products switch from schoolbook to Karatsuba;
+SIMD schoolbook for primes below _SMALL wins up to _KARATSUBA_SMALL."""
+comptime _KARATSUBA_SMALL = 1024
+comptime _SMALL = UInt64(1) << 28
+"""Primes below this bound keep products under 2^56, so 64-bit SIMD lanes
+accumulate 256 of them exactly before a reduction."""
 
 
 @fieldwise_init
@@ -19,6 +24,7 @@ struct _Field(ImplicitlyCopyable, Movable):
     var r2: UInt64
     var one: UInt64
     var batch: Int
+    var karatsuba: Int
 
 
 def _field(p: UInt64) raises PolyError -> _Field:
@@ -31,7 +37,7 @@ def _field(p: UInt64) raises PolyError -> _Field:
     var r2 = UInt64((UInt128(r) * UInt128(r)) % UInt128(p))
     # batch * (p-1)^2 < p * 2^64 keeps every partial sum valid for REDC.
     var batch = Int(min(UInt64.MAX // p, UInt64(1) << 20))
-    return _Field(p, 0 - inverse, r2, r, batch)
+    return _Field(p, 0 - inverse, r2, r, batch, _KARATSUBA_SMALL if p < _SMALL else _KARATSUBA)
 
 
 @always_inline
@@ -99,6 +105,18 @@ def _dot(a: Pointer[mut=False, UInt64, _], b: Pointer[mut=False, UInt64, _], n: 
     """Return the Montgomery sum of a[i] * b[i] for i below n."""
     var total = UInt64(0)
     var i = 0
+    if f.p < _SMALL and n >= 16:
+        var mask = SIMD[DType.uint64, 8](0xFFFFFFFF)
+        while i + 8 <= n:
+            var stop = min(n, i + 8 * 256)
+            var acc = SIMD[DType.uint64, 8](0)
+            while i + 8 <= stop:
+                var x = a.unsafe_offset(i).unsafe_load[width=8]()
+                var y = b.unsafe_offset(i).unsafe_load[width=8]()
+                acc += (x & mask) * (y & mask)
+                i += 8
+            comptime for lane in range(8):
+                total = _addm(total, _redc(UInt128(acc[lane]), f), f)
     while i < n:
         var stop = min(n, i + f.batch)
         var acc = UInt128(0)
@@ -195,7 +213,7 @@ def _accumulate(mut target: List[UInt64], source: List[UInt64], shift: Int, f: _
 def _karatsuba(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
     var n = len(a)
     var m = len(b)
-    if min(n, m) < _KARATSUBA:
+    if min(n, m) < f.karatsuba:
         return _schoolbook(a, b, n + m, f, budget)
     if 2 * min(n, m) <= max(n, m):
         # Unbalanced: multiply the shorter operand by consecutive blocks.
@@ -236,7 +254,7 @@ def _mul(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) raises
 
 
 def _mullow(a: List[UInt64], b: List[UInt64], limit: Int, f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
-    if min(len(a), len(b), limit) < 2 * _KARATSUBA:
+    if min(len(a), len(b), limit) < 2 * f.karatsuba:
         return _schoolbook(a, b, limit, f, budget)
     var full = _mul(_slice(a, 0, limit, budget), _slice(b, 0, limit, budget), f, budget)
     return _slice(full, 0, limit, budget)
@@ -334,7 +352,7 @@ def _rem(a: List[UInt64], m: _Modulus, field: _Field, mut budget: Budget) raises
         return _divmod_classic(a, m.f, False, field, budget)[1].copy()
     var size = len(a)
     var length = size - n
-    if n < 8 * _KARATSUBA:
+    if n < 8 * field.karatsuba:
         # rev(q) = rev(a) * g mod x^length, and r = a - q * f mod x^n. With
         # q_i = rq_(length-1-i), both sums are forward dot products, so no
         # operand is reversed.

@@ -1,7 +1,12 @@
 """Resultants and the complete indexed subresultant family."""
 from .errors import Budget, PolyError, PolyErrorKind, _allocation
-from .coefficients import CoefficientRing
+from .coefficients import CoefficientRing, ZZ, ModInt
 from .sparse import SparsePoly
+from .dense import DensePoly
+from ._views import _variables, _constant
+from ._nmod_euclid import _Field, _resultant_words
+from ._univariate_modular import _modular_resultant
+from ._multivariate_resultant import _integer_resultant, _field_resultant
 from .certificates import ResultantResult
 from .division import divide_exact
 from ._tower import _zero, _lc, _exact_poly
@@ -111,3 +116,85 @@ def resultant[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], variable: 
         u = u.neg(budget)
         v = v.neg(budget)
     return ResultantResult[C](value^, (u^, v^))
+
+
+def _word_resultant(f: DensePoly[ModInt], g: DensePoly[ModInt], mut budget: Budget) raises PolyError -> ModInt:
+    var field = _Field.of(f.ring.value)
+    _allocation[UInt64](len(f.coefficients) + len(g.coefficients), budget)
+    var a = List[UInt64](capacity=len(f.coefficients))
+    for i in range(len(f.coefficients)):
+        a.append(field.enter(f.coefficients[i].value))
+    var b = List[UInt64](capacity=len(g.coefficients))
+    for i in range(len(g.coefficients)):
+        b.append(field.enter(g.coefficients[i].value))
+    return ModInt(field.leave(_resultant_words(a^, b^, field, budget)), f.ring)
+
+
+def resultant_value[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], variable: Int64, mut budget: Budget) raises PolyError -> SparsePoly[C]:
+    """Compute the resultant alone, without the multipliers of its identity.
+
+    Univariate integer inputs use multi-modular reconstruction up to the
+    Hadamard bound, univariate inputs over odd prime fields a word-size
+    Euclidean recurrence, multivariate integer and odd prime field inputs
+    dense evaluation and interpolation when the specialization grid is
+    small enough, and all others the subresultant PRS of `resultant`
+    without cofactor propagation.
+
+    Parameters:
+        C: ZZ or a coefficient field.
+
+    Args:
+        f: The first polynomial.
+        g: The second polynomial in the same ring and order.
+        variable: The elimination variable.
+        budget: The shared work allowance.
+
+    Returns:
+        The Sylvester-convention resultant, equal to `resultant(f, g, variable).resultant`.
+
+    Raises:
+        PolyError: DOMAIN for incompatible inputs or two nonzero constants in the variable, LIMIT or CAPACITY on work limits.
+    """
+    f._same(g, budget)
+    var zero = _zero(f, budget)
+    if f.is_zero() or g.is_zero():
+        return zero^
+    var n = f.degree_in(variable, budget)
+    var m = g.degree_in(variable, budget)
+    if n == 0 and m == 0:
+        raise PolyError(PolyErrorKind.DOMAIN, "resultant identity requires a positive degree")
+    if n == 0:
+        return f.pow(UInt64(m), budget)
+    if m == 0:
+        return g.pow(UInt64(n), budget)
+    var variables = _variables(f, g, budget)
+    if len(variables) == 1:
+        comptime if C == ZZ:
+            var fd = DensePoly[ZZ].from_sparse(rebind[SparsePoly[ZZ]](f), budget, variable=variable)
+            var gd = DensePoly[ZZ].from_sparse(rebind[SparsePoly[ZZ]](g), budget, variable=variable)
+            var value = ZZ(_modular_resultant(fd, gd, budget))
+            if value.is_zero():
+                return zero^
+            return _constant(f, rebind[C](value), budget)
+        elif C == ModInt:
+            if rebind[SparsePoly[ModInt]](f).ring.value > 2:
+                var value = _word_resultant(DensePoly[ModInt].from_sparse(rebind[SparsePoly[ModInt]](f), budget, variable=variable), DensePoly[ModInt].from_sparse(rebind[SparsePoly[ModInt]](g), budget, variable=variable), budget)
+                if value.is_zero():
+                    return zero^
+                return _constant(f, rebind[C](value), budget)
+    if len(variables) > 1:
+        comptime if C == ZZ:
+            var image = _integer_resultant(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](g), variable, variables, budget)
+            if image:
+                return rebind_var[SparsePoly[C]](image.take())
+        elif C == ModInt:
+            var image = _field_resultant(rebind[SparsePoly[ModInt]](f), rebind[SparsePoly[ModInt]](g), variable, variables, budget)
+            if image:
+                return rebind_var[SparsePoly[C]](image.take())
+    var sequence = _prs(f, g, variable, False, budget, history=False)
+    if not len(sequence) or sequence[len(sequence) - 1].polynomial.degree_in(variable, budget) != 0:
+        return zero^
+    var value = sequence[len(sequence) - 1].principal._copy(budget)
+    if n < m and (n % 2) and (m % 2):
+        value = value.neg(budget)
+    return value^

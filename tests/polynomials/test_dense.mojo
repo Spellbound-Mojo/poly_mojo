@@ -1,4 +1,5 @@
 """Every degree through twice the Karatsuba threshold and sparse cross-checks."""
+from apn_mojo import Integer
 from polynomials import Budget, PolyErrorKind, CoefficientRing, ZZ, QQ, ModInt, Modulus, NoContext, MonomialOrder, SparsePoly, DensePoly
 from support.check import Checker
 from support.gen import coefficient
@@ -87,12 +88,56 @@ def check_ring[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
     except e:
         c.check(e.kind == PolyErrorKind.LIMIT, "dense budget exhaustion")
 
+def transforms[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
+    """Transform products agree with schoolbook products across lengths, coefficient sizes and squares."""
+    var work = Budget()
+    var rng = SplitMix64(31337)
+    for bits in [8, 64, 300]:
+        for lengths in [(32, 32), (33, 100), (257, 40), (300, 301)]:
+            var aa = List[C]()
+            var bb = List[C]()
+            for i in range(lengths[0] + lengths[1]):
+                var value: C
+                comptime if C == ZZ:
+                    var x = Integer(Int64(rng.next() >> 1))
+                    var shift = bits - 63
+                    if shift > 0:
+                        x = (x << Integer(shift)) + Integer(Int64(rng.next() >> 1))
+                    elif shift < 0:
+                        x = x >> Integer(-shift)
+                    value = rebind_var[C](ZZ(-x if rng.below(2) else x))
+                else:
+                    var p = rebind[Modulus](ctx).value
+                    value = rebind_var[C](ModInt(rng.next() % p if bits != 8 else p - 1 - UInt64(rng.below(3)), rebind[Modulus](ctx)))
+                if i < lengths[0]:
+                    aa.append(value^)
+                else:
+                    bb.append(value^)
+            var a = DensePoly[C].from_coefficients(7, ctx, aa^, work)
+            var b = DensePoly[C].from_coefficients(7, ctx, bb^, work)
+            c.check(a.mul(b, work) == a.mul_schoolbook(b, work), String("transform product, ", bits, " bits, lengths ", lengths[0], " and ", lengths[1]))
+            c.check(a.mul(a, work) == a.mul_schoolbook(a, work), "transform square")
+    # Extreme values: all coefficients at the top of their range, which exercises the CRT's symmetric range.
+    var top = List[C]()
+    for _ in range(64):
+        comptime if C == ZZ:
+            top.append(rebind_var[C](ZZ((Integer(1) << Integer(255)) - Integer(1))))
+        else:
+            top.append(rebind_var[C](ModInt(rebind[Modulus](ctx).value - 1, rebind[Modulus](ctx))))
+    var t = DensePoly[C].from_coefficients(7, ctx, top^, work)
+    c.check(t.mul(t.neg(work), work) == t.mul_schoolbook(t.neg(work), work), "transform product at the coefficient bounds")
+
+
 def main() raises:
     var c = Checker("dense")
     var work = Budget()
     check_ring[ZZ](NoContext(), c)
     check_ring[QQ](NoContext(), c)
     check_ring[ModInt](Modulus(101, work), c)
+    transforms[ZZ](NoContext(), c)
+    transforms[ModInt](Modulus(101, work), c)
+    transforms[ModInt](Modulus((UInt64(1) << 62) - 57, work), c)
+    transforms[ModInt](Modulus(4611685941117976577, work), c)
     var x = SparsePoly[ZZ].variable(1, MonomialOrder(), NoContext(), work)
     var y = SparsePoly[ZZ].variable(2, MonomialOrder(), NoContext(), work)
     try:

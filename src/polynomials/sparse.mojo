@@ -1,9 +1,10 @@
 """Canonical sparse arithmetic by merging ordered exact terms."""
 from std.sys import size_of
 from .errors import Budget, PolyError, PolyErrorKind, _sum, _product, _charge_size, _allocation
-from .coefficients import CoefficientRing
+from .coefficients import CoefficientRing, ZZ, ModInt
 from .monomial import Monomial, MonomialOrder
 from ._ordering import _IndexedOrder, _stable_indices, _sift_min
+from ._packed_products import _packed_product
 
 @fieldwise_init
 struct Term[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
@@ -341,6 +342,12 @@ struct SparsePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
                 var right = other.reorder(order, budget)
                 var result = _heap_product[Self.C, True](left, right, budget) if len(left.terms) <= len(right.terms) else _heap_product[Self.C, True](right, left, budget)
                 return result.reorder(self.order, budget)
+        comptime if Self.C == ZZ or Self.C == ModInt:
+            if self.order.kind == MonomialOrder.LEX and count >= 4096:
+                # Kronecker-packed exponents and dense windows.
+                var packed = _packed_product(self, other, budget)
+                if packed:
+                    return packed.take()
         if self.order.kind != MonomialOrder.KERNEL and count >= 64:
             if len(self.terms) <= len(other.terms):
                 return _heap_product(self, other, budget)
@@ -524,6 +531,58 @@ struct SparsePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
             budget.charge(1)
             terms.append(t._copy(budget))
         return Self.from_terms(terms^, order, self.ring, budget)
+
+    def _moved_to(var self, order: MonomialOrder, mut budget: Budget) raises PolyError -> Self:
+        """`reorder`, consuming the polynomial: its terms move rather than being copied."""
+        _charge_size(_sum(len(self.order.variables), len(order.variables)), budget)
+        if self.order == order:
+            return self^
+        if order.kind == MonomialOrder.LEX and order._identity():
+            var keys = self._lex_keys(order, budget)
+            if keys:
+                # Term i of the result is the term in the low bits of key i:
+                # apply that permutation in place, a cycle at a time.
+                ref sorted = keys.value()
+                var n = len(sorted)
+                budget.charge(UInt64(n))
+                var done = List[Bool](length=n, fill=False)
+                for start in range(n):
+                    if done[start]:
+                        continue
+                    var j = start
+                    done[j] = True
+                    while Int(sorted[j] & UInt256(0xFFFFFFFF)) != start:
+                        var source = Int(sorted[j] & UInt256(0xFFFFFFFF))
+                        self.terms.swap_elements(j, source)
+                        j = source
+                        done[j] = True
+                self.order = order.copy()
+                return self^
+        var terms = List[Term[Self.C]]()
+        swap(terms, self.terms)
+        budget.charge(UInt64(len(terms)))
+        return Self.from_terms(terms^, order, self.ring, budget)
+
+    def _lex_keys(self, order: MonomialOrder, mut budget: Budget) raises PolyError -> Optional[List[UInt256]]:
+        """The sorted keys `_lex_sorted` orders the terms by, or None when they do not fit."""
+        var n = len(order.variables)
+        if n > 16 or len(self.terms) >= (1 << 32):
+            return None
+        _allocation[UInt256](len(self.terms), budget)
+        var keys = List[UInt256](capacity=len(self.terms))
+        for i in range(len(self.terms)):
+            ref m = self.terms[i].monomial
+            _charge_size(_sum(len(m.pairs), 1), budget)
+            if not order._within(m):
+                return None
+            var key = UInt256(i)
+            for pair in m.pairs:
+                if pair[1] >= 4096:
+                    return None
+                key |= UInt256(pair[1]) << UInt256(32 + 12 * (n - 1 - Int(pair[0])))
+            keys.append(key)
+        sort(keys)
+        return keys^
 
     def _lex_sorted(self, order: MonomialOrder, mut budget: Budget) raises PolyError -> Optional[Self]:
         """`reorder` into a LEX order over variables 0..n-1 by integer keys, or None when they do not fit.
