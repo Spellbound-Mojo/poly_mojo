@@ -13,7 +13,7 @@ from ._common import Values, _check_batch, _FieldKind, _Element, _OwnedElement, 
 from polynomials import CoefficientRing
 from ._common import _CoreKind
 from ._interop import _sparse_copy, _variables, _Shape
-from polynomials import gcd as _gcd, content as _content, primitive_part as _primitive_part, resultant as _resultant, subresultants as _subresultants, divide_exact as _divide_exact
+from polynomials import gcd as _gcd, gcd_value as _gcd_value, content as _content, primitive_part as _primitive_part, resultant as _resultant, subresultants as _subresultants, divide_exact as _divide_exact
 from ._interop import _take_sparse
 from polynomials import QQi, factor_multivariate_gaussian, factor_multivariate_finite_field, SparseSquarefreeDecomposition, squarefree_multivariate
 from polynomials import compose_dense
@@ -1735,6 +1735,9 @@ def gcd[A: Iterable, B: Iterable, P: Copyable & Deinitable, C: Copyable & Deinit
     """
     comptime k = _Join[_Kind[C], _Kind[D]]
     var pair = _pair[k, A, B, P, C, D](a, b, budget)
+    if method == "auto":
+        var value = _gcd_value(pair[0]._core[], pair[1]._core[], budget)
+        return Array[P, k](_take_sparse(value), budget)
     var result = _gcd_dispatch(pair[0]._core[], pair[1]._core[], method, budget)
     return Array[P, k](_take_sparse(result.gcd), budget)
 

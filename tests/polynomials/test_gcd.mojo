@@ -7,7 +7,9 @@ from support.rng import SplitMix64
 from polynomials._gcd import _gcd_value, _modular_primitive, _primitive_zz
 from support.corpus import read_cases, parse_order, parse_polynomial, as_zz
 from support.check import Checker
-from polynomials.gcd import gcd
+from polynomials.gcd import gcd, gcd_value
+from polynomials._euclidean import _extended
+from polynomials._dense_ops import _gcd as _field_gcd
 from polynomials.certificates import check_common_divisor, check_bezout, check_coprimality
 
 def generated[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
@@ -83,6 +85,62 @@ def modular_cases(mut c: Checker) raises:
         c.check(_modular_primitive(f, h, 0, work) == expected, "modular and PRS gcd agree")
 
 
+def dense_random[C: CoefficientRing](ctx: C.Context, degree: Int, mut rng: SplitMix64, mut work: Budget, bits: Int = 0) raises -> DensePoly[C]:
+    var values = List[C]()
+    for i in range(degree + 1):
+        var v = coefficient[C](ctx, rng.below(201) - 100, work)
+        if bits > 0:
+            # A random bits-bit magnitude with a random sign.
+            v = C.one(ctx)
+            for _ in range(bits - 1):
+                v = v.add(v, work)
+                if rng.below(2):
+                    v = v.add(C.one(ctx), work)
+            if rng.below(2):
+                v = v.neg(work)
+        if i == degree and v.is_zero():
+            v = C.one(ctx)
+        values.append(v^)
+    return DensePoly[C].from_coefficients(0, ctx, values^, work)
+
+
+def word_field_cases(mut c: Checker) raises:
+    """The word-size prime-field gcd matches the generic Euclidean loop."""
+    var work = Budget()
+    var rng = SplitMix64(4271)
+    var moduli: List[UInt64] = [3, 5, 101, 65521, prime(0, work), prime(7, work)]
+    for modulus in moduli:
+        var ctx = Modulus(modulus, work)
+        for degree in [0, 1, 2, 7, 23, 60]:
+            var g = dense_random[ModInt](ctx, degree // 2, rng, work)
+            var f = g.mul(dense_random[ModInt](ctx, degree, rng, work), work)
+            var h = g.mul(dense_random[ModInt](ctx, degree - degree // 3, rng, work), work)
+            var expected = _extended(f, h, work, carry=False)[0].copy()
+            c.check(_field_gcd(f, h, work) == expected, "word field gcd matches the generic loop")
+            c.check(_field_gcd(f, DensePoly[ModInt](0, ctx.copy()), work) == _extended(f, DensePoly[ModInt](0, ctx.copy()), work, carry=False)[0], "word field gcd with zero")
+
+
+def multi_prime_cases(mut c: Checker) raises:
+    """Planted gcds whose reconstruction needs several primes, against the PRS."""
+    var work = Budget()
+    var rng = SplitMix64(5303)
+    var order = MonomialOrder()
+    for round in range(10):
+        var bits = 40 + 30 * (round % 4)
+        var g = dense_random[ZZ](NoContext(), 3 + round % 5, rng, work, bits=bits).to_sparse(order, work)
+        var a = dense_random[ZZ](NoContext(), 4 + round % 3, rng, work, bits=bits).to_sparse(order, work)
+        var b = dense_random[ZZ](NoContext(), 2 + round % 4, rng, work, bits=bits).to_sparse(order, work)
+        var f = g.mul(a, work)
+        var h = g.mul(b, work)
+        var sequence = _prs(f, h, 0, False, work)
+        var last = sequence[len(sequence) - 1].polynomial.copy()
+        var cf = _primitive_zz(f, work)
+        var ch = _primitive_zz(h, work)
+        var expected = _primitive_zz(last, work)
+        c.check(_modular_primitive(cf, ch, 0, work) == expected, "multi-prime modular gcd matches the PRS")
+        c.check(gcd_value(f, h, work) == gcd(f, h, work).gcd, "gcd_value equals the gcd of the full result")
+
+
 def main() raises:
     var c = Checker("gcd")
     var work = Budget()
@@ -126,4 +184,6 @@ def main() raises:
     generated[QQ](NoContext(), c)
     generated[ModInt](Modulus(101, work), c)
     modular_cases(c)
+    word_field_cases(c)
+    multi_prime_cases(c)
     c.finish()
