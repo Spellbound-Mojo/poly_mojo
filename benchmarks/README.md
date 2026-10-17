@@ -541,6 +541,7 @@ pixi run test            # check the generators against SymbolicData
 pixi run bench -- --family groebner --timeout 120 --single-above 1
 pixi run bench -- --family groebner --timeout 600 --single-above 1   # retry the timeouts
 pixi run bench -- --family streaming --processes 1
+pixi run bench -- --family gcd --timeout 60   # gcds, resultants, discriminants (harness/gcd.py)
 pixi run report          # or: pixi run report -- results/<host>/<date>
 ```
 

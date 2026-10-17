@@ -12,7 +12,7 @@ from ._common import Values, _FieldKind, _Join, _Element, _OwnedElement, _Kind, 
 from polynomials import CoefficientRing
 from ._common import _CoreKind
 from ._interop import _dense_copy
-from polynomials import SparsePoly, gcd as _gcd, content as _content, primitive_part as _primitive_part, extended_gcd as _extended_gcd, resultant as _resultant, subresultants as _subresultants, divide_exact as _divide_exact, pseudo_divmod as _pseudo_divmod
+from polynomials import SparsePoly, gcd as _gcd, gcd_value as _gcd_value, content as _content, primitive_part as _primitive_part, extended_gcd as _extended_gcd, resultant as _resultant, resultant_value as _resultant_value, subresultants as _subresultants, divide_exact as _divide_exact, pseudo_divmod as _pseudo_divmod
 from ._interop import _dense_sparse, _take_dense
 from polynomials import interpolate as _interpolate, hermite_interpolate as _hermite_interpolate, MultipointPlan, affine_transform as _affine_transform, taylor_shift as _taylor_shift, jet_evaluate as _jet_evaluate, definite_integral as _definite_integral
 from ._common import _sequence, _sequence_coefficients, _values_from_core, _data_context, _Nested, _rows
@@ -1458,8 +1458,7 @@ def gcd[A: Iterable, B: Iterable](a: A, b: B, mut budget: Budget) raises PolyErr
     var pair = _pair[k](a, b, budget)
     var left = _dense_sparse(pair[0]._core[], budget)
     var right = _dense_sparse(pair[1]._core[], budget)
-    var result = _gcd(left, right, budget)
-    return _from_sparse[k](result.gcd, budget)
+    return _from_sparse[k](_gcd_value(left, right, budget), budget)
 
 def gcd[A: Iterable, B: Iterable](a: A, b: B, *, max_steps: UInt64 = UInt64.MAX) raises PolyError -> Array[_Join[_Kind[_Element[A]], _Kind[_Element[B]]]]:
     """Return a positive-leading integer GCD or a monic field GCD.
@@ -1560,11 +1559,11 @@ def resultant[A: Iterable, B: Iterable](a: A, b: B, mut budget: Budget) raises P
     var pair = _pair[k](a, b, budget)
     var left = _dense_sparse(pair[0]._core[], budget)
     var right = _dense_sparse(pair[1]._core[], budget)
-    var result = _resultant(left, right, 0, budget)
-    if not len(result.resultant.terms):
+    var value = _resultant_value(left, right, 0, budget)
+    if not len(value.terms):
         return _unwrap[k](_Ring[k].zero(left.ring))
-    _charge_size(result.resultant.terms[0].coefficient.size(), budget)
-    return _unwrap[k](result.resultant.terms[0].coefficient)
+    _charge_size(value.terms[0].coefficient.size(), budget)
+    return _unwrap[k](value.terms[0].coefficient)
 
 def resultant[A: Iterable, B: Iterable](a: A, b: B, *, max_steps: UInt64 = UInt64.MAX) raises PolyError -> _Scalar[_Join[_Kind[_Element[A]], _Kind[_Element[B]]]]:
     """Eliminate the variable using the Sylvester sign convention.
