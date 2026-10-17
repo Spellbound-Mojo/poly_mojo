@@ -1,15 +1,28 @@
 """Number-theoretic transforms in double precision, for products that need few primes.
 
-Residues modulo primes p < 2^50 are exact integers in a Float64. A modular
-product a * b splits exactly into h + l with h = fl(a * b) and l = fma(a, b, -h);
-with q = round(h / p), fma(-q, p, h) + l is a * b - q p exactly, in (-1.5 p, 1.5 p),
-whenever |a b| < 3 p^2. Eight-lane vectors run every butterfly, the last three
-stages through lane shuffles: a convolution runs 2.4-2.7 times faster than the
-scalar 61-bit kernel, about twice as fast per bit of modulus.
+Residues modulo primes 2^49.99 < p < 2^50 are exact integers in a Float64, and
+every operation below is exact. The bounds hold for any residues below p and
+any length, so no input needs the integer kernel instead. With u = 2^-53:
 
-Values stay signed: forward (decimation in frequency) keeps them within 1.5 p,
-inverse (decimation in time) reduces both outputs of each butterfly. The tables
-follow _ntt's layout, entry m + j holding w_2m^j or w_2m^-j.
+- _mulmod(a, b) for |a b| <= M p^2, M <= 1. h = fl(a b) has |a b - h| <= u M p^2
+  < 2^47, and l = fma(a, b, -h) is that error exactly. fl(h fl(1/p)) is within
+  3u M p < 0.375 M of a b / p, so the rounded quotient Q leaves
+  |a b - Q p| <= (0.5 + 0.375 M) p. fma(-Q, p, h) = h - Q p is an integer below
+  2^51, so it is exact, and adding l is exact: the result is a b - Q p.
+- _reduce(x) for |x| < 2 p: x - Q p, within p / 2 + 1, exactly by one fma.
+- Twiddles are reduced, within p / 2 + 1.
+- Forward (decimation in frequency): inputs lie in [0, p). With values within p,
+  u + v is reduced and (u - v) w has M <= 1, so outputs stay within 0.875 p.
+- Pointwise products of values within p have M <= 1: within 0.875 p.
+- Inverse (decimation in time): t = v w has M <= 0.5, within 0.69 p, and both
+  u + t and u - t (below 1.6 p) are reduced to within p / 2 + 1.
+- The final scaling by 1/n < p has M <= 0.5. Every sum is of integers below
+  2^52, hence exact.
+
+Eight-lane vectors run every butterfly, the last three stages through lane
+shuffles: a convolution runs 2.4-2.7 times faster than the scalar 61-bit
+kernel, about twice as fast per bit of modulus. The tables follow _ntt's
+layout, entry m + j holding w_2m^j or w_2m^-j.
 """
 from std.math import fma
 
@@ -45,7 +58,7 @@ def _fpower(a: UInt64, n: UInt64, q: UInt64) -> UInt64:
 
 @always_inline
 def _mulmod[w: Int](a: SIMD[DType.float64, w], b: SIMD[DType.float64, w], p: SIMD[DType.float64, w], inverse: SIMD[DType.float64, w]) -> SIMD[DType.float64, w]:
-    """a * b mod p in (-1.5 p, 1.5 p), for |a b| < 3 p^2."""
+    """a * b mod p within (0.5 + 0.375 M) p, for |a b| <= M p^2 with M <= 1."""
     var h = a * b
     var l = fma(a, b, -h)
     var q = (h * inverse).__round__()
@@ -54,7 +67,7 @@ def _mulmod[w: Int](a: SIMD[DType.float64, w], b: SIMD[DType.float64, w], p: SIM
 
 @always_inline
 def _reduce[w: Int](x: SIMD[DType.float64, w], p: SIMD[DType.float64, w], inverse: SIMD[DType.float64, w]) -> SIMD[DType.float64, w]:
-    """x mod p in about [-p/2, p/2], for |x| < 2^52."""
+    """x mod p within p / 2 + 1, for |x| < 2 p."""
     return fma(-(x * inverse).__round__(), p, x)
 
 
@@ -76,7 +89,8 @@ struct _FTables(Movable):
         var fw = self.forward.unsafe_ptr()
         var x = UInt64(1)
         for j in range(min(half, _W)):
-            fw.unsafe_offset(half + j).unsafe_store(Float64(x))
+            # Signed representatives keep every twiddle within p / 2.
+            fw.unsafe_offset(half + j).unsafe_store(Float64(x) - Float64(q) if x > q // 2 else Float64(x))
             x = UInt64(UInt128(x) * UInt128(w) % UInt128(q))
         if half > _W:
             # Eight independent chains: w^(j + 8) = w^j w^8.
@@ -104,7 +118,7 @@ struct _FTables(Movable):
 
 
 def _fforward(mut a: List[Float64], t: _FTables, prime: Float64):
-    """Decimation in frequency; bit-reversed output, values within 1.5 p."""
+    """Decimation in frequency; bit-reversed output, values within 0.875 p."""
     var n = len(a)
     var ptr = a.unsafe_ptr()
     var wp = t.forward.unsafe_ptr()
@@ -242,6 +256,55 @@ def _floats(values: List[UInt64], n: Int) -> List[Float64]:
     return out^
 
 
+def _ftransform(values: List[UInt64], tables: _FTables, prime: Float64, n: Int) -> List[Float64]:
+    """The forward transform of residues below the prime, zero-padded to n."""
+    var x = _floats(values, n)
+    _fforward(x, tables, prime)
+    return x^
+
+
+def _fmultiply(x: List[Float64], y: List[Float64], tables: _FTables, prime: Float64, count: Int) -> List[UInt64]:
+    """The first `count` cyclic convolution coefficients of two forward transforms, reduced below the prime."""
+    var n = len(x)
+    var z = List[Float64](length=n, fill=0)
+    var px = x.unsafe_ptr()
+    var py = y.unsafe_ptr()
+    var pz = z.unsafe_ptr()
+    var p = SIMD[DType.float64, _W](prime)
+    var inv = SIMD[DType.float64, _W](1.0 / prime)
+    var p1 = SIMD[DType.float64, 1](prime)
+    var inv1 = SIMD[DType.float64, 1](1.0 / prime)
+    var i = 0
+    while i + _W <= n:
+        pz.unsafe_offset(i).unsafe_store(_mulmod[_W](px.unsafe_offset(i).unsafe_load[width=_W](), py.unsafe_offset(i).unsafe_load[width=_W](), p, inv))
+        i += _W
+    while i < n:
+        pz.unsafe_offset(i).unsafe_store(_mulmod[1](px.unsafe_offset(i).unsafe_load[width=1](), py.unsafe_offset(i).unsafe_load[width=1](), p1, inv1))
+        i += 1
+    _finverse(z, tables, prime)
+    # Divide by n and move into [0, q).
+    var q = UInt64(prime)
+    var scale = Float64(_fpower(UInt64(n), q - 2, q))
+    var sv = SIMD[DType.float64, _W](scale)
+    var result = List[UInt64](length=count, fill=0)
+    var out = result.unsafe_ptr()
+    var zero = SIMD[DType.float64, _W](0)
+    i = 0
+    while i + _W <= count:
+        var r = _reduce[_W](_mulmod[_W](pz.unsafe_offset(i).unsafe_load[width=_W](), sv, p, inv), p, inv)
+        r = r.lt(zero).select(r + p, r)
+        out.unsafe_offset(i).unsafe_store(r.cast[DType.uint64]())
+        i += _W
+    var s1 = SIMD[DType.float64, 1](scale)
+    while i < count:
+        var r = _reduce[1](_mulmod[1](pz.unsafe_offset(i).unsafe_load[width=1](), s1, p1, inv1), p1, inv1)[0]
+        if r < 0:
+            r += prime
+        out.unsafe_offset(i).unsafe_store(UInt64(r))
+        i += 1
+    return result^
+
+
 def _fconvolve(a: List[UInt64], b: List[UInt64], count: Int, square: Bool, index: Int, n: Int) -> List[UInt64]:
     """The first `count` cyclic convolution coefficients of residues below float prime `index`, reduced below it.
 
@@ -252,47 +315,7 @@ def _fconvolve(a: List[UInt64], b: List[UInt64], count: Int, square: Bool, index
     var q = primes[index]
     var prime = Float64(q)
     var tables = _FTables(q, roots[index], n)
-    var x = _floats(a, n)
-    _fforward(x, tables, prime)
-    var y = List[Float64]()
-    if not square:
-        y = _floats(b, n)
-        _fforward(y, tables, prime)
-    var px = x.unsafe_ptr()
-    var py = y.unsafe_ptr() if not square else px
-    var i = 0
-    var p = SIMD[DType.float64, _W](prime)
-    var inv = SIMD[DType.float64, _W](1.0 / prime)
-    while i + _W <= n:
-        var u = px.unsafe_offset(i).unsafe_load[width=_W]()
-        var v = py.unsafe_offset(i).unsafe_load[width=_W]()
-        px.unsafe_offset(i).unsafe_store(_mulmod[_W](u, v, p, inv))
-        i += _W
-    var p1 = SIMD[DType.float64, 1](prime)
-    var inv1 = SIMD[DType.float64, 1](1.0 / prime)
-    while i < n:
-        var u = px.unsafe_offset(i).unsafe_load[width=1]()
-        var v = py.unsafe_offset(i).unsafe_load[width=1]()
-        px.unsafe_offset(i).unsafe_store(_mulmod[1](u, v, p1, inv1))
-        i += 1
-    _finverse(x, tables, prime)
-    # Divide by n and move into [0, q).
-    var scale = Float64(_fpower(UInt64(n), q - 2, q))
-    var sv = SIMD[DType.float64, _W](scale)
-    var result = List[UInt64](length=count, fill=0)
-    var out = result.unsafe_ptr()
-    var zero = SIMD[DType.float64, _W](0)
-    i = 0
-    while i + _W <= count:
-        var r = _reduce[_W](_mulmod[_W](px.unsafe_offset(i).unsafe_load[width=_W](), sv, p, inv), p, inv)
-        r = r.lt(zero).select(r + p, r)
-        out.unsafe_offset(i).unsafe_store(r.cast[DType.uint64]())
-        i += _W
-    var s1 = SIMD[DType.float64, 1](scale)
-    while i < count:
-        var r = _reduce[1](_mulmod[1](px.unsafe_offset(i).unsafe_load[width=1](), s1, p1, inv1), p1, inv1)[0]
-        if r < 0:
-            r += prime
-        out.unsafe_offset(i).unsafe_store(UInt64(r))
-        i += 1
-    return result^
+    var x = _ftransform(a, tables, prime, n)
+    if square:
+        return _fmultiply(x, x, tables, prime, count)
+    return _fmultiply(x, _ftransform(b, tables, prime, n), tables, prime, count)

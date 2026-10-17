@@ -16,7 +16,7 @@ from .coefficient_buffer import _CoefficientView, _view
 from .coefficients import CoefficientRing, ZZ, QQ, ModInt, _mod_mul
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product, _sum
 from apn_mojo import Integer, Rational, lcm
-from ._fntt import _fconvolve, _FPRIMES, _FPRIME_BITS
+from ._fntt import _fconvolve, _ftransform, _fmultiply, _FTables, _FPRIMES, _FROOTS, _FPRIME_BITS
 
 comptime _PRIME_COUNT = 48
 comptime _PRIMES: Array[UInt64, _PRIME_COUNT] = [
@@ -883,16 +883,29 @@ def _ntt_modular[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientV
     return result^
 
 
+struct _Spectrum(Movable):
+    """Forward transforms of one operand, one per prime, in the convolver's family."""
+    var ints: List[List[UInt64]]
+    var floats: List[List[Float64]]
+
+    def __init__(out self):
+        self.ints = List[List[UInt64]]()
+        self.floats = List[List[Float64]]()
+
+
 struct _Convolver(Movable):
     """Cyclic convolutions of length n modulo a prime p < 2^62 that keep their operands' transforms.
 
-    A transform prime is its own modulus; any other p uses enough transform
-    primes for sums of n products below p^2, then Garner's CRT.
+    A transform prime is its own modulus; any other p uses enough primes for
+    sums of n products below p^2, then Garner's CRT: float primes when at most
+    _FLOAT_PRIMES of them suffice and n >= 16, integer primes otherwise.
     """
     var n: Int
     var p: UInt64
+    var floating: Bool
     var indices: List[Int]
     var tables: List[_Tables]
+    var float_tables: List[_FTables]
     var garner: _Garner
     var weights: List[UInt64]
     """(q_0 ... q_(i-1)) mod p."""
@@ -902,44 +915,68 @@ struct _Convolver(Movable):
         var roots = materialize[_ROOTS]()
         self.n = n
         self.p = p
+        self.floating = False
         self.indices = List[Int]()
         var index = _prime_index(p)
         if index >= 0:
             self.indices.append(index)
         else:
             var bits = 2 * _bit_length(Int(p - 1)) + _bit_length(n)
-            for j in range((bits + _PRIME_BITS - 1) // _PRIME_BITS):
+            var small = (bits + _FPRIME_BITS - 1) // _FPRIME_BITS
+            self.floating = small <= _FLOAT_PRIMES and n >= 16
+            for j in range(small if self.floating else (bits + _PRIME_BITS - 1) // _PRIME_BITS):
                 self.indices.append(j)
         var k = len(self.indices)
         _allocation[UInt64](_product(4 * k, n), budget)
         _charge_size(_product(k, n), budget)
-        self.tables = List[_Tables](capacity=k)
-        for j in self.indices:
-            self.tables.append(_Tables(primes[j], roots[j], n))
-        self.garner = _garner(k)
+        self.tables = List[_Tables]()
+        self.float_tables = List[_FTables]()
+        var moduli = List[UInt64](capacity=k)
+        if self.floating:
+            var fprimes = materialize[_FPRIMES]()
+            var froots = materialize[_FROOTS]()
+            for j in self.indices:
+                self.float_tables.append(_FTables(fprimes[j], froots[j], n))
+                moduli.append(fprimes[j])
+            self.garner = _garner[True](k)
+        else:
+            for j in self.indices:
+                self.tables.append(_Tables(primes[j], roots[j], n))
+                moduli.append(primes[j])
+            self.garner = _garner(k)
         self.weights = List[UInt64](capacity=k)
         var w = UInt64(1)
         for j in range(k):
             self.weights.append(w)
-            w = _mod_mul(w, primes[j] % p, p)
+            w = _mod_mul(w, moduli[j] % p, p)
 
-    def transform(self, values: List[UInt64], mut budget: Budget) raises PolyError -> List[List[UInt64]]:
+    def transform(self, values: List[UInt64], mut budget: Budget) raises PolyError -> _Spectrum:
         """The forward transforms, one per prime, of residues below p (at most n of them)."""
-        var primes = materialize[_PRIMES]()
         var log = _bit_length(self.n)
         _charge_size(_product(len(self.indices), _product(self.n, log)), budget)
         _allocation[UInt64](_product(len(self.indices), self.n), budget)
-        var out = List[List[UInt64]](capacity=len(self.indices))
+        var out = _Spectrum()
+        if self.floating:
+            var fprimes = materialize[_FPRIMES]()
+            for j in range(len(self.indices)):
+                var q = fprimes[self.indices[j]]
+                var one_quotient = _shoup_quotient(1, q)
+                var x = List[UInt64](capacity=len(values))
+                for i in range(len(values)):
+                    x.append(_reduce_2q(_shoup(values[i], 1, one_quotient, q), q))
+                out.floats.append(_ftransform(x, self.float_tables[j], Float64(q), self.n))
+            return out^
+        var primes = materialize[_PRIMES]()
         for j in range(len(self.indices)):
             # Residues below p < 2^62 are already below 2q for every q > 2^61.
             var x = List[UInt64](length=self.n, fill=0)
             for i in range(len(values)):
                 x[i] = values[i]
             _forward(x, self.tables[j], primes[self.indices[j]])
-            out.append(x^)
+            out.ints.append(x^)
         return out^
 
-    def multiply(self, a: List[List[UInt64]], b: List[List[UInt64]], count: Int, mut budget: Budget) raises PolyError -> List[UInt64]:
+    def multiply(self, a: _Spectrum, b: _Spectrum, count: Int, mut budget: Budget) raises PolyError -> List[UInt64]:
         """The first `count` cyclic convolution coefficients of two transforms, reduced modulo p."""
         var primes = materialize[_PRIMES]()
         var k = len(self.indices)
@@ -947,24 +984,29 @@ struct _Convolver(Movable):
         _charge_size(_product(k, _product(self.n, log + 2)), budget)
         _allocation[UInt64](_product(k, self.n), budget)
         var residues = List[List[UInt64]](capacity=k)
-        for j in range(k):
-            var q = primes[self.indices[j]]
-            var q_inverse = _montgomery_inverse(q)
-            var x = List[UInt64](length=self.n, fill=0)
-            for i in range(self.n):
-                x.unsafe_get(i) = _redc(a[j].unsafe_get(i), b[j].unsafe_get(i), q, q_inverse)
-            _inverse(x, self.tables[j], q)
-            var r = UInt64(((UInt128(1) << 64) % UInt128(q)))
-            var scale = _mod_mul(r, _power(UInt64(self.n) % q, q - 2, q), q)
-            var scale_quotient = _shoup_quotient(scale, q)
-            for i in range(count):
-                x.unsafe_get(i) = _reduce_2q(_shoup(x.unsafe_get(i), scale, scale_quotient, q), q)
-            x.resize(count, 0)
-            residues.append(x^)
-        if k == 1 and self.indices[0] >= 0 and primes[self.indices[0]] == self.p:
-            var single = List[UInt64]()
-            swap(single, residues[0])
-            return single^
+        if self.floating:
+            var fprimes = materialize[_FPRIMES]()
+            for j in range(k):
+                residues.append(_fmultiply(a.floats[j], b.floats[j], self.float_tables[j], Float64(fprimes[self.indices[j]]), count))
+        else:
+            for j in range(k):
+                var q = primes[self.indices[j]]
+                var q_inverse = _montgomery_inverse(q)
+                var x = List[UInt64](length=self.n, fill=0)
+                for i in range(self.n):
+                    x.unsafe_get(i) = _redc(a.ints[j].unsafe_get(i), b.ints[j].unsafe_get(i), q, q_inverse)
+                _inverse(x, self.tables[j], q)
+                var r = UInt64(((UInt128(1) << 64) % UInt128(q)))
+                var scale = _mod_mul(r, _power(UInt64(self.n) % q, q - 2, q), q)
+                var scale_quotient = _shoup_quotient(scale, q)
+                for i in range(count):
+                    x.unsafe_get(i) = _reduce_2q(_shoup(x.unsafe_get(i), scale, scale_quotient, q), q)
+                x.resize(count, 0)
+                residues.append(x^)
+            if k == 1 and primes[self.indices[0]] == self.p:
+                var single = List[UInt64]()
+                swap(single, residues[0])
+                return single^
         _charge_size(_product(count, _product(k, k)), budget)
         var digits = List[UInt64](length=k, fill=0)
         var result = List[UInt64](length=count, fill=0)
@@ -1015,7 +1057,7 @@ def _series_inverse(b: List[UInt64], m: Int, p: UInt64, mut budget: Budget) rais
             head.append(b[i])
         var d: List[UInt64]
         var convolver = Optional[_Convolver](None)
-        var inverse_transform = List[List[UInt64]]()
+        var inverse_transform = _Spectrum()
         if k2 <= _NEWTON_SCHOOLBOOK:
             d = _low_product(head, inverse, k, k2, p, budget)
         else:
