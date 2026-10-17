@@ -685,18 +685,148 @@ def _ntt_modular[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientV
     return result^
 
 
+struct _Convolver(Movable):
+    """Cyclic convolutions of length n modulo a prime p < 2^62 that keep their operands' transforms.
+
+    A transform prime is its own modulus; any other p uses enough transform
+    primes for sums of n products below p^2, then Garner's CRT.
+    """
+    var n: Int
+    var p: UInt64
+    var indices: List[Int]
+    var tables: List[_Tables]
+    var garner: _Garner
+    var weights: List[UInt64]
+    """(q_0 ... q_(i-1)) mod p."""
+
+    def __init__(out self, p: UInt64, n: Int, mut budget: Budget) raises PolyError:
+        var primes = materialize[_PRIMES]()
+        var roots = materialize[_ROOTS]()
+        self.n = n
+        self.p = p
+        self.indices = List[Int]()
+        var index = _prime_index(p)
+        if index >= 0:
+            self.indices.append(index)
+        else:
+            var bits = 2 * _bit_length(Int(p - 1)) + _bit_length(n)
+            for j in range((bits + _PRIME_BITS - 1) // _PRIME_BITS):
+                self.indices.append(j)
+        var k = len(self.indices)
+        _allocation[UInt64](_product(4 * k, n), budget)
+        _charge_size(_product(k, n), budget)
+        self.tables = List[_Tables](capacity=k)
+        for j in self.indices:
+            self.tables.append(_Tables(primes[j], roots[j], n))
+        self.garner = _garner(k)
+        self.weights = List[UInt64](capacity=k)
+        var w = UInt64(1)
+        for j in range(k):
+            self.weights.append(w)
+            w = _mod_mul(w, primes[j] % p, p)
+
+    def transform(self, values: List[UInt64], mut budget: Budget) raises PolyError -> List[List[UInt64]]:
+        """The forward transforms, one per prime, of residues below p (at most n of them)."""
+        var primes = materialize[_PRIMES]()
+        var log = _bit_length(self.n)
+        _charge_size(_product(len(self.indices), _product(self.n, log)), budget)
+        _allocation[UInt64](_product(len(self.indices), self.n), budget)
+        var out = List[List[UInt64]](capacity=len(self.indices))
+        for j in range(len(self.indices)):
+            # Residues below p < 2^62 are already below 2q for every q > 2^61.
+            var x = List[UInt64](length=self.n, fill=0)
+            for i in range(len(values)):
+                x[i] = values[i]
+            _forward(x, self.tables[j], primes[self.indices[j]])
+            out.append(x^)
+        return out^
+
+    def multiply(self, a: List[List[UInt64]], b: List[List[UInt64]], count: Int, mut budget: Budget) raises PolyError -> List[UInt64]:
+        """The first `count` cyclic convolution coefficients of two transforms, reduced modulo p."""
+        var primes = materialize[_PRIMES]()
+        var k = len(self.indices)
+        var log = _bit_length(self.n)
+        _charge_size(_product(k, _product(self.n, log + 2)), budget)
+        _allocation[UInt64](_product(k, self.n), budget)
+        var residues = List[List[UInt64]](capacity=k)
+        for j in range(k):
+            var q = primes[self.indices[j]]
+            var q_inverse = _montgomery_inverse(q)
+            var x = List[UInt64](length=self.n, fill=0)
+            for i in range(self.n):
+                x.unsafe_get(i) = _redc(a[j].unsafe_get(i), b[j].unsafe_get(i), q, q_inverse)
+            _inverse(x, self.tables[j], q)
+            var r = UInt64(((UInt128(1) << 64) % UInt128(q)))
+            var scale = _mod_mul(r, _power(UInt64(self.n) % q, q - 2, q), q)
+            var scale_quotient = _shoup_quotient(scale, q)
+            for i in range(count):
+                x.unsafe_get(i) = _reduce_2q(_shoup(x.unsafe_get(i), scale, scale_quotient, q), q)
+            x.resize(count, 0)
+            residues.append(x^)
+        if k == 1 and self.indices[0] >= 0 and primes[self.indices[0]] == self.p:
+            var single = List[UInt64]()
+            swap(single, residues[0])
+            return single^
+        _charge_size(_product(count, _product(k, k)), budget)
+        var digits = List[UInt64](length=k, fill=0)
+        var result = List[UInt64](length=count, fill=0)
+        for i in range(count):
+            var value = residues[0][i] % self.p
+            if k > 1:
+                _digits(self.garner, residues, i, digits)
+                value = digits[0] % self.p
+                for j in range(1, k):
+                    value = (value + _mod_mul(digits[j] % self.p, self.weights[j], self.p)) % self.p
+            result[i] = value
+        return result^
+
+
+comptime _NEWTON_SCHOOLBOOK = 64
+"""Below this precision, series inversion steps use schoolbook products."""
+
+
+def _low_product(a: List[UInt64], b: List[UInt64], lo: Int, hi: Int, p: UInt64, mut budget: Budget) raises PolyError -> List[UInt64]:
+    """Coefficients lo ..< hi of a * b modulo p, by schoolbook."""
+    _charge_size(_product(hi - lo, min(len(a), hi)), budget)
+    var result = List[UInt64](capacity=hi - lo)
+    for c in range(lo, hi):
+        var acc = UInt128(0)
+        for i in range(max(0, c - len(b) + 1), min(len(a), c + 1)):
+            acc += UInt128(a[i]) * UInt128(b[c - i])
+            if acc >= UInt128(1) << 126:
+                acc %= UInt128(p)
+        result.append(UInt64(acc % UInt128(p)))
+    return result^
+
+
 def _series_inverse(b: List[UInt64], m: Int, p: UInt64, mut budget: Budget) raises PolyError -> List[UInt64]:
-    """The inverse of the power series b (b[0] invertible) modulo x^m and p, by Newton iteration."""
+    """The inverse of the power series b (b[0] invertible) modulo x^m and p, by Newton iteration.
+
+    Each step from precision k to k2 <= 2k needs e = b * inverse modulo x^k2,
+    which equals 1 + x^k d; a cyclic convolution of length n >= k2 gives its
+    coefficients k ..< k2 intact, since the wrapped part lands below k. The
+    correction -inverse * d modulo x^(k2 - k) reuses the inverse's transform.
+    """
     var inverse: List[UInt64] = [_power(b[0], p - 2, p)]
     var k = 1
     while k < m:
         budget.charge(1)
         var k2 = min(2 * k, m)
-        # e = b * inverse = 1 + x^k d + O(x^k2); the new terms are -inverse * d.
-        var e = _modular_product(b, inverse, k2, p, False, budget)
-        var d = List[UInt64](capacity=k2 - k)
-        for i in range(k, k2):
-            d.append(e[i])
+        var head = List[UInt64](capacity=k2)
+        for i in range(min(k2, len(b))):
+            head.append(b[i])
+        var d: List[UInt64]
+        var convolver = Optional[_Convolver](None)
+        var inverse_transform = List[List[UInt64]]()
+        if k2 <= _NEWTON_SCHOOLBOOK:
+            d = _low_product(head, inverse, k, k2, p, budget)
+        else:
+            convolver = _Convolver(p, _transform_length(k2), budget)
+            inverse_transform = convolver.value().transform(inverse, budget)
+            var e = convolver.value().multiply(convolver.value().transform(head, budget), inverse_transform, k2, budget)
+            d = List[UInt64](capacity=k2 - k)
+            for i in range(k, k2):
+                d.append(e[i])
         var allzero = True
         for v in d:
             if v:
@@ -705,7 +835,12 @@ def _series_inverse(b: List[UInt64], m: Int, p: UInt64, mut budget: Budget) rais
         if allzero:
             inverse.resize(k2, 0)
         else:
-            var t = _modular_product(inverse, d, k2 - k, p, False, budget)
+            var t: List[UInt64]
+            if k2 <= _NEWTON_SCHOOLBOOK:
+                t = _low_product(inverse, d, 0, k2 - k, p, budget)
+            else:
+                # inverse * d has length k2 - 1 < n: no wrap.
+                t = convolver.value().multiply(convolver.value().transform(d, budget), inverse_transform, k2 - k, budget)
             for i in range(k2 - k):
                 inverse.append(p - t[i] if t[i] else UInt64(0))
         k = k2
@@ -730,10 +865,21 @@ def _quotient_mod(a: List[UInt64], b: List[UInt64], p: UInt64, mut budget: Budge
 
 
 def _equal_mod(a: List[UInt64], q: List[UInt64], b: List[UInt64], p: UInt64, mut budget: Budget) raises PolyError -> Bool:
-    """Whether q * b == a modulo p, given len(q) + len(b) - 1 == len(a)."""
-    var product = _modular_product(q, b, len(a), p, False, budget)
+    """Whether q * b == a modulo p, for q the quotient of a divided by b with remainder.
+
+    q * b already agrees with a from degree len(b) - 1 up, so a remainder of
+    lower degree is zero exactly when q * b and a agree modulo x^n - 1 for
+    any n >= len(b) - 1: a cyclic convolution of half the full length.
+    """
+    var n = _transform_length(max(len(q), len(b)))
+    var convolver = _Convolver(p, n, budget)
+    var wrapped = convolver.multiply(convolver.transform(q, budget), convolver.transform(b, budget), n, budget)
+    var folded = List[UInt64](length=n, fill=0)
     for i in range(len(a)):
-        if product[i] != a[i]:
+        var s = folded[i % n] + a[i]
+        folded[i % n] = s - p if s >= p else s
+    for i in range(n):
+        if wrapped[i] != folded[i]:
             return False
     return True
 
