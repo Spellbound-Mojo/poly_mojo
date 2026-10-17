@@ -5,7 +5,7 @@ from ._toolkit_exact import _ExactOps, _use_newton
 from .coefficient_buffer import _view
 from .errors import Budget, PolyError, PolyErrorKind, _sum
 from ._toolkit_ops import _values, _add_values, _mul_values, _divide_values, _compose_values, _derivative_values, _integral_values
-from ._series_exact import _exact_log, _exact_exp
+from ._series_exact import _exact_log, _exact_exp, _exact_divide
 from ._series_nmod import _native_series
 from .coefficients import ModInt, Modulus
 from ._series_ops import _newton_divide, _series_shape, _series_same_order, _series_truncation, _series_composition, _revert_values
@@ -144,7 +144,7 @@ struct TruncatedSeries[C: CoefficientField](Copyable, Movable):
             if inverse:
                 var quotient = _mul_values[_ExactOps[Self.C]](_view(self.polynomial.coefficients), _view(rebind[List[Self.C]](inverse.value())), self.order, self.polynomial.ring, budget)
                 return Self(DensePoly[Self.C].from_coefficients(self.polynomial.variable, self.polynomial.ring, quotient^, budget), self.order)
-        var values = _newton_divide[_ExactOps[Self.C]](_view(self.polynomial.coefficients), _view(other.polynomial.coefficients), self.order, self.polynomial.ring, budget) if _use_newton[Self.C](self.order, len(other.polynomial.coefficients)) else _divide_values[_ExactOps[Self.C]](_view(self.polynomial.coefficients), _view(other.polynomial.coefficients), self.order, self.polynomial.ring, budget)
+        var values = _exact_divide(_view(self.polynomial.coefficients), _view(other.polynomial.coefficients), self.order, self.polynomial.ring, budget) if _use_newton[Self.C](self.order, len(other.polynomial.coefficients)) else _divide_values[_ExactOps[Self.C]](_view(self.polynomial.coefficients), _view(other.polynomial.coefficients), self.order, self.polynomial.ring, budget)
         var poly = DensePoly[Self.C].from_coefficients(self.polynomial.variable, self.polynomial.ring, values^, budget)
         return Self(poly^, self.order)
 
@@ -168,7 +168,7 @@ struct TruncatedSeries[C: CoefficientField](Copyable, Movable):
         var values: List[Self.C]
         if _use_newton[Self.C](self.order, len(self.polynomial.coefficients)):
             var numerator: List[Self.C] = [_ExactOps[Self.C].integer(1, self.polynomial.ring, budget)]
-            values = _newton_divide[_ExactOps[Self.C]](_view(numerator), _view(self.polynomial.coefficients), self.order, self.polynomial.ring, budget)
+            values = _exact_divide(_view(numerator), _view(self.polynomial.coefficients), self.order, self.polynomial.ring, budget)
         else:
             values = _divide_values[_ExactOps[Self.C], True](_view(List[Self.C]()), _view(self.polynomial.coefficients), self.order, self.polynomial.ring, budget)
         var poly = DensePoly[Self.C].from_coefficients(self.polynomial.variable, self.polynomial.ring, values^, budget)
