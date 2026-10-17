@@ -10,6 +10,7 @@ from .dense import DensePoly, _slice, _trim
 from .sparse import SparsePoly, Term
 from .monomial import Monomial, MonomialOrder
 from .certificates import DivisionResult, ListDivision
+from ._packed_division import _packed_divide as _heap_divide
 from ._sparse_ops import _subtract_multiple, _from_descending
 from ._reduction_stream import _ReductionStream
 from ._packed_products import _packed_divide
@@ -152,6 +153,10 @@ def divide_exact[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], mut bud
             var fast = _fast_divide_exact(f, g, budget)
             if fast:
                 return fast.take()
+    var applicable = False
+    var packed = _heap_divide(f, g, applicable, budget)
+    if applicable:
+        return packed^
     var others: List[SparsePoly[C]] = [g._copy(budget)]
     var order = _division_order(f, others, budget)
     var pending = f.reorder(order, budget)

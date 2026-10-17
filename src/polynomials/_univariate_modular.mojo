@@ -1,0 +1,246 @@
+"""Multi-modular univariate gcds and resultants over the integers.
+
+Images come from the word-size field kernels in _nmod_euclid. Coefficients are
+reconstructed incrementally in symmetric representation: a new prime leaves
+a coefficient unchanged exactly when its residue already agrees, so a prime
+that changes nothing marks a stable candidate. The gcd is accepted only after
+exact division (G-5); the resultant stops at the Hadamard bound.
+"""
+from apn_mojo import Integer
+from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
+from .coefficients import ZZ, NoContext
+from ._coefficient_ops import _gcd_coefficient, _quotient, _exact
+from .dense import DensePoly
+from .primes import prime, _residue
+from ._nmod_euclid import _Field, _gcd_words, _resultant_words, _trim_words
+
+
+struct _Reconstruction(Movable):
+    """Symmetric residues modulo a growing product of primes."""
+    var values: List[Integer]
+    var modulus: Integer
+
+    def __init__(out self, count: Int, mut budget: Budget) raises PolyError:
+        _allocation[Integer](count, budget)
+        self.values = List[Integer](length=count, fill=Integer(0))
+        self.modulus = Integer(1)
+
+    def merge(mut self, residues: List[UInt64], p: UInt64, mut budget: Budget) raises PolyError -> Bool:
+        """Fold standard residues modulo p into the values; return whether any value changed."""
+        var field = _Field.of(p)
+        var m = _residue(self.modulus, p, budget)
+        if m == 0:
+            raise PolyError(PolyErrorKind.DOMAIN, "CRT moduli are not coprime")
+        var inverse = field.inverse(field.enter(m))
+        var big_p = ZZ(Integer(Int(p)))
+        var next_modulus = ZZ(self.modulus.copy()).mul(big_p, budget).value
+        var next_half: Integer
+        try:
+            next_half = next_modulus >> 1
+        except e:
+            raise PolyError(PolyErrorKind.CAPACITY, String(e))
+        var changed = False
+        for i in range(len(self.values)):
+            budget.charge(1)
+            var old = _residue(self.values[i], p, budget)
+            var difference = field.sub(field.enter(residues[i]), field.enter(old))
+            if difference == 0:
+                continue
+            changed = True
+            var correction = field.leave(field.mul(difference, inverse))
+            var value = ZZ(self.values[i].copy()).add(ZZ(self.modulus.copy()).mul(ZZ(Integer(Int(correction))), budget), budget).value
+            if value > next_half:
+                value = ZZ(value^).sub(ZZ(next_modulus.copy()), budget).value
+            self.values[i] = value^
+        self.modulus = next_modulus^
+        return changed
+
+
+def _residues(f: DensePoly[ZZ], p: UInt64, mut budget: Budget) raises PolyError -> List[UInt64]:
+    _allocation[UInt64](len(f.coefficients), budget)
+    var out = List[UInt64](capacity=len(f.coefficients))
+    for i in range(len(f.coefficients)):
+        ref c = f.coefficients[i].value
+        var r = _residue(c, p, budget)
+        out.append(r)
+    return out^
+
+
+def _entered(values: List[UInt64], field: _Field) -> List[UInt64]:
+    var out = List[UInt64](capacity=len(values))
+    for v in values:
+        out.append(field.enter(v))
+    return out^
+
+
+def _gcd_images(fd: DensePoly[ZZ], hd: DensePoly[ZZ], gamma: ZZ, p: UInt64, mut budget: Budget) raises PolyError -> List[UInt64]:
+    """gamma times the monic gcd of the images modulo p, in standard form."""
+    var field = _Field.of(p)
+    var g = _gcd_words(_entered(_residues(fd, p, budget), field), _entered(_residues(hd, p, budget), field), field, budget)
+    var scale = field.enter(_residue(gamma.value, p, budget))
+    for i in range(len(g)):
+        g[i] = field.leave(field.mul(g[i], scale))
+    return g^
+
+
+def _next_gcd_candidate(fd: DensePoly[ZZ], hd: DensePoly[ZZ], mut state: _GcdSearch, mut budget: Budget) raises PolyError -> DensePoly[ZZ]:
+    """Advance the prime search to the next stable candidate gamma·g/lc(g), not yet primitive.
+
+    A constant image modulo a prime dividing neither leading coefficient
+    proves the gcd constant, so the constant candidate returns at once.
+    """
+    while True:
+        budget.charge(1)
+        var p = prime(state.index, budget)
+        state.index = _sum(state.index, 1)
+        # Both degrees must survive reduction, as required by G-5's proof.
+        if _residue(fd.coefficients[len(fd.coefficients) - 1].value, p, budget) == 0 or _residue(hd.coefficients[len(hd.coefficients) - 1].value, p, budget) == 0:
+            continue
+        var image = _gcd_images(fd, hd, state.gamma, p, budget)
+        var degree = len(image) - 1
+        if degree > state.best:
+            continue
+        if degree == 0:
+            return DensePoly[ZZ].from_coefficients(fd.variable, NoContext(), [ZZ(Integer(1))], budget)
+        if degree < state.best:
+            state.best = degree
+            state.values = _Reconstruction(degree + 1, budget)
+            state.primes = 0
+        var changed = state.values.merge(image, p, budget)
+        state.primes = _sum(state.primes, 1)
+        if state.primes > 1 and not changed:
+            _allocation[ZZ](state.best + 1, budget)
+            var coefficients = List[ZZ](capacity=state.best + 1)
+            for i in range(state.best + 1):
+                budget.charge(1)
+                coefficients.append(ZZ(state.values.values[i].copy()))
+            var dense = DensePoly[ZZ].from_coefficients(fd.variable, NoContext(), coefficients^, budget)
+            if dense.degree() == state.best:
+                return dense^
+
+
+struct _GcdSearch(Movable):
+    var gamma: ZZ
+    var best: Int
+    var index: Int
+    var primes: Int
+    var values: _Reconstruction
+
+    def __init__(out self, var gamma: ZZ, best: Int, mut budget: Budget) raises PolyError:
+        self.gamma = gamma^
+        self.best = best
+        self.index = 0
+        self.primes = 0
+        self.values = _Reconstruction(0, budget)
+
+
+def _hadamard_bits(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Int:
+    """An upper bound on log2 of the Euclidean norm of the coefficient vector."""
+    var top = 0
+    for i in range(len(f.coefficients)):
+        budget.charge(1)
+        top = max(top, f.coefficients[i].value.magnitude_bit_length())
+    var count_bits = 0
+    while (1 << count_bits) < len(f.coefficients):
+        count_bits += 1
+    # ||f||_2 <= sqrt(len) max|f_i| < 2^(top + ceil(log2 len) / 2).
+    return top + (count_bits + 1) // 2
+
+
+def _modular_resultant(fd: DensePoly[ZZ], gd: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Integer:
+    """The resultant of two integer polynomials of positive degree, by CRT up to the Hadamard bound."""
+    var m = fd.degree()
+    var n = gd.degree()
+    # |res| <= ||f||^n ||g||^m; the symmetric range needs one more bit.
+    var bits = _sum(_sum(n * _hadamard_bits(fd, budget), m * _hadamard_bits(gd, budget)), 2)
+    var values = _Reconstruction(1, budget)
+    var covered = 0
+    var index = 0
+    var residue = List[UInt64](length=1, fill=0)
+    while covered < bits:
+        budget.charge(1)
+        var p = prime(index, budget)
+        index = _sum(index, 1)
+        if _residue(fd.coefficients[m].value, p, budget) == 0 or _residue(gd.coefficients[n].value, p, budget) == 0:
+            continue
+        var field = _Field.of(p)
+        residue[0] = field.leave(_resultant_words(_entered(_residues(fd, p, budget), field), _entered(_residues(gd, p, budget), field), field, budget))
+        _ = values.merge(residue, p, budget)
+        var floor_log = 0
+        while (p >> UInt64(floor_log + 1)) != 0:
+            floor_log += 1
+        covered = _sum(covered, floor_log)
+    return values.values[0].copy()
+
+
+def _dense_content(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> ZZ:
+    """The nonnegative gcd of the coefficients."""
+    var content = ZZ(Integer(0))
+    for i in range(len(f.coefficients)):
+        budget.charge(1)
+        content = _gcd_coefficient(content, f.coefficients[i], budget)
+        if content.value == Integer(1):
+            break
+    return content^
+
+
+def _divide_scalar(f: DensePoly[ZZ], c: ZZ, mut budget: Budget) raises PolyError -> DensePoly[ZZ]:
+    _allocation[ZZ](len(f.coefficients), budget)
+    var values = List[ZZ](capacity=len(f.coefficients))
+    for i in range(len(f.coefficients)):
+        budget.charge(1)
+        values.append(_exact(f.coefficients[i], c, budget))
+    return DensePoly[ZZ]._from_canonical(f.variable, NoContext(), values^)
+
+
+def _dense_divides(f: DensePoly[ZZ], g: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Bool:
+    """Whether g divides f over the integers, by dense exact long division."""
+    if f.is_zero():
+        return True
+    var n = g.degree()
+    if f.degree() < n:
+        return False
+    ref lc = g.coefficients[n]
+    var r = f.coefficients.to_list(budget)
+    for k in range(f.degree(), n - 1, -1):
+        budget.charge(1)
+        if r[k].is_zero():
+            continue
+        var q = _quotient(r[k], lc, budget)
+        if not q:
+            return False
+        ref digit = q.value()
+        var base = k - n
+        for i in range(n):
+            budget.charge(1)
+            if not g.coefficients[i].is_zero():
+                r[base + i] = r[base + i].sub(digit.mul(g.coefficients[i], budget), budget)
+    for i in range(n):
+        budget.charge(1)
+        if not r[i].is_zero():
+            return False
+    return True
+
+
+def _univariate_gcd(f: DensePoly[ZZ], h: DensePoly[ZZ], mut budget: Budget) raises PolyError -> DensePoly[ZZ]:
+    """The positive-leading gcd of two nonzero integer polynomials, integer content included."""
+    var cf = _dense_content(f, budget)
+    var ch = _dense_content(h, budget)
+    var common = _gcd_coefficient(cf, ch, budget)
+    var pf = _divide_scalar(f, cf, budget)
+    var ph = _divide_scalar(h, ch, budget)
+    var constant = DensePoly[ZZ].from_coefficients(f.variable, NoContext(), [common.copy()], budget)
+    if pf.degree() == 0 or ph.degree() == 0:
+        return constant^
+    var gamma = _gcd_coefficient(pf.coefficients[pf.degree()], ph.coefficients[ph.degree()], budget)
+    var state = _GcdSearch(gamma^, min(pf.degree(), ph.degree()) + 1, budget)
+    while True:
+        budget.charge(1)
+        var candidate = _next_gcd_candidate(pf, ph, state, budget)
+        if candidate.degree() == 0:
+            return constant^
+        var primitive = _divide_scalar(candidate, _dense_content(candidate, budget), budget)
+        if primitive.coefficients[primitive.degree()].value.sign() < 0:
+            primitive = primitive.scale(ZZ(Integer(-1)), budget)
+        if _dense_divides(pf, primitive, budget) and _dense_divides(ph, primitive, budget):
+            return primitive.scale(common, budget)

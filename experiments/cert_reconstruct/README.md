@@ -27,3 +27,14 @@ depend on the kernels of both routes; refit after changing either:
     python3 experiments/cert_reconstruct/calibrate_routes.py fit /tmp/cal/*.cal
 
 and copy the printed weights into the two functions.
+
+## Blocked per-degree kernel (measured, not adopted)
+
+`blocked_bench.mojo` compares the certificate's per-pair lane sweep (8 primes
+in lanes) with a blocked kernel (P pairs in lanes, one prime, blocks of 16
+consecutive pivots whose terms outside the block are accumulated per column
+in registers), on a degree matrix dumped from a certified run (format in the
+file's header). On katsura-10's degrees 8 and 9 the blocked kernel reaches
+1.03-1.20x with 32 pairs per chunk (0.99x with 16, 0.69x with 8): pairs'
+quotient supports overlap enough (useful work / blocked work 0.70-0.73 at
+32 pairs) but each delayed entry still costs ~3.5 cycles per 8 lanes.
