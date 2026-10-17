@@ -14,7 +14,7 @@ from ._images import _integer_dense as _integer, _rational_dense as _rational, _
 from ._coefficient_ops import _quotient
 from ._hensel import _HenselState, _hensel, _hensel_start, _hensel_extend, _hensel_resume, _truncate, _trial_divide
 from ._integer_ops import _content, _primitive, _divide_scalar
-from ._lattice_factor import _van_hoeij_lifted
+from ._lattice_factor import _van_hoeij_lifted, _lattice_precision
 from ._gcd import _modular_primitive
 from .monomial import MonomialOrder
 from . import _nmod
@@ -274,7 +274,14 @@ def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], mut bud
 
 def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], allowed: List[Bool], mut budget: Budget) raises PolyError -> List[DensePoly[ZZ]]:
     var state = _hensel_start(modular, budget)
-    _hensel_extend(f, modular, _bound(f, budget), state, budget)
+    # Peel and run the lattice at the lattice's own precision; factors that
+    # need more are lifted further only when reconstruction asks for it.
+    var bound = _bound(f, budget)
+    var precision = _lattice_precision(f, len(modular), ZZ(Integer(Int(modular[0].ring.value))), budget)
+    var first = _copy_coefficient(bound, budget)
+    if precision and precision.value().value < bound.value:
+        first = _copy_coefficient(precision.value(), budget)
+    _hensel_extend(f, modular, first, state, budget)
     var lifting = (state.lifted.copy(), _copy_coefficient(state.modulus, budget))
     var remaining = _copy(f, budget)
     var result = List[DensePoly[ZZ]]()
@@ -284,7 +291,7 @@ def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], allowed
         budget.charge(1)
         var candidate = _primitive(_truncate(lifting[0][i].scale(remaining.coefficients[remaining.degree()], budget), lifting[1], budget), budget)
         var quotient = _trial_divide(remaining, candidate, budget)
-        if candidate.degree() > 0 and quotient:
+        if candidate.degree() > 0 and candidate.degree() == lifting[0][i].degree() and quotient:
             remaining = quotient.take()
             _allocation[DensePoly[ZZ]](1, budget)
             result.append(candidate^)
@@ -303,7 +310,12 @@ def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], allowed
                 var resumed = _hensel_resume(active_lifted^, _copy_coefficient(lifting[1], budget))
                 rest = _van_hoeij_lifted(remaining, active_modular, _bound(remaining, budget), resumed, budget)
         else:
-            rest = _recombine(remaining, active_lifted, lifting[1], allowed, budget)
+            var remaining_bound = _bound(remaining, budget)
+            if lifting[1].value > remaining_bound.value:
+                rest = _recombine(remaining, active_lifted, lifting[1], allowed, budget)
+            else:
+                var full = _hensel(remaining, active_modular, remaining_bound, budget)
+                rest = _recombine(remaining, full[0], full[1], allowed, budget)
         for g in rest:
             budget.charge(1)
             _allocation[DensePoly[ZZ]](1, budget)
