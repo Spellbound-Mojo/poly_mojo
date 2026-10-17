@@ -242,15 +242,17 @@ def _normal_forms[W: Int](basis: List[List[_Term[ModInt, W]]], standard: List[_P
 
 
 struct _Row(Movable):
-    """An echelon row: its first nonzero position, the row, and its combination of the LEX standard monomials' normal forms."""
+    """An echelon row: the normal form of the r-th LEX standard monomial less the multiples `factors` of the rows before it, scaled by `inverse` to be 1 at `pivot`, its first nonzero position."""
     var pivot: Int
     var values: List[UInt32]
-    var combination: List[UInt32]
+    var factors: List[UInt32]
+    var inverse: UInt64
 
-    def __init__(out self, pivot: Int, var values: List[UInt32], var combination: List[UInt32]):
+    def __init__(out self, pivot: Int, var values: List[UInt32], var factors: List[UInt32], inverse: UInt64):
         self.pivot = pivot
         self.values = values^
-        self.combination = combination^
+        self.factors = factors^
+        self.inverse = inverse
 
 
 def _fglm[W: Int](basis: List[List[_Term[ModInt, W]]], n: Int, ring: Modulus, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ModInt, W]]]]:
@@ -282,6 +284,7 @@ def _fglm[W: Int](basis: List[List[_Term[ModInt, W]]], n: Int, ring: Modulus, mu
     var forms = _normal_forms[W](basis, ordered, n, prime, budget)
     var d = forms.size
     var reciprocal = _reciprocal(prime)
+    var square = prime * prime
     # The walk: candidates by increasing LEX order in a binary heap, each
     # with the accepted monomial and variable it came from.
     var candidates = _Columns[W]()
@@ -317,31 +320,58 @@ def _fglm[W: Int](basis: List[List[_Term[ModInt, W]]], n: Int, ring: Modulus, mu
         else:
             v = forms.multiply(variables[c], normal[parents[c]], budget)
         var own = v.copy()
-        _allocation[UInt32](len(accepted) + 1, budget)
-        var combination = List[UInt32](length=len(accepted) + 1, fill=0)
-        combination[len(accepted)] = 1
-        for r in range(len(rows)):
+        # Reduce by the rows in 64-bit words, each kept below p^2, recording
+        # the multiple of each row taken out.
+        var count = len(rows)
+        _allocation[UInt64](d, budget)
+        var acc = List[UInt64](length=d, fill=0)
+        var a = acc.unsafe_ptr()
+        for s in range(d):
+            a.unsafe_offset(s).unsafe_store(UInt64(v.unsafe_get(s)))
+        _allocation[UInt32](count, budget)
+        var factors = List[UInt32](length=count, fill=0)
+        for r in range(count):
             ref row = rows[r]
-            var f = UInt64(v[row.pivot])
+            var f = _residue(a.unsafe_offset(row.pivot).unsafe_load(), prime, reciprocal)
             if f == 0:
                 continue
-            budget.charge(UInt64(d + len(row.combination)))
+            factors[r] = UInt32(f)
+            budget.charge(UInt64(d - row.pivot))
             var g = prime - f
+            var source = row.values.unsafe_ptr()
             for s in range(row.pivot, d):
-                v[s] = UInt32(_residue(UInt64(v[s]) + g * UInt64(row.values[s]), prime, reciprocal))
-            for s in range(len(row.combination)):
-                combination[s] = UInt32(_residue(UInt64(combination[s]) + g * UInt64(row.combination[s]), prime, reciprocal))
+                var x = a.unsafe_offset(s).unsafe_load() + g * UInt64(source.unsafe_offset(s).unsafe_load())
+                a.unsafe_offset(s).unsafe_store(x - square if x >= square else x)
         var pivot = -1
         for s in range(d):
-            if v[s] != 0:
+            var x = _residue(a.unsafe_offset(s).unsafe_load(), prime, reciprocal)
+            v.unsafe_get(s) = UInt32(x)
+            if x != 0 and pivot < 0:
                 pivot = s
-                break
         if pivot < 0:
-            # t is a combination of LEX standard monomials: a basis element.
+            # t's normal form is the sum of factors[r] times row r: rewrite
+            # it in the LEX standard monomials' normal forms, from the last
+            # row back, and t less that combination is a basis element.
+            _allocation[UInt64](2 * count, budget)
+            var x = List[UInt64](capacity=count)
+            for r in range(count):
+                x.append(UInt64(factors[r]))
+            var coefficients = List[UInt64](length=count, fill=0)
+            for r in range(count - 1, -1, -1):
+                if x[r] == 0:
+                    continue
+                var c = (x[r] * rows[r].inverse) % prime
+                coefficients[r] = c
+                ref earlier = rows[r].factors
+                budget.charge(UInt64(r + 1))
+                for q in range(r):
+                    var e = UInt64(earlier.unsafe_get(q))
+                    if e != 0:
+                        x[q] = (x[q] + (prime - c) * e) % prime
             var terms = List[_Term[ModInt, W]]()
-            for s in range(len(accepted)):
-                if combination[s] != 0:
-                    terms.append(_Term[ModInt, W](accepted[s], ModInt(UInt64(combination[s]), ring)))
+            for r in range(count):
+                if coefficients[r] != 0:
+                    terms.append(_Term[ModInt, W](accepted[r], ModInt(prime - coefficients[r], ring)))
             terms.append(_Term[ModInt, W](t, ModInt(1, ring)))
             _sort_terms(terms, budget)
             found.append(terms^)
@@ -349,10 +379,8 @@ def _fglm[W: Int](basis: List[List[_Term[ModInt, W]]], n: Int, ring: Modulus, mu
             continue
         var inverse = ModInt(UInt64(v[pivot]), ring).inverse(budget).value
         for s in range(pivot, d):
-            v[s] = UInt32(_residue(UInt64(v[s]) * inverse, prime, reciprocal))
-        for s in range(len(combination)):
-            combination[s] = UInt32(_residue(UInt64(combination[s]) * inverse, prime, reciprocal))
-        rows.append(_Row(pivot, v^, combination^))
+            v.unsafe_get(s) = UInt32(_residue(UInt64(v.unsafe_get(s)) * inverse, prime, reciprocal))
+        rows.append(_Row(pivot, v^, factors^, inverse))
         var position = len(accepted)
         accepted.append(t)
         normal.append(own^)
