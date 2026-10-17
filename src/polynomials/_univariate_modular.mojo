@@ -13,7 +13,7 @@ from ._coefficient_ops import _gcd_coefficient, _quotient, _exact
 from .dense import DensePoly
 from .primes import prime, _residue
 from .coefficient_buffer import _view
-from ._ntt import _PRIMES, _PRIME_BITS, _PRIME_COUNT, _residues_zz, _quotient_mod, _equal_mod, _reconstruct_zz, _bits_zz, _bit_length
+from ._ntt import _PRIMES, _PRIME_BITS, _PRIME_COUNT, _series_inverse, _modular_product, _equal_mod, _reconstruct_zz, _bits_zz, _bit_length
 from ._nmod_euclid import _Field, _gcd_words, _resultant_words, _trim_words
 
 
@@ -107,16 +107,17 @@ struct _Words(Movable):
             self.negative.append(c.sign() < 0)
             self.longest = max(self.longest, n)
 
-    def residues(self, field: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
-        """Every coefficient modulo field.p, in Montgomery form.
+    def residues(self, field: _Field, mut budget: Budget, standard: Bool = False) raises PolyError -> List[UInt64]:
+        """Every coefficient modulo field.p, in Montgomery form or, when standard, as plain residues.
 
         With W_j the Montgomery form of 2^(32 j) R, the sum of word_j W_j
-        stays below 2^32 p per word, so one reduction yields value R mod p.
+        stays below 2^32 p per word, so one reduction yields value R mod p;
+        W_j = 2^(32 j) R mod p yields the value itself.
         """
         _charge_size(len(self.words) + self.longest, budget)
         var powers = List[UInt64](capacity=self.longest)
         var step = field.enter(UInt64(1) << 32)
-        var w = field.r2
+        var w = field.enter(1) if standard else field.r2
         for _ in range(self.longest):
             powers.append(w)
             w = field.mul(w, step)
@@ -256,39 +257,83 @@ def _divide_scalar(f: DensePoly[ZZ], c: ZZ, mut budget: Budget) raises PolyError
     return DensePoly[ZZ]._from_canonical(f.variable, NoContext(), values^)
 
 
-def _transform_divides(f: DensePoly[ZZ], g: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Optional[Bool]:
-    """Whether g divides f, deg f >= deg g, from quotients modulo transform primes, or None when they cannot decide.
+def _quotient_images(words: _Words, divisor: List[UInt64], inverse: List[UInt64], field: _Field, mut budget: Budget) raises PolyError -> Optional[List[UInt64]]:
+    """The quotient of the dividend by the divisor modulo field.p, or None when a remainder is left.
 
-    The quotient q_i of f by g modulo each prime must leave no remainder. Its
-    symmetric reconstruction Q modulo the product M then satisfies
-    g Q = f mod M, and once |f| and |g| |Q|_1 both stay below M/2 the
-    congruence is an identity: g divides f. No product is formed.
+    inverse is the reversed divisor's series inverse to at least the quotient's length.
     """
-    var a = _view(f.coefficients)
-    var b = _view(g.coefficients)
+    var q = field.p
+    var a = words.residues(field, budget, standard=True)
+    var m = len(a) - len(divisor) + 1
+    _allocation[UInt64](2 * m, budget)
+    var a_rev = List[UInt64](capacity=m)
+    for i in range(m):
+        a_rev.append(a[len(a) - 1 - i])
+    var head = List[UInt64](capacity=m)
+    for i in range(m):
+        head.append(inverse[i])
+    var q_rev = _modular_product(a_rev, head, m, q, False, budget)
+    var quotient = List[UInt64](capacity=m)
+    for i in range(m):
+        quotient.append(q_rev[m - 1 - i])
+    if not _equal_mod(a, quotient, divisor, q, budget):
+        return None
+    return quotient^
+
+
+def _bounded(quotients: List[List[UInt64]], k: Int, count: Int, top_dividend: Int, top_divisor: Int, mut budget: Budget) raises PolyError -> Bool:
+    """Whether the symmetric reconstruction Q of the quotient images certifies divisor Q = dividend.
+
+    Q times the divisor agrees with the dividend modulo the product M of the
+    first k transform primes; once |dividend| and |divisor| |Q|_1 both lie
+    below M/2 the congruence is an identity. Every transform prime exceeds
+    2^61, so M > 2^(61 k).
+    """
+    var candidate = _reconstruct_zz[ZZ](quotients, k, count, budget)
+    var top = 0
+    for i in range(len(candidate)):
+        top = max(top, candidate[i].value.magnitude_bit_length())
+    var room = _PRIME_BITS * k - 1
+    return top_dividend + 1 <= room and top_divisor + top + _bit_length(count) <= room
+
+
+def _transform_divides(f: DensePoly[ZZ], fw: _Words, h: DensePoly[ZZ], hw: _Words, g: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Optional[Bool]:
+    """Whether g divides both f and h, of degree at least deg g, from quotients modulo transform primes, or None when they cannot decide.
+
+    Each prime's quotients must leave no remainder, and their
+    reconstructions must pass the size bound of _bounded; no product is
+    formed. Both dividends share the divisor's residues and series inverse.
+    """
+    var gw = _Words(g, budget)
     var primes = materialize[_PRIMES]()
-    var top_f = _bits_zz(a)
-    var top_g = _bits_zz(b)
-    var count = len(a) - len(b) + 1
-    var k = (top_f + _bit_length(len(a)) + 2 + _PRIME_BITS - 1) // _PRIME_BITS
-    var quotients = List[List[UInt64]]()
+    var top_f = _bits_zz(_view(f.coefficients))
+    var top_h = _bits_zz(_view(h.coefficients))
+    var top_g = _bits_zz(_view(g.coefficients))
+    var dg = len(g.coefficients)
+    var longest = max(len(f.coefficients), len(h.coefficients))
+    var span = longest - dg + 1
+    var k = (max(top_f, top_h) + _bit_length(longest) + 2 + _PRIME_BITS - 1) // _PRIME_BITS
+    var quotients_f = List[List[UInt64]]()
+    var quotients_h = List[List[UInt64]]()
     while k <= _PRIME_COUNT:
-        var all_a = _residues_zz(a, k, len(a), budget)
-        var all_b = _residues_zz(b, k, len(b), budget)
-        for i in range(len(quotients), k):
-            if all_b[i][len(b) - 1] == 0:
+        for i in range(len(quotients_f), k):
+            var field = _Field.of(primes[i])
+            var b = gw.residues(field, budget, standard=True)
+            if b[dg - 1] == 0:
                 return None  # the divisor's degree drops modulo this prime
-            var q = _quotient_mod(all_a[i], all_b[i], primes[i], budget)
-            if not _equal_mod(all_a[i], q, all_b[i], primes[i], budget):
+            var head = List[UInt64](capacity=min(span, dg))
+            for j in range(min(span, dg)):
+                head.append(b[dg - 1 - j])
+            var inverse = _series_inverse(head, span, primes[i], budget)
+            var qf = _quotient_images(fw, b, inverse, field, budget)
+            if not qf:
                 return Optional(False)
-            quotients.append(q^)
-        var candidate = _reconstruct_zz[ZZ](quotients, k, count, budget)
-        var top_q = 0
-        for i in range(len(candidate)):
-            top_q = max(top_q, candidate[i].value.magnitude_bit_length())
-        # Every transform prime exceeds 2^61, so M > 2^(61 k).
-        var room = _PRIME_BITS * k - 1
-        if top_f + 1 <= room and top_g + top_q + _bit_length(count) <= room:
+            var qh = _quotient_images(hw, b, inverse, field, budget)
+            if not qh:
+                return Optional(False)
+            quotients_f.append(qf.take())
+            quotients_h.append(qh.take())
+        if _bounded(quotients_f, k, len(f.coefficients) - dg + 1, top_f, top_g, budget) and _bounded(quotients_h, k, len(h.coefficients) - dg + 1, top_h, top_g, budget):
             return Optional(True)
         if k == _PRIME_COUNT:
             break
@@ -296,17 +341,22 @@ def _transform_divides(f: DensePoly[ZZ], g: DensePoly[ZZ], mut budget: Budget) r
     return None
 
 
+def _divides_both(f: DensePoly[ZZ], fw: _Words, h: DensePoly[ZZ], hw: _Words, g: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Bool:
+    """Whether g divides both f and h, of degree at least deg g: by transform primes when they decide, else by long division."""
+    if g.degree() >= 31:
+        var fast = _transform_divides(f, fw, h, hw, g, budget)
+        if fast:
+            return fast.value()
+    return _dense_divides(f, g, budget) and _dense_divides(h, g, budget)
+
+
 def _dense_divides(f: DensePoly[ZZ], g: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Bool:
-    """Whether g divides f over the integers, by transform division when it decides, else dense exact long division."""
+    """Whether g divides f over the integers, by dense exact long division."""
     if f.is_zero():
         return True
     var n = g.degree()
     if f.degree() < n:
         return False
-    if n >= 31:
-        var fast = _transform_divides(f, g, budget)
-        if fast:
-            return fast.value()
     ref lc = g.coefficients[n]
     var r = f.coefficients.to_list(budget)
     for k in range(f.degree(), n - 1, -1):
@@ -387,5 +437,5 @@ def _univariate_gcd(f: DensePoly[ZZ], h: DensePoly[ZZ], mut budget: Budget) rais
             var primitive = _divide_scalar(candidate, _dense_content(candidate, budget), budget)
             if primitive.coefficients[primitive.degree()].value.sign() < 0:
                 primitive = primitive.scale(ZZ(Integer(-1)), budget)
-            if _dense_divides(pf, primitive, budget) and _dense_divides(ph, primitive, budget):
+            if _divides_both(pf, fw, ph, hw, primitive, budget):
                 return primitive.scale(common, budget)

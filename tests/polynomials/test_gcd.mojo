@@ -13,7 +13,7 @@ from polynomials._dense_ops import _gcd as _field_gcd
 from polynomials.division import divide_exact
 from support.gen import polynomial
 from polynomials.certificates import check_common_divisor, check_bezout, check_coprimality
-from polynomials._univariate_modular import _dense_divides
+from polynomials._univariate_modular import _divides_both, _Words
 from polynomials._ntt import _PRIMES
 
 def generated[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
@@ -140,10 +140,12 @@ def transform_division_cases(mut c: Checker) raises:
         for degree in [31, 45, 90]:
             var g = dense_random[ZZ](NoContext(), degree, rng, work, bits)
             var f = g.mul(dense_random[ZZ](NoContext(), degree // 2 + 3, rng, work, bits), work)
-            c.check(_dense_divides(f, g, work), "transform division accepts a multiple")
+            var h = g.mul(dense_random[ZZ](NoContext(), degree + 5, rng, work, bits), work)
+            c.check(_divides_both(f, _Words(f, work), h, _Words(h, work), g, work), "transform division accepts two multiples")
             for constant in constants:
                 var shifted = f.add(DensePoly[ZZ].from_coefficients(0, NoContext(), [ZZ(constant.copy())], work), work)
-                c.check(not _dense_divides(shifted, g, work), "transform division rejects a multiple plus a constant")
+                c.check(not _divides_both(shifted, _Words(shifted, work), h, _Words(h, work), g, work), "transform division rejects a multiple plus a constant")
+                c.check(not _divides_both(f, _Words(f, work), shifted, _Words(shifted, work), g, work), "transform division rejects a second dividend off by a constant")
 
 
 def multi_prime_cases(mut c: Checker) raises:
