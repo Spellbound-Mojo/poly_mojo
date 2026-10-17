@@ -1803,8 +1803,11 @@ comptime _GIVE_UP = 4
 comptime _TIMED = 3
 """Long pairs a degree samples before comparing the routes' costs."""
 
-comptime _RATIO = 85
-"""Percent of the exact cost above which a degree leaves the modular route."""
+comptime _RATIO = 70
+"""Percent of the exact cost above which a degree leaves the modular route.
+
+Well below 100: the cost models are fitted on one machine, and the routes'
+relative speed differs between machines, so only a clear modular win counts."""
 
 comptime _LONG = 48
 """Primes from which a pair counts as long, and may be sampled (see `_pair_routes`)."""
@@ -1812,7 +1815,7 @@ comptime _LONG = 48
 comptime _EVERY = 32
 """After the first `_TIMED`, one long pair in this many is sampled, while the comparison is close."""
 
-comptime _CLEAR = 60
+comptime _CLEAR = 50
 """Percent of the exact cost below which the modular route wins clearly and sampling stops."""
 
 comptime _CERT_STATS = False
