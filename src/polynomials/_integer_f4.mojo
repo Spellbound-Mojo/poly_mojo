@@ -2132,7 +2132,7 @@ def _cert_mod(v: _CertLanes, lanes: _CertPrimes) -> _CertLanes:
     return r.ge(lanes.primes).select(r - lanes.primes, r)
 
 
-comptime _PAIR_PRIMES = 256
+comptime _PAIR_PRIMES = 128
 """Primes a pair's modular standard representation may use before the pair is reduced exactly."""
 
 comptime _RESIDUE_BYTES = 3 << 30
