@@ -256,18 +256,22 @@ def _karatsuba(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) 
     return result^
 
 
-def _mul(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
-    if len(a) == 0 or len(b) == 0:
-        return List[UInt64]()
-    var shorter = min(len(a), len(b))
+def _uses_transform(shorter: Int, p: UInt64) -> Bool:
+    """Whether products with this shorter operand length run on transforms rather than Karatsuba."""
     var bits = 0
-    while (UInt64(1) << UInt64(bits)) <= f.p - 1:
+    while (UInt64(1) << UInt64(bits)) <= p - 1:
         bits += 1
     var magnitude = 0
     while (1 << magnitude) <= shorter:
         magnitude += 1
-    var threshold = _TRANSFORM_ONE if 2 * bits + magnitude <= 61 else (_TRANSFORM_SMALL if f.p < _SMALL else _TRANSFORM)
-    if shorter >= threshold:
+    var threshold = _TRANSFORM_ONE if 2 * bits + magnitude <= 61 else (_TRANSFORM_SMALL if p < _SMALL else _TRANSFORM)
+    return shorter >= threshold
+
+
+def _mul(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
+    if len(a) == 0 or len(b) == 0:
+        return List[UInt64]()
+    if _uses_transform(min(len(a), len(b)), f.p):
         # The convolution of Montgomery residues aR, bR is abR^2; one REDC per
         # coefficient returns it to Montgomery form.
         var square = a == b

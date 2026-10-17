@@ -826,6 +826,10 @@ def _float_modular_product(a: List[UInt64], b: List[UInt64], count: Int, p: UInt
     var residues = List[List[UInt64]](capacity=k)
     for j in range(k):
         var q = moduli[j]
+        if p <= moduli[k - 1] and len(a) == la and (square or len(b) == lb):
+            # Residues below p are already below every float prime.
+            residues.append(_fconvolve(a, b, out, square, j, n))
+            continue
         var one_quotient = _shoup_quotient(1, q)
         var x = List[UInt64](capacity=la)
         for i in range(la):
@@ -838,22 +842,29 @@ def _float_modular_product(a: List[UInt64], b: List[UInt64], count: Int, p: UInt
         residues.append(_fconvolve(x, y, out, square, j, n))
     _charge_size(_product(out, _product(k, k)), budget)
     var g = _garner[True](k)
-    # x mod p = sum v_i (q_0 ... q_(i-1) mod p).
+    # x mod p = sum v_i (q_0 ... q_(i-1) mod p), all by Shoup products: digits
+    # below 2^50 reduce by one, and each term is below 2p.
+    var one_p = _shoup_quotient(1, p)
     var weights = List[UInt64](capacity=k)
+    var weight_quotients = List[UInt64](capacity=k)
     var w = UInt64(1)
     for i in range(k):
         weights.append(w)
+        weight_quotients.append(_shoup_quotient(w, p))
         w = _mod_mul(w, moduli[i] % p, p)
     var digits = List[UInt64](length=k, fill=0)
     var result = List[UInt64](length=count, fill=0)
+    if k == 1:
+        ref column = residues[0]
+        for i in range(out):
+            result.unsafe_get(i) = _reduce_2q(_shoup(column.unsafe_get(i), 1, one_p, p), p)
+        return result^
     for i in range(out):
-        var value = residues[0][i] % p
-        if k > 1:
-            _digits(g, residues, i, digits)
-            value = digits[0] % p
-            for j in range(1, k):
-                value = (value + _mod_mul(digits[j] % p, weights[j], p)) % p
-        result[i] = value
+        _digits(g, residues, i, digits)
+        var value = _reduce_2q(_shoup(digits[0], 1, one_p, p), p)
+        for j in range(1, k):
+            value = _reduce_2q(value + _reduce_2q(_shoup(digits[j], weights[j], weight_quotients[j], p), p), p)
+        result.unsafe_get(i) = value
     return result^
 
 
