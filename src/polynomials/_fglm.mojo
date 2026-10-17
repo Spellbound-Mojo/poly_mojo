@@ -25,15 +25,14 @@ or has more than `_FGLM_LIMIT` standard monomials; the caller then computes
 the LEX basis directly.
 """
 from std.math import max, min
-from .coefficients import ModInt, Modulus, QQ, ZZ
+from .coefficients import ModInt, Modulus, NoContext, QQ, ZZ
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product
 from .monomial import MonomialOrder
 from .sparse import SparsePoly
-from .division import divide_by_list
 from .primes import _residue as _integer_residue
-from ._rational_groebner import _Candidate, _Images, _MISMATCH_LIMIT, _PRIME_LIMIT, _agrees, _grevlex_groebner_rational, _integral, _monic, _next_prime
+from ._rational_groebner import _Candidate, _Images, _MISMATCH_LIMIT, _PRIME_LIMIT, _agrees, _copy, _grevlex_groebner_rational, _integral, _monic, _next_prime
 from ._f4 import _Columns, _f4_packed, _raw_hash, _reciprocal, _residue
-from ._packed_groebner import _Packed, _Term, _compare, _divides, _pack, _packed, _priorities, _unpack
+from ._packed_groebner import _Engine, _Packed, _Pair, _Term, _compare, _divides, _lcm, _pack, _packed, _priorities, _unpack
 
 comptime _FGLM_LIMIT = 4096
 """The most standard monomials `_fglm` works with; its memory grows as n D^2."""
@@ -547,26 +546,51 @@ def _rational_lex[W: Int](reduced: List[SparsePoly[QQ]], grevlex: MonomialOrder,
 
 
 def _lex_result[W: Int](var candidate: List[List[_Term[ZZ, W]]], reduced: List[SparsePoly[QQ]], order: MonomialOrder, grevlex: MonomialOrder, dimension: Int, n: Int, certify: Bool, mut budget: Budget) raises PolyError -> Optional[List[SparsePoly[QQ]]]:
-    """The candidate as monic LEX polynomials, certified when asked; None when certification fails."""
+    """The candidate as monic LEX polynomials, certified when asked; None when certification fails.
+
+    The proof reduces only the small GREVLEX elements and S-polynomials,
+    never the candidate's large elements by the GREVLEX basis. Let J be the
+    ideal the candidate generates. Every GREVLEX element reducing to zero
+    modulo the candidate gives I in J. Every S-polynomial of two elements
+    whose leading monomials share a variable reducing to zero (those of
+    coprime ones always do) makes the candidate a Groebner basis of J, so
+    dim R/J is the number of monomials its leading monomials leave. That
+    number being D = dim R/I, I in J forces J = I, and the reduced, monic
+    candidate is the reduced LEX basis of I.
+    """
+    var leads = List[_Packed[W]]()
+    for q in candidate:
+        leads.append(q[len(q) - 1].monomial)
     if certify:
-        var leads = List[_Packed[W]]()
-        for q in candidate:
-            leads.append(q[len(q) - 1].monomial)
         var standard = _standard[W](leads, n, budget)
         if not standard or len(standard.value()) != dimension:
             return None
+        # Fraction-free reduction in the packed engine, over the candidate.
+        var engine = _Engine[ZZ, W, True](MonomialOrder.LEX, NoContext())
+        for e in range(len(candidate)):
+            engine.leads.append(leads[e])
+            engine.active.append(e)
+            engine.polys.append(_copy(candidate[e], budget))
+        engine.sort_active(budget)
+        for g in reduced:
+            budget.charge(1)
+            var q = _integral(_pack[QQ, W](g.reorder(order, budget), order, budget), budget)
+            if len(engine.reduce_base(q^, engine.active, budget)) != 0:
+                return None
+        for a in range(len(candidate)):
+            for b in range(a + 1, len(candidate)):
+                budget.charge(1)
+                if leads[a].support & leads[b].support == 0:
+                    continue
+                if len(engine.reduce_pair(_Pair[W](a, b, _lcm(leads[a], leads[b])), budget)) != 0:
+                    return None
     var by_index = _priorities(order, budget)
     var result = List[SparsePoly[QQ]](capacity=len(candidate))
     for e in range(len(candidate)):
         budget.charge(1)
         var q = List[_Term[ZZ, W]]()
         swap(q, candidate[e])
-        var monic = _monic(q, order, by_index, budget)
-        if certify:
-            var division = divide_by_list(monic.reorder(grevlex, budget), reduced, budget)
-            if not division.remainder.is_zero():
-                return None
-        result.append(monic^)
+        result.append(_monic(q, order, by_index, budget))
     return result^
 
 
