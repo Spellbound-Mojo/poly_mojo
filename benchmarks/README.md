@@ -261,6 +261,10 @@ with `cfactor`; hence ◐.
 Check: the product identity and the factor multiset after normalization
 (primitive with positive leading coefficient over ZZ, monic over fields).
 
+Harness: `pixi run python -m harness.factor generate|run|report` (module
+`harness/factor.py`) covers this family and the factorization half of the
+next one over ZZ and GF(p), against FLINT, Singular and SymPy.
+
 ### Multivariate factorization and gcd
 
 Poly Mojo: `sparse.factor`, `sparse.gcd`, `sparse.resultant`.
