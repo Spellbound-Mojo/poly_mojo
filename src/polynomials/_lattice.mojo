@@ -302,14 +302,28 @@ def _float_vector(row: List[ZZ], mut budget: Budget) raises PolyError -> List[Fl
     return result^
 
 
-def _float_row(k: Int, fb: List[List[Float64]], mut r: List[List[Float64]], mut mu: List[List[Float64]], mut budget: Budget) raises PolyError:
-    # Floating Gram-Schmidt for row k from floating copies of the exact rows.
-    var n = len(fb[k])
-    _charge_size(_product(k + 1, n), budget)
+def _float_dot(a: List[Float64], b: List[Float64]) -> Float64:
+    var pa = a.unsafe_ptr()
+    var pb = b.unsafe_ptr()
+    var total = Float64(0)
+    for c in range(len(a)):
+        total += pa.unsafe_offset(c).unsafe_load() * pb.unsafe_offset(c).unsafe_load()
+    return total
+
+
+def _gram_row(k: Int, fb: List[List[Float64]], mut gram: List[List[Float64]], mut budget: Budget) raises PolyError:
+    _charge_size(_product(len(fb), len(fb[k])), budget)
+    for i in range(len(fb)):
+        var value = _float_dot(fb[k], fb[i])
+        gram[k][i] = value
+        gram[i][k] = value
+
+
+def _float_row(k: Int, gram: List[List[Float64]], mut r: List[List[Float64]], mut mu: List[List[Float64]], mut budget: Budget) raises PolyError:
+    # Floating Gram-Schmidt for row k from the floating Gram matrix.
+    _charge_size(_product(k + 1, k + 1), budget)
     for j in range(k + 1):
-        var value = Float64(0)
-        for c in range(n):
-            value += fb[k][c] * fb[j][c]
+        var value = gram[k][j]
         for i in range(j):
             value -= mu[j][i] * r[k][i]
         r[k][j] = value
@@ -342,6 +356,10 @@ def _exact_norms(basis: List[List[ZZ]], mut budget: Budget) raises PolyError -> 
     return norms^
 
 
+comptime _DELTA = 0.9
+"""The Lovasz parameter of the floating-steered reduction."""
+
+
 def _lll_knapsack(input: List[List[ZZ]], mut budget: Budget) raises PolyError -> _LLL:
     """LLL steered by floating-point Gram-Schmidt data, with exact norms.
 
@@ -361,7 +379,10 @@ def _lll_knapsack(input: List[List[ZZ]], mut budget: Budget) raises PolyError ->
     var fb = List[List[Float64]](capacity=rows)
     for row in basis:
         fb.append(_float_vector(row, budget))
-    _float_row(0, fb, r, mu, budget)
+    var gram = List[List[Float64]](length=rows, fill=List[Float64](length=rows, fill=0.0))
+    for i in range(rows):
+        _gram_row(i, fb, gram, budget)
+    _float_row(0, gram, r, mu, budget)
     var k = 1
     var iterations = 0
     var cap = 10000 + 100 * rows * rows
@@ -373,7 +394,7 @@ def _lll_knapsack(input: List[List[ZZ]], mut budget: Budget) raises PolyError ->
         var rounds = 0
         while True:
             budget.charge(1)
-            _float_row(k, fb, r, mu, budget)
+            _float_row(k, gram, r, mu, budget)
             var reduced = False
             var j = k - 1
             while j >= 0:
@@ -392,17 +413,25 @@ def _lll_knapsack(input: List[List[ZZ]], mut budget: Budget) raises PolyError ->
                 j -= 1
             if reduced:
                 fb[k] = _float_vector(basis[k], budget)
+                _gram_row(k, fb, gram, budget)
             rounds += 1
             if not reduced or rounds > 50:
                 break
-        var lhs = 0.99 * r[k - 1][k - 1]
+        var lhs = _DELTA * r[k - 1][k - 1]
         var rhs = r[k][k] + mu[k][k - 1] * mu[k][k - 1] * r[k - 1][k - 1]
         if lhs > rhs:
             _swap_rows(basis, k, k - 1)
             var held = fb[k].copy()
             fb[k] = fb[k - 1].copy()
             fb[k - 1] = held^
-            _float_row(k - 1, fb, r, mu, budget)
+            var row = gram[k].copy()
+            gram[k] = gram[k - 1].copy()
+            gram[k - 1] = row^
+            for i in range(rows):
+                var t = gram[i][k]
+                gram[i][k] = gram[i][k - 1]
+                gram[i][k - 1] = t
+            _float_row(k - 1, gram, r, mu, budget)
             k = max(k - 1, 1)
         else:
             k += 1

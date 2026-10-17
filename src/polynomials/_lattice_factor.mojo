@@ -131,7 +131,12 @@ def _van_hoeij_lifted(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconst
     var done = 0
     var data_columns = 0
     var traces_count = min(f.degree(), 2)
+    # Each column must add clearly more than about one bit per modular factor,
+    # or LLL cannot push the false indicators above the bound.
     var padding = _zcopy(p, budget)
+    while padding.value.magnitude_bit_length() < _sum(count, 20):
+        budget.charge(1)
+        padding = padding.mul(p, budget)
     while True:
         budget.charge(1)
         # For a rational factor, lc(f)^k * Tr_k is an integer with

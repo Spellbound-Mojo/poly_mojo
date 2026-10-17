@@ -117,6 +117,9 @@ def _recombine(f: DensePoly[ZZ], lifted: List[DensePoly[ZZ]], modulus: ZZ, allow
 
 comptime _PRIME_TRIALS = 3
 """Good primes whose modular factorizations are compared before lifting."""
+comptime _LATTICE_TRIALS = 10
+"""Good primes compared while the fewest factors still need lattice
+recombination and one of the last three primes lowered that count."""
 
 
 def _next_small_prime(previous: UInt64, mut budget: Budget) raises PolyError -> UInt64:
@@ -146,7 +149,8 @@ def _squarefree_factors(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -
     _allocation[Bool](_sum(f.degree(), 1), budget)
     var allowed = List[Bool](length=f.degree() + 1, fill=True)
     var best = List[DensePoly[ModInt]]()
-    while trials < _PRIME_TRIALS:
+    var stale = 0
+    while trials < _PRIME_TRIALS or (trials < _LATTICE_TRIALS and len(best) >= 20 and stale < 3):
         budget.charge(1)
         p = _next_small_prime(p, budget)
         if _residue(f.coefficients[f.degree()].value, p, budget) == 0:
@@ -175,6 +179,9 @@ def _squarefree_factors(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -
             return [_copy(f, budget)]
         if len(best) == 0 or len(modular) < len(best):
             best = modular^
+            stale = 0
+        else:
+            stale += 1
     # Measured crossover: exact LLL loses on 8/16-way splitting but
     # wins at 20. Peel singleton groups before paying for the lattice.
     if len(best) >= 20:
