@@ -47,6 +47,17 @@ def outside_environment():
     return env
 
 
+def zero_dimensional_lex(case):
+    """Whether FGLM applies: a LEX case whose ideal is zero-dimensional.
+
+    Cyclic-n is positive-dimensional when n has a square factor (4, 8, 9 on
+    the ladders); FGLM tools then hang or return a wrong basis.
+    """
+    if case['order'] != 'lex':
+        return False
+    return not (case['system'] == 'cyclic' and case['size'] in (4, 8, 9, 12))
+
+
 class Tool:
     name = system = algorithm = ''
     in_process = True
@@ -140,8 +151,11 @@ class SymPy(Tool):
 
     def __init__(self, method, ground_types):
         self.method, self.ground_types = method, ground_types
-        self.algorithm = {'buchberger': 'Buchberger', 'f5b': 'F5B (signatures)'}[method]
+        self.algorithm = {'buchberger': 'Buchberger', 'f5b': 'F5B (signatures)', 'fglm': 'Buchberger (grevlex) + FGLM'}[method]
         self.name = f'sympy-{method}' + ('' if ground_types == 'gmpy' else f'-{ground_types}')
+
+    def supports(self, case):
+        return case['family'] == 'groebner' and (self.method != 'fglm' or zero_dimensional_lex(case))
 
     def version(self):
         import sympy
@@ -205,10 +219,12 @@ class Singular(Tool):
 
     def __init__(self, call):
         self.call = call
-        self.algorithm = {'std': 'Buchberger (std)', 'slimgb': 'slimgb', 'modStd': 'multimodular (modStd)'}[call]
+        self.algorithm = {'std': 'Buchberger (std)', 'slimgb': 'slimgb', 'modStd': 'multimodular (modStd)', 'stdfglm': 'std (dp) + FGLM'}[call]
         self.name = f'singular-{call.lower()}'
 
     def supports(self, case):
+        if self.call == 'stdfglm' and not zero_dimensional_lex(case):
+            return False
         return case['family'] == 'groebner' and not (self.call == 'modStd' and case['field'] is not None)
 
     def version(self):
@@ -321,8 +337,8 @@ class PolyMojoStream(PolyMojo):
 TOOLS = {t.name: t for t in [
     PolyMojo(), PolyMojo(certified=True), PolyMojo(mode='uncertified'),
     PolyMojoStream('decompose'), PolyMojoStream('materialized'), PolyMojoStream('streaming'),
-    SymPy('buchberger', 'gmpy'), SymPy('f5b', 'gmpy'), SymPy('buchberger', 'flint'),
-    Singular('std'), Singular('slimgb'), Singular('modStd'),
+    SymPy('buchberger', 'gmpy'), SymPy('f5b', 'gmpy'), SymPy('buchberger', 'flint'), SymPy('fglm', 'gmpy'),
+    Singular('std'), Singular('slimgb'), Singular('modStd'), Singular('stdfglm'),
     Msolve(),
 ]}
 from . import real_roots as _real_roots  # noqa: E402 (the family module imports helpers above)

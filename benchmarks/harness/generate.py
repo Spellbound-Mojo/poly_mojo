@@ -125,9 +125,9 @@ GREVLEX = {
     'randquad': range(3, 11),
 }
 LEX = {
-    'katsura': range(3, 7),
-    'cyclic': range(4, 7),
-    'randquad': range(2, 6),
+    'katsura': range(3, 10),
+    'cyclic': range(4, 8),
+    'randquad': range(2, 8),
 }
 
 
