@@ -2388,23 +2388,45 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
     var half_q = List[UInt64](length=basis.limbs, fill=0)
     for l in range(basis.limbs):
         half_q[l] = (basis.product[l] >> 1) | ((basis.product[l + 1] << 63) if l + 1 < basis.limbs else UInt64(0))
+    # Q shifted to a normalized divisor, for rescaling values in place.
+    var shift = Int(count_leading_zeros(basis.product[basis.limbs - 1]))
+    var divisor = List[UInt64](length=basis.limbs, fill=0)
+    for l in range(basis.limbs):
+        var low = basis.product[l] << UInt64(shift)
+        var high = (basis.product[l - 1] >> UInt64(64 - shift)) if shift > 0 and l > 0 else UInt64(0)
+        divisor[l] = low | high
+    var scaled = List[UInt64](length=2 * basis.limbs + 4, fill=0)
+    # Each slot's element, and per element the factors times its leading
+    # coefficient's inverse, modulo each prime, as of `version`.
+    var elements = List[Int](capacity=nslots)
+    for slot in range(nslots):
+        elements.append(matrix.sources.unsafe_get(pivot.unsafe_get(lanes.columns.unsafe_get(slot))))
+    var ngens = len(coefficients.limbs)
+    var combined = List[UInt64](length=ngens * k, fill=0)
+    var stamps = List[Int](length=ngens, fill=-1)
+    var version = 0
     var top = nslots
     var ready = 0
     # Later columns first: their denominators tend to contain the earlier ones'.
     for slot in range(nslots - 1, -1, -1):
-        var g = matrix.sources[pivot[lanes.columns[slot]]]
+        var g = elements.unsafe_get(slot)
         if top - slot >= ready:
             top = slot
             ready = min(_LANES, slot + 1)
             for j in range(ready):
-                var h = matrix.sources[pivot[lanes.columns[slot - j]]]
+                var h = elements.unsafe_get(slot - j)
                 var from_ = lanes.residues.unsafe_ptr().unsafe_offset((slot - j) * limit)
+                var scale = combined.unsafe_ptr().unsafe_offset(h * k)
+                if stamps.unsafe_get(h) != version:
+                    stamps.unsafe_get(h) = version
+                    for batch in range(k // _LANES):
+                        var inverse = images.inverses[batch].unsafe_ptr().unsafe_offset(_LANES * h).unsafe_load[width=_LANES]()
+                        var f = factors.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_load[width=_LANES]()
+                        scale.unsafe_offset(_LANES * batch).unsafe_store[width=_LANES](_mod_lanes(f * inverse, images.batches[batch]))
                 for batch in range(k // _LANES):
                     ref primes = images.batches[batch]
                     var v = from_.unsafe_offset(_LANES * batch).unsafe_load[width=_LANES]().cast[DType.uint64]()
-                    var inverse = images.inverses[batch].unsafe_ptr().unsafe_offset(_LANES * h).unsafe_load[width=_LANES]()
-                    var x = _mod_lanes(v * factors.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_load[width=_LANES](), primes)
-                    var y = _mod_lanes(x * inverse, primes)
+                    var y = _mod_lanes(v * scale.unsafe_offset(_LANES * batch).unsafe_load[width=_LANES](), primes)
                     comptime for l in range(_LANES):
                         block.unsafe_get(_LANES * (_LANES * batch + l) + j) = y[l]
             basis.values(block, block_values, sums)
@@ -2446,9 +2468,19 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
             for i in range(k):
                 var p = images.primes[i]
                 factors[i] = factors[i] * _remainder_of(b_limbs.unsafe_ptr(), len(b_limbs), p) % p
+            version += 1
             # Earlier n_c grow by the new factor; account for it in the bound now.
             worst += b.magnitude_bit_length()
-            ready = 0
+            # The values formed ahead are now b times theirs modulo Q: rescale
+            # them when that is cheaper than forming them again.
+            var lane = top - slot
+            var remaining = ready - lane - 1
+            var factor = _shifted_limbs(b_limbs, shift)
+            if remaining > 0 and len(factor) <= basis.limbs and remaining * (2 * len(factor) + 1) < 2 * k:
+                for j in range(lane + 1, ready):
+                    _rescale(block_values.unsafe_ptr().unsafe_offset(j * n), basis.limbs, factor, divisor, shift, scaled)
+            else:
+                ready = 0
         # n_c times D / D_now, which is below 2^(bits D - bits D_now + 1) at the end:
         # counted here by charging the later growth to `worst` as it happens.
         worst = max(worst, n_bits + coefficients.bits[g])
@@ -2467,6 +2499,33 @@ def _bits_at(x: Pointer[mut=False, UInt64, _], n: Int) -> Int:
     if l < 0:
         return 0
     return 64 * l + 64 - Int(count_leading_zeros(x.unsafe_offset(l).unsafe_load()))
+
+
+def _shifted_limbs(limbs: List[UInt64], shift: Int) -> List[UInt64]:
+    """The magnitude limbs times 2^shift, for shift below 64, without leading zeros."""
+    var result = List[UInt64](capacity=len(limbs) + 1)
+    var carry = UInt64(0)
+    for limb in limbs:
+        result.append((limb << UInt64(shift)) | carry)
+        carry = (limb >> UInt64(64 - shift)) if shift > 0 else UInt64(0)
+    result.append(carry)
+    while len(result) and result[len(result) - 1] == 0:
+        _ = result.pop()
+    return result^
+
+
+def _rescale(x: Pointer[mut=True, UInt64, _], n: Int, factor: List[UInt64], divisor: List[UInt64], shift: Int, mut scratch: List[UInt64]):
+    """Set x[0:n], below Q, to x times b modulo Q, given factor = b 2^shift and divisor = Q 2^shift (n limbs, normalized)."""
+    var length = n + len(factor)
+    var w = scratch.unsafe_ptr()
+    for l in range(length + 1):
+        w.unsafe_offset(l).unsafe_store(0)
+    for l in range(len(factor)):
+        _add_mul_1(w.unsafe_offset(l), length - l, factor[l], x, n)
+    _remainder_limbs(w, length, divisor.unsafe_ptr(), n)
+    for l in range(n):
+        var high = (w.unsafe_offset(l + 1).unsafe_load() << UInt64(64 - shift)) if shift > 0 and l + 1 < n else UInt64(0)
+        x.unsafe_offset(l).unsafe_store((w.unsafe_offset(l).unsafe_load() >> UInt64(shift)) | high)
 
 
 def _compare_at(x: Pointer[mut=False, UInt64, _], n: Int, y: Pointer[mut=False, UInt64, _]) -> Int:
