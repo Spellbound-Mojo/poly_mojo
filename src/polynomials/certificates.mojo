@@ -536,7 +536,7 @@ def check_coprimality[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], ce
 
 from .coefficients import QQ
 from .evaluate import _derivative_dense
-from ._root_ops import _compare as _root_compare, _chain_variations, _one_sided, _sign_at
+from ._root_ops import _compare as _root_compare, _chain_variations, _one_sided, _sign_at, _sign
 
 
 @fieldwise_init
@@ -670,6 +670,8 @@ def _chain_relations(sequence: SturmSequence, mut chain: _IntegerChain, mut budg
     for i in range(n):
         chain.degrees.append(len(forms[i][0]) - 1)
         chain.signs.append(forms[i][1].sign())
+        if n <= _SHORT:
+            chain.entries.append(forms[i][0].copy())
     var none = (List[Integer](), Rational(0))
     for i in range(1, n):
         budget.charge(1)
@@ -827,10 +829,13 @@ struct _IntegerChain(Copyable, Movable):
     var bounded: Bool
     """Whether every real root lies strictly inside (-2^bound, 2^bound)."""
     var bound: Int
+    var entries: List[List[Integer]]
+    """Every integer entry P_i of a short chain (at most _SHORT entries), else empty."""
 
     def __init__(out self):
         self.bounded = False
         self.bound = 0
+        self.entries = List[List[Integer]]()
         self.first = List[Integer]()
         self.second = List[Integer]()
         self.degrees = List[Int]()
@@ -838,6 +843,9 @@ struct _IntegerChain(Copyable, Movable):
         self.powers = List[Integer]()
         self.quotients = List[List[Integer]]()
         self.contents = List[Integer]()
+
+
+comptime _SHORT = 8
 
 
 def _fujiwara_exponent(c: List[Integer]) -> Int:
@@ -895,6 +903,24 @@ def _integer_variations(chain: _IntegerChain, sequence: SturmSequence, a: QQ, mu
     var n = len(chain.degrees)
     if n < 2 or n != len(sequence.polynomials):
         return _chain_variations(sequence.polynomials, sequence.quotients, a, budget, side)
+    if len(chain.entries) == n:
+        # A short chain signs each entry directly: certified fixed-point
+        # Horner needs far fewer bits than exact values at long points.
+        var previous_sign = 0
+        var changes = 0
+        for i in range(n):
+            budget.charge(UInt64(len(chain.entries[i])))
+            var sign: Int
+            try:
+                sign = _sign(chain.entries[i], a.value) * chain.signs[i]
+            except e:
+                raise PolyError(PolyErrorKind.CAPACITY, String(e))
+            sign = _one_sided(sequence.polynomials[i], sign, a, side, budget)
+            if sign != 0:
+                if previous_sign != 0 and previous_sign != sign:
+                    changes += 1
+                previous_sign = sign
+        return changes
     if chain.bounded and _beyond(a, chain.bound):
         # Variations change only at roots of f (Sturm), so beyond every root
         # they are those at infinity: the leading-coefficient signs, with
