@@ -27,12 +27,9 @@ def _fail(e: Error) -> PolyError:
     return PolyError(PolyErrorKind.CAPACITY, String(e))
 
 
-def _abs(value: Integer) raises PolyError -> Integer:
+def _abs(value: Integer) -> Integer:
     if value.sign() < 0:
-        try:
-            return -value
-        except e:
-            raise _fail(e)
+        return -value
     return value.copy()
 
 
