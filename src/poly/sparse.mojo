@@ -5,6 +5,7 @@ from std.iter import Iterable, IterableOwned, Iterator, iter, next, StopIteratio
 from std.builtin.rebind import downcast
 from std.builtin.variadics import TypeList
 from std.memory import ArcPointer
+from std.os import abort
 from apn_mojo import Integer, Rational, ExactComplex
 from polynomials import SparsePoly, Term, Monomial, MonomialOrder, Budget, ModInt, Modulus, NoContext, PolyError, PolyErrorKind
 from polynomials import evaluate as _evaluate, derivative as _derivative, integrate_sparse, divide_by_list, CoefficientField
@@ -3169,6 +3170,8 @@ struct _BasisData[k: Int](Copyable, Movable):
     var generators: List[SparsePoly[_Field[Self.k]]]
     var basis: _CoreBasis[_Field[Self.k]]
     var context: _Ring[Self.k].Context
+    var pending: Bool
+    """Whether the core basis's polynomials were dropped, to be rebuilt from the basis values when first needed."""
 
 
 @fieldwise_init
@@ -3225,7 +3228,30 @@ struct Basis[P: Copyable & Deinitable, k: Int](Copyable, Movable, Iterable, Size
         Returns:
             Immutable core basis data in the requested monomial order.
         """
+        try:
+            self._ensure_core()
+        except e:
+            abort(String("cannot rebuild the core basis: ", e))
         return self._data[].basis
+
+    def _ensure_core(self) raises PolyError:
+        """Rebuild the core basis's polynomials from the basis values if they were dropped.
+
+        A basis computed without witnesses keeps its polynomials once, as
+        its canonical arrays; the core basis in the computational order is
+        rebuilt on first use, shared by every copy, and charged to no
+        caller's budget since the values already paid for it.
+        """
+        if not self._data[].pending:
+            return
+        var work = Budget()
+        ref core = self._data[].basis
+        _allocation[SparsePoly[_Field[Self.k]]](len(self._values), work)
+        var polys = List[SparsePoly[_Field[Self.k]]](capacity=len(self._values))
+        for i in range(len(self._values)):
+            polys.append(rebind_var[SparsePoly[_Field[Self.k]]](self._values[i]._core[].reorder(core.order, work)))
+        core.basis = polys^
+        self._data[].pending = False
 
 
 @fieldwise_init
@@ -3263,13 +3289,25 @@ def _basis[P: Copyable & Deinitable, k: Int](prepared: List[Array[P, k]], ctx: _
     _allocation[Array[P, k]](len(result.basis), budget)
     var values = List[Array[P, k]](capacity=len(result.basis))
     var canonical = _order[P](budget)
-    for p in result.basis:
-        values.append(Array[P, k](rebind_var[SparsePoly[_Ring[k]]](p.reorder(canonical, budget)), budget))
+    # Without cofactors, the polynomials are kept once, as the canonical
+    # arrays: each core polynomial goes once its array is made, and the core
+    # basis is rebuilt from the arrays when first needed.
+    var pending = not result.cofactors
+    for i in range(len(result.basis)):
+        if pending:
+            var spare = Budget()
+            var p = SparsePoly[_Field[k]].zero(monomial_order, result.basis[i].ring, spare)
+            swap(p, result.basis[i])
+            values.append(Array[P, k](rebind_var[SparsePoly[_Ring[k]]](p^._moved_to(canonical, budget)), budget))
+        else:
+            values.append(Array[P, k](rebind_var[SparsePoly[_Ring[k]]](result.basis[i].reorder(canonical, budget)), budget))
+    if pending:
+        result.basis = List[SparsePoly[_Field[k]]]()
     _allocation[_BasisData[k]](1, budget)
     var modulus = UInt64(0)
     comptime if k == 3:
         modulus = rebind[Modulus](ctx).value
-    return Basis[P, k](ArcPointer(_BasisData[k](generators^, result^, ctx.copy())), Values[Array[P, k], k](values^, modulus, budget))
+    return Basis[P, k](ArcPointer(_BasisData[k](generators^, result^, ctx.copy(), pending)), Values[Array[P, k], k](values^, modulus, budget))
 
 
 def groebner[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable](generators: I, mut budget: Budget, *, order: String = "grevlex", axes: List[Int] = List[Int](), witnesses: Bool = True, certify: Bool = True) raises PolyError -> Basis[P, _FieldKind[_Kind[C]]] where _Element[_Nested[I]] == Tuple[P, C]:
@@ -3359,6 +3397,7 @@ def reduce[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable, k: I
         PolyError: DOMAIN for incompatible input, UNSUPPORTED for an unavailable operation, or LIMIT/CAPACITY on resource limits.
     """
     var p = _basis_input[I, P, C, k](values, basis, budget)
+    basis._ensure_core()
     var division = _reduce(rebind[SparsePoly[_Field[k]]](p._core[]), basis._data[].basis, budget)
     return Array[P, k](rebind_var[SparsePoly[_Ring[k]]](division.remainder.reorder(_order[P](budget), budget)), budget)
 
