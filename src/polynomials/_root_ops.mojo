@@ -190,3 +190,71 @@ def _one_sided(p: DensePoly[QQ], value_sign: Int, a: QQ, side: Int, mut budget: 
             derivative = _derivative_dense(derivative, budget)
             parity = 1 - parity
     return sign
+
+
+# Certified signs of integer polynomials at rationals, by fixed-point Horner
+# with a proved error bound and an exact fallback (used by _real_refine and
+# by short Sturm chains).
+
+def _bits(x: Integer) -> Int:
+    return x.magnitude_bit_length()
+
+
+def _power_shift(q: Integer) raises -> Int:
+    return _power_of_two(q)
+
+
+def _error_bits(n: Int, p: Integer, q: Integer) -> Int:
+    # Floor rounding in each of the n Horner steps errs by less than one unit,
+    # and later steps scale it by |x|, so the total is below
+    # sum_{j<n} |x|^j <= n max(1, |x|)^(n-1) units.
+    var lx = max(0, _bits(p) - _bits(q) + 1)
+    var log_n = 0
+    while (1 << log_n) < n:
+        log_n += 1
+    return log_n + (n - 1) * lx + 1
+
+
+def _fixed(c: List[Integer], p: Integer, q: Integer, shift: Int, scale: Int) raises -> Integer:
+    # 2^scale * c(p/q) within the error of _error_bits, by floor-rounded Horner.
+    var n = len(c) - 1
+    var t = c[n] << scale
+    for i in range(n - 1, -1, -1):
+        var product = t * p
+        if shift >= 0:
+            t = product >> shift
+        else:
+            t = product // q
+        t = t + (c[i] << scale)
+    return t^
+
+
+def _exact_sign(c: List[Integer], p: Integer, q: Integer) raises -> Int:
+    # sign(q^n c(p/q)) by homogeneous Horner; q is positive.
+    var n = len(c) - 1
+    var t = c[n].copy()
+    var power = Integer(1)
+    for i in range(n - 1, -1, -1):
+        power = power * q
+        t = t * p + c[i] * power
+    return t.sign()
+
+
+def _sign(c: List[Integer], x: Rational) raises -> Int:
+    var n = len(c) - 1
+    if n <= 0:
+        return c[0].sign() if n == 0 else 0
+    var p = x.numerator()
+    var q = x.denominator()
+    if not p:
+        return c[0].sign()
+    var shift = _power_shift(q)
+    var error = _error_bits(n, p, q)
+    var exact_bits = n * (_bits(p) + _bits(q))
+    var extra = 64
+    while error + extra < exact_bits:
+        var t = _fixed(c, p, q, shift, error + extra)
+        if t and _bits(t) - 1 > error + 1:
+            return t.sign()
+        extra *= 4
+    return _exact_sign(c, p, q)
