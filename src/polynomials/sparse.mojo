@@ -343,7 +343,7 @@ struct SparsePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
                 var result = _heap_product[Self.C, True](left, right, budget) if len(left.terms) <= len(right.terms) else _heap_product[Self.C, True](right, left, budget)
                 return result.reorder(self.order, budget)
         comptime if Self.C == ZZ or Self.C == ModInt:
-            if self.order.kind == MonomialOrder.LEX and count >= 4096:
+            if self.order.kind == MonomialOrder.LEX and count >= 256:
                 # Kronecker-packed exponents and dense windows.
                 var packed = _packed_product(self, other, budget)
                 if packed:
@@ -401,6 +401,10 @@ struct SparsePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
     def pow(self, n: UInt64, mut budget: Budget) raises PolyError -> Self:
         """Raise to a natural power by repeated squaring, with zero power equal to one.
 
+        Squaring runs from the exponent's leading bit down, so each step
+        squares the power so far and multiplies by the base alone; the last
+        and largest product is a square.
+
         Args:
             n: The exponent.
             budget: The shared work allowance.
@@ -411,18 +415,18 @@ struct SparsePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
         Raises:
             PolyError: LIMIT or CAPACITY on work limits.
         """
-        var result = Self.constant(Self.C.one(self.ring), self.order, budget)
         if n == 0:
-            return result^
-        var base = self._copy(budget)
-        var exponent = n
-        while exponent:
+            return Self.constant(Self.C.one(self.ring), self.order, budget)
+        var result = self._copy(budget)
+        var bit = 63
+        while not (n >> UInt64(bit)) & 1:
+            bit -= 1
+        while bit > 0:
             budget.charge(1)
-            if exponent & 1:
-                result = result.mul(base, budget)
-            exponent >>= 1
-            if exponent:
-                base = base.mul(base, budget)
+            bit -= 1
+            result = result.mul(result, budget)
+            if (n >> UInt64(bit)) & 1:
+                result = result.mul(self, budget)
         return result^
 
     def leading(self, mut budget: Budget) raises PolyError -> Term[Self.C]:

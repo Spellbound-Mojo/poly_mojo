@@ -7,6 +7,7 @@ matrix inner loops perform no division. Every operation charges the shared
 budget in proportion to its coefficient work before doing it.
 """
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product, _sum
+from ._ntt import _modular_product
 
 comptime _KARATSUBA = 128
 """Operand length at which products switch from schoolbook to Karatsuba;
@@ -15,6 +16,12 @@ comptime _KARATSUBA_SMALL = 1024
 comptime _SMALL = UInt64(1) << 28
 """Primes below this bound keep products under 2^56, so 64-bit SIMD lanes
 accumulate 256 of them exactly before a reduction."""
+comptime _TRANSFORM = 512
+"""Shorter operand length at which products switch from Karatsuba to number-theoretic transforms."""
+comptime _TRANSFORM_ONE = 384
+"""The same, when one transform prime holds every coefficient sum."""
+comptime _TRANSFORM_SMALL = 2048
+"""The same, for primes below _SMALL that need two transform primes, against SIMD schoolbook."""
 
 
 @fieldwise_init
@@ -250,6 +257,23 @@ def _karatsuba(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) 
 def _mul(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
     if len(a) == 0 or len(b) == 0:
         return List[UInt64]()
+    var shorter = min(len(a), len(b))
+    var bits = 0
+    while (UInt64(1) << UInt64(bits)) <= f.p - 1:
+        bits += 1
+    var magnitude = 0
+    while (1 << magnitude) <= shorter:
+        magnitude += 1
+    var threshold = _TRANSFORM_ONE if 2 * bits + magnitude <= 61 else (_TRANSFORM_SMALL if f.p < _SMALL else _TRANSFORM)
+    if shorter >= threshold:
+        # The convolution of Montgomery residues aR, bR is abR^2; one REDC per
+        # coefficient returns it to Montgomery form.
+        var square = a == b
+        var c = _modular_product(a, b, len(a) + len(b) - 1, f.p, square, budget)
+        for i in range(len(c)):
+            c[i] = _redc(UInt128(c[i]), f)
+        _trim(c)
+        return c^
     return _karatsuba(a, b, f, budget)
 
 

@@ -46,7 +46,7 @@ struct _Packing(Copyable, Movable):
     var window: UInt64
     """The low range: radix[L] * ... * radix[n-1]."""
 
-    def __init__(out self, var radix: List[UInt64]):
+    def __init__(out self, var radix: List[UInt64], limit: Int = _WINDOW):
         self.n = len(radix)
         self.weight = List[UInt64](length=self.n, fill=1)
         var i = self.n - 2
@@ -55,7 +55,7 @@ struct _Packing(Copyable, Movable):
             i -= 1
         self.prefix_count = 0
         self.window = (self.weight[0] * radix[0]) if self.n else 1
-        while self.prefix_count < self.n and self.window > UInt64(_WINDOW):
+        while self.prefix_count < self.n and self.window > UInt64(limit):
             self.window = self.weight[self.prefix_count]
             self.prefix_count += 1
         self.radix = radix^
@@ -73,14 +73,20 @@ struct _Packing(Copyable, Movable):
         return k
 
     def monomial(self, key: UInt64, mut budget: Budget) raises PolyError -> Monomial:
-        var pairs = List[Tuple[Int64, UInt32]]()
+        var count = 0
         var rest = key
+        for i in range(self.n):
+            var e = rest // self.weight[i]
+            rest -= e * self.weight[i]
+            count += Int(e != 0)
+        _allocation[Tuple[Int64, UInt32]](count, budget)
+        var pairs = List[Tuple[Int64, UInt32]](capacity=count)
+        rest = key
         for i in range(self.n):
             var e = rest // self.weight[i]
             rest -= e * self.weight[i]
             if e:
                 pairs.append((Int64(i), UInt32(e)))
-        _allocation[Tuple[Int64, UInt32]](len(pairs), budget)
         var result = Monomial()
         result.pairs = pairs^
         return result^
@@ -144,13 +150,21 @@ def _signed[C: CoefficientRing](c: C) -> Int64:
 
 
 struct _Accumulator(Movable):
-    """Dense window slots: three words of two's complement per slot (ZZ), or one 128-bit word pair (GF(p))."""
-    var words: List[UInt64]
+    """Dense window slots.
+
+    ZZ slots hold two's complement sums: 128 bits in `lows`, extended to 192
+    bits by `highs` when the coefficient bound needs it (`wide`). GF(p)
+    slots hold unreduced 128-bit sums. Tracking records the touched slots
+    of sparse prefixes; dense prefixes scan the window instead.
+    """
+    var lows: List[UInt128]
+    var highs: List[UInt64]
     var touched_flag: List[UInt8]
     var touched: List[Int]
 
-    def __init__(out self, slots: Int):
-        self.words = List[UInt64](length=3 * slots, fill=0)
+    def __init__(out self, slots: Int, wide: Bool):
+        self.lows = List[UInt128](length=slots, fill=0)
+        self.highs = List[UInt64](length=slots if wide else 0, fill=0)
         self.touched_flag = List[UInt8](length=slots, fill=0)
         self.touched = List[Int]()
 
@@ -161,79 +175,78 @@ struct _Accumulator(Movable):
             self.touched.append(slot)
 
     @always_inline
-    def add_signed(mut self, slot: Int, a: Int64, b: Int64):
-        """Add a * b for |a|, |b| < 2^63 into a 192-bit slot."""
-        self.touch(slot)
-        var negative = (a < 0) != (b < 0)
-        var x = UInt64(a) if a >= 0 else UInt64(0) - UInt64(a)
-        var y = UInt64(b) if b >= 0 else UInt64(0) - UInt64(b)
-        var p = UInt128(x) * UInt128(y)
-        self._add(slot, UInt64(p), UInt64(p >> 64), negative)
+    def add_signed[wide: Bool, track: Bool](mut self, slot: Int, a: Int64, b: Int64):
+        """Add a * b for |a|, |b| < 2^63."""
+        comptime if track:
+            self.touch(slot)
+        var product = Int128(a) * Int128(b)
+        self._add[wide](slot, UInt128(product), UInt64(0) - UInt64(Int(product < 0)))
 
     @always_inline
-    def _add(mut self, slot: Int, lo: UInt64, hi: UInt64, negative: Bool):
-        var base = 3 * slot
-        if negative:
-            var s0 = self.words.unsafe_get(base + 0) - lo
-            var b0 = UInt64(1) if self.words.unsafe_get(base + 0) < lo else UInt64(0)
-            var t = self.words.unsafe_get(base + 1) - hi
-            var b1 = UInt64(1) if self.words.unsafe_get(base + 1) < hi else UInt64(0)
-            var s1 = t - b0
-            b1 += UInt64(1) if t < b0 else UInt64(0)
-            self.words.unsafe_get(base + 0) = s0
-            self.words.unsafe_get(base + 1) = s1
-            self.words.unsafe_get(base + 2) = self.words.unsafe_get(base + 2) - b1
-        else:
-            var s0 = self.words.unsafe_get(base + 0) + lo
-            var c0 = UInt64(1) if s0 < lo else UInt64(0)
-            var t = self.words.unsafe_get(base + 1) + hi
-            var c1 = UInt64(1) if t < hi else UInt64(0)
-            var s1 = t + c0
-            c1 += UInt64(1) if s1 < c0 else UInt64(0)
-            self.words.unsafe_get(base + 0) = s0
-            self.words.unsafe_get(base + 1) = s1
-            self.words.unsafe_get(base + 2) = self.words.unsafe_get(base + 2) + c1
+    def _add[wide: Bool](mut self, slot: Int, value: UInt128, extension: UInt64):
+        """Add the two's complement value whose bits above 128 are all `extension`."""
+        var old = self.lows.unsafe_get(slot)
+        var new = old + value
+        self.lows.unsafe_get(slot) = new
+        comptime if wide:
+            self.highs.unsafe_get(slot) += extension + UInt64(Int(new < old))
 
-    def add_integer(mut self, slot: Int, value: Integer) raises PolyError:
-        """Add a ZZ coefficient below 2^128 in magnitude."""
+    def add_integer[wide: Bool](mut self, slot: Int, value: Integer) raises PolyError:
+        """Add a ZZ coefficient below 2^127 in magnitude, or below 2^190 in a wide slot."""
         self.touch(slot)
+        var bits = value.magnitude_bit_length()
+        if bits <= 63:
+            var word: Int64
+            try:
+                word = value.to_native_exact[DType.int64]()
+            except e:
+                raise PolyError(PolyErrorKind.CAPACITY, String(e))
+            self._add[wide](slot, UInt128(Int128(word)), UInt64(0) - UInt64(Int(word < 0)))
+            return
         var bytes = value.to_bytes()
-        if len(bytes) > 16:
+        if len(bytes) > (24 if wide else 16):
             raise PolyError(PolyErrorKind.CAPACITY, "packed accumulator coefficient overflow")
-        var lo = UInt64(0)
-        var hi = UInt64(0)
+        var low = UInt128(0)
+        var high = UInt64(0)
         for i in range(len(bytes)):
-            if i < 8:
-                lo |= UInt64(bytes[i]) << UInt64(8 * i)
+            if i < 16:
+                low |= UInt128(bytes[i]) << UInt128(8 * i)
             else:
-                hi |= UInt64(bytes[i]) << UInt64(8 * (i - 8))
-        self._add(slot, lo, hi, value.sign() < 0)
+                high |= UInt64(bytes[i]) << UInt64(8 * (i - 16))
+        if value.sign() < 0:
+            # 192-bit two's complement negation.
+            low = ~low + 1
+            high = ~high + UInt64(Int(low == 0))
+        self._add[wide](slot, low, high)
 
     @always_inline
-    def add_modular(mut self, slot: Int, a: UInt64, b: UInt64, p: UInt64):
-        """Add a * b for residues a, b < p < 2^62 into a 128-bit slot, reducing before it could overflow."""
-        self.touch(slot)
-        var base = 3 * slot
-        var acc = (UInt128(self.words.unsafe_get(base + 1)) << 64) | UInt128(self.words.unsafe_get(base + 0))
+    def add_modular[track: Bool](mut self, slot: Int, a: UInt64, b: UInt64, p: UInt64):
+        """Add a * b for residues a, b < p < 2^62, reducing before the sum could overflow."""
+        comptime if track:
+            self.touch(slot)
+        var acc = self.lows.unsafe_get(slot)
         if acc >= UInt128(1) << 127:
             acc %= UInt128(p)
-        acc += UInt128(a) * UInt128(b)
-        self.words.unsafe_get(base + 0) = UInt64(acc)
-        self.words.unsafe_get(base + 1) = UInt64(acc >> 64)
+        self.lows.unsafe_get(slot) = acc + UInt128(a) * UInt128(b)
 
     def modular(self, slot: Int, p: UInt64) -> UInt64:
-        var base = 3 * slot
-        return UInt64(((UInt128(self.words.unsafe_get(base + 1)) << 64) | UInt128(self.words.unsafe_get(base + 0))) % UInt128(p))
+        return UInt64(self.lows.unsafe_get(slot) % UInt128(p))
 
     def signed_words(self, slot: Int) -> Tuple[UInt64, UInt64, UInt64]:
-        var base = 3 * slot
-        return (self.words.unsafe_get(base + 0), self.words.unsafe_get(base + 1), self.words.unsafe_get(base + 2))
+        var low = self.lows.unsafe_get(slot)
+        var hi = UInt64(low >> 64)
+        var top = self.highs.unsafe_get(slot) if len(self.highs) else UInt64(0) - (hi >> 63)
+        return (UInt64(low), hi, top)
+
+    @always_inline
+    def empty(self, slot: Int) -> Bool:
+        """Whether the slot's sum is zero (before any modular reduction)."""
+        return self.lows.unsafe_get(slot) == 0 and (not len(self.highs) or self.highs.unsafe_get(slot) == 0)
 
     def clear(mut self, slot: Int):
-        var base = 3 * slot
-        self.words.unsafe_get(base + 0) = 0
-        self.words.unsafe_get(base + 1) = 0
-        self.words.unsafe_get(base + 2) = 0
+        self.lows.unsafe_get(slot) = 0
+        if len(self.highs):
+            self.highs.unsafe_get(slot) = 0
         self.touched_flag.unsafe_get(slot) = 0
 
     def sorted_touched(mut self) -> List[Int]:
@@ -357,7 +370,8 @@ def _packed_product[C: CoefficientRing](a: SparsePoly[C], b: SparsePoly[C], mut 
     var radix = _radices(_maxima(a, n), _maxima(b, n))
     if not radix:
         return None
-    var packing = _Packing(radix.take())
+    # A window larger than eight slots per term pair would cost more to clear than to use.
+    var packing = _Packing(radix.take(), min(_WINDOW, max(1024, 8 * len(a.terms) * len(b.terms))))
     var left = _pack(a, packing, budget)
     var right = _pack(b, packing, budget)
     var groups_a = len(left.group_prefix)
@@ -378,16 +392,29 @@ def _packed_product[C: CoefficientRing](a: SparsePoly[C], b: SparsePoly[C], mut 
         prefix_bits += 1
     if prefix_bits + shift > 63:
         return None
+    # Squares visit each unordered pair of terms once, doubling the off-diagonal products.
+    var square = a == b
+    comptime if C == ZZ:
+        for term in a.terms:
+            if rebind[ZZ](term.coefficient).value.magnitude_bit_length() > 62:
+                square = False
+                break
     for i in range(groups_a):
-        for j in range(groups_b):
+        for j in range(i if square else 0, groups_b):
             budget.charge(1)
             var prefix = left.group_prefix[i] + right.group_prefix[j]
             pairs.append((prefix << UInt64(shift)) | UInt64(i * groups_b + j))
+    pair_count = len(pairs)
     _charge_size(pair_count, budget)
     sort(pairs)
+    # Sums need 192 bits only when the coefficient bound reaches 2^127.
+    var wide = False
+    comptime if C == ZZ:
+        var bits = _bits(a) + _bits(b) + _bit_length(min(len(a.terms), len(b.terms))) + 1
+        wide = bits >= 127
     var window = Int(packing.window)
     _allocation[UInt64](_product(4, window), budget)
-    var acc = _Accumulator(window)
+    var acc = _Accumulator(window, wide)
     var ring = a.ring.copy()
     var template = a.terms[0].coefficient.copy()
     var p = UInt64(0)
@@ -398,7 +425,16 @@ def _packed_product[C: CoefficientRing](a: SparsePoly[C], b: SparsePoly[C], mut 
     var position = 0
     while position < pair_count:
         var prefix = pairs[position] >> UInt64(shift)
-        while position < pair_count and (pairs[position] >> UInt64(shift)) == prefix:
+        var end = position
+        var work = 0
+        while end < pair_count and (pairs[end] >> UInt64(shift)) == prefix:
+            var index = Int(pairs[end] & mask)
+            work += (left.group_start[index // groups_b + 1] - left.group_start[index // groups_b]) * (right.group_start[index % groups_b + 1] - right.group_start[index % groups_b])
+            end += 1
+        _charge_size(work, budget)
+        # A prefix with work comparable to the window scans it instead of tracking slots.
+        var dense = 4 * work >= window
+        while position < end:
             var index = Int(pairs[position] & mask)
             position += 1
             var i = index // groups_b
@@ -407,27 +443,91 @@ def _packed_product[C: CoefficientRing](a: SparsePoly[C], b: SparsePoly[C], mut 
             var a1 = left.group_start[i + 1]
             var b0 = right.group_start[j]
             var b1 = right.group_start[j + 1]
-            _charge_size(_product(a1 - a0, b1 - b0), budget)
-            for x in range(a0, a1):
-                var ka = left.lows.unsafe_get(x)
-                var va = left.values.unsafe_get(x)
-                for y in range(b0, b1):
-                    var slot = ka + right.lows.unsafe_get(y)
-                    comptime if C == ZZ:
-                        acc.add_signed(slot, va, right.values.unsafe_get(y))
-                    else:
-                        acc.add_modular(slot, UInt64(va), UInt64(right.values.unsafe_get(y)), p)
-        _emit(acc, packing, prefix, template, result, budget)
+            var diagonal = square and i == j
+            var doubled = square and i != j
+            if dense:
+                if wide:
+                    _accumulate[C, True, False](acc, left, right, a0, a1, b0, b1, p, diagonal, doubled)
+                else:
+                    _accumulate[C, False, False](acc, left, right, a0, a1, b0, b1, p, diagonal, doubled)
+            elif wide:
+                _accumulate[C, True, True](acc, left, right, a0, a1, b0, b1, p, diagonal, doubled)
+            else:
+                _accumulate[C, False, True](acc, left, right, a0, a1, b0, b1, p, diagonal, doubled)
+        if dense:
+            _emit_window(acc, packing, prefix, template, result, budget)
+        else:
+            _emit(acc, packing, prefix, template, result, budget)
     return result^
 
 
+def _bits[C: CoefficientRing](p: SparsePoly[C]) -> Int:
+    var bits = 0
+    for term in p.terms:
+        bits = max(bits, rebind[ZZ](term.coefficient).value.magnitude_bit_length())
+    return bits
+
+
+def _bit_length(n: Int) -> Int:
+    var bits = 0
+    while (1 << bits) <= n:
+        bits += 1
+    return bits
+
+
+@always_inline
+def _twice[C: CoefficientRing](v: Int64, p: UInt64) -> Int64:
+    comptime if C == ZZ:
+        return 2 * v
+    else:
+        var t = 2 * UInt64(v)
+        return Int64(t - p if t >= p else t)
+
+
+def _accumulate[C: CoefficientRing, wide: Bool, track: Bool](mut acc: _Accumulator, left: _Packed, right: _Packed, a0: Int, a1: Int, b0: Int, b1: Int, p: UInt64, diagonal: Bool, doubled: Bool):
+    """Add the products of terms a0 ..< a1 and b0 ..< b1; for a diagonal group of a square, each unordered pair once."""
+    for x in range(a0, a1):
+        var ka = left.lows.unsafe_get(x)
+        var va = left.values.unsafe_get(x)
+        var start = b0
+        if diagonal:
+            comptime if C == ZZ:
+                acc.add_signed[wide, track](ka + ka, va, va)
+            else:
+                acc.add_modular[track](ka + ka, UInt64(va), UInt64(va), p)
+            start = x + 1
+            va = _twice[C](va, p)
+        elif doubled:
+            va = _twice[C](va, p)
+        for y in range(start, b1):
+            var slot = ka + right.lows.unsafe_get(y)
+            comptime if C == ZZ:
+                acc.add_signed[wide, track](slot, va, right.values.unsafe_get(y))
+            else:
+                acc.add_modular[track](slot, UInt64(va), UInt64(right.values.unsafe_get(y)), p)
+
+
 def _emit[C: CoefficientRing](mut acc: _Accumulator, packing: _Packing, prefix: UInt64, template: C, mut result: SparsePoly[C], mut budget: Budget) raises PolyError:
-    """Append the window's nonzero slots in increasing order and clear the window."""
+    """Append the window's touched nonzero slots in increasing order and clear them."""
     var touched = acc.sorted_touched()
     _charge_size(len(touched), budget)
     _allocation[Term[C]](len(touched), budget)
     for slot in touched:
         if not _slot_zero(acc, slot, template):
+            var key = prefix * packing.window + UInt64(slot)
+            result.terms.append(Term[C](packing.monomial(key, budget), _coefficient(acc, slot, template)))
+        acc.clear(slot)
+
+
+def _emit_window[C: CoefficientRing](mut acc: _Accumulator, packing: _Packing, prefix: UInt64, template: C, mut result: SparsePoly[C], mut budget: Budget) raises PolyError:
+    """Append every nonzero slot of the window in increasing order and clear them."""
+    var window = Int(packing.window)
+    _charge_size(window, budget)
+    for slot in range(window):
+        if acc.empty(slot):
+            continue
+        if not _slot_zero(acc, slot, template):
+            _allocation[Term[C]](1, budget)
             var key = prefix * packing.window + UInt64(slot)
             result.terms.append(Term[C](packing.monomial(key, budget), _coefficient(acc, slot, template)))
         acc.clear(slot)
@@ -474,7 +574,7 @@ def _packed_divide[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], mut b
             return None
     for term in f.terms:
         comptime if C == ZZ:
-            if rebind[ZZ](term.coefficient).value.magnitude_bit_length() > 127:
+            if rebind[ZZ](term.coefficient).value.magnitude_bit_length() > 189:
                 return None
     var n = len(f.order.variables)
     var top_f = _maxima(f, n)
@@ -527,9 +627,21 @@ def _packed_divide[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], mut b
             dividend_prefix.append(prefix)
             dividend_start.append(i)
     dividend_start.append(len(f.terms))
+    # Every dividend prefix visits every divisor group. When that exceeds the
+    # dividend's terms, chunks collide too little to pay; a heap division wins.
+    if _product(len(dividend_prefix), len(divisor.group_prefix)) > 8 * len(f.terms):
+        return None
     var window = Int(packing.window)
     _allocation[UInt64](_product(4, window), budget)
-    var acc = _Accumulator(window)
+    # Each remainder slot sums one dividend coefficient and at most one quotient
+    # product (of at most 63 bits) per divisor term.
+    var wide = True
+    comptime if C == ZZ:
+        var dividend_bits = 0
+        for term in f.terms:
+            dividend_bits = max(dividend_bits, rebind[ZZ](term.coefficient).value.magnitude_bit_length())
+        wide = max(dividend_bits, 63 + _bits(g) + _bit_length(len(g.terms))) + 1 >= 127
+    var acc = _Accumulator(window, wide)
     # Quotient chunks in the order computed (decreasing prefix), as packed terms.
     var q_prefix = List[UInt64]()
     var q_keys = List[List[UInt64]]()
@@ -556,9 +668,12 @@ def _packed_divide[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], mut b
                 ref term = f.terms[i]
                 var slot = Int(packing.key(term.monomial) % packing.window)
                 comptime if C == ZZ:
-                    acc.add_integer(slot, rebind[ZZ](term.coefficient).value)
+                    if wide:
+                        acc.add_integer[True](slot, rebind[ZZ](term.coefficient).value)
+                    else:
+                        acc.add_integer[False](slot, rebind[ZZ](term.coefficient).value)
                 else:
-                    acc.add_modular(slot, rebind[ModInt](term.coefficient).value, 1, p)
+                    acc.add_modular[True](slot, rebind[ModInt](term.coefficient).value, 1, p)
         # Minus the known products: quotient chunks at t - e for divisor prefixes e below h.
         for e_index in range(top):
             var e = divisor.group_prefix[e_index]
@@ -580,9 +695,12 @@ def _packed_divide[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], mut b
                 for y in range(g0, g1):
                     var slot = kq + divisor.lows.unsafe_get(y)
                     comptime if C == ZZ:
-                        acc.add_signed(slot, -vq, divisor.values.unsafe_get(y))
+                        if wide:
+                            acc.add_signed[True, True](slot, -vq, divisor.values.unsafe_get(y))
+                        else:
+                            acc.add_signed[False, True](slot, -vq, divisor.values.unsafe_get(y))
                     else:
-                        acc.add_modular(slot, UInt64(vq), p - UInt64(divisor.values.unsafe_get(y)), p)
+                        acc.add_modular[True](slot, UInt64(vq), p - UInt64(divisor.values.unsafe_get(y)), p)
         # The remainder chunk must be the next quotient chunk times the lead term.
         var touched = acc.sorted_touched()
         _charge_size(len(touched), budget)

@@ -10,9 +10,12 @@ from .dense import DensePoly, _slice, _trim
 from .sparse import SparsePoly, Term
 from .monomial import Monomial, MonomialOrder
 from .certificates import DivisionResult, ListDivision
-from ._packed_division import _packed_divide
+from ._packed_division import _packed_divide as _heap_divide
 from ._sparse_ops import _subtract_multiple, _from_descending
 from ._reduction_stream import _ReductionStream
+from ._packed_products import _packed_divide
+from ._ntt import _ntt_divide_exact
+from .coefficients import ZZ, ModInt
 
 
 def _dense_divide[C: CoefficientRing](f: DensePoly[C], g: DensePoly[C], pseudo: Bool, mut budget: Budget, quotient: Bool = True) raises PolyError -> DivisionResult[C]:
@@ -145,8 +148,13 @@ def divide_exact[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], mut bud
     f._same(g, budget)
     if g.is_zero():
         raise PolyError(PolyErrorKind.DOMAIN, "division by zero polynomial")
+    comptime if C == ZZ or C == ModInt:
+        if not f.is_zero() and len(g.terms) > 1:
+            var fast = _fast_divide_exact(f, g, budget)
+            if fast:
+                return fast.take()
     var applicable = False
-    var packed = _packed_divide(f, g, applicable, budget)
+    var packed = _heap_divide(f, g, applicable, budget)
     if applicable:
         return packed^
     var others: List[SparsePoly[C]] = [g._copy(budget)]
@@ -168,6 +176,40 @@ def divide_exact[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], mut bud
         _allocation[Term[C]](1, budget)
         terms.append(term^)
     return _from_descending(terms^, divisor, budget).reorder(f.order, budget)
+
+
+def _univariate[C: CoefficientRing](p: SparsePoly[C]) -> Optional[Int64]:
+    """The single variable of a nonconstant univariate polynomial."""
+    var variable = Optional[Int64](None)
+    for term in p.terms:
+        if len(term.monomial.pairs) > 1:
+            return None
+        if len(term.monomial.pairs):
+            var v = term.monomial.pairs[0][0]
+            if variable and variable.value() != v:
+                return None
+            variable = v
+    return variable
+
+
+def _fast_divide_exact[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], mut budget: Budget) raises PolyError -> Optional[Optional[SparsePoly[C]]]:
+    """Exact ZZ or GF(p) division by dense transforms (one variable) or packed chunks (LEX), or None when neither applies."""
+    var x = _univariate(f)
+    var y = _univariate(g)
+    if x and y and x.value() == y.value():
+        var a = DensePoly[C].from_sparse(f, budget)
+        var b = DensePoly[C].from_sparse(g, budget)
+        if len(b.coefficients) >= 32 and len(a.coefficients) >= len(b.coefficients):
+            var q = _ntt_divide_exact(_view(a.coefficients), _view(b.coefficients), budget)
+            if q:
+                var quotient = q.take()
+                if not quotient:
+                    return Optional(Optional[SparsePoly[C]](None))
+                var dense = DensePoly[C]._from_canonical(a.variable, a.ring, quotient.take())
+                return Optional(Optional(dense.to_sparse(f.order, budget)))
+    if f.order.kind == MonomialOrder.LEX and len(f.terms) >= 256:
+        return _packed_divide(f, g, budget)
+    return None
 
 
 def divide_by_list[C: CoefficientField](f: SparsePoly[C], divisors: List[SparsePoly[C]], mut budget: Budget) raises PolyError -> ListDivision[C]:

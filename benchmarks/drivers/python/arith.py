@@ -69,9 +69,11 @@ class Flint:
         return f'python-flint {self.flint.__version__}, FLINT {self.flint.__FLINT_VERSION__}'
 
     def divide(self, a, b):
-        # Quotient only (fmpz_poly_div, fmpz_mpoly_div): far faster than divmod for
-        # multivariate operands. The driver checks the quotient after timing.
-        return a // b
+        # Exact division (fmpz_mpoly_divides and the univariate equivalents), which
+        # refuses a non-multiple as Poly Mojo's divide_exact does. Floor division
+        # (fmpz_mpoly_div) is faster because it never checks the remainder: it skips
+        # every product below the last quotient term.
+        return a / b
 
     def terms(self, value):
         if self.header['kind'] == 'dense':
