@@ -14,6 +14,7 @@ from .numeric_bounds import NumericBox, numeric_bounds, _box_real, _box_zero, _b
 from .numeric_evaluate import EnclosureEvaluation, _evaluate_program, _check_program, _enclosure_context, _exact_dense_boxes, _numeric_dense_boxes
 from ._numeric_program import _NumericProgram, _dense_program
 from .numeric_options import NumericOptions, NumericOutcome, _accurate, _next_precision
+from ._real_refine import _RootOracle, _Enclosure, _root_oracle, _enclosure, _tighten, _oracle_split
 from ._numeric_roots import _root_degree, _root_bound, _derivative_boxes, _rational_polynomial, _strict_inside, _require_success, _exact_box_evaluate
 
 
@@ -218,10 +219,15 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
     # Sturm variations at each pending cell's endpoints, minus one until
     # evaluated; a split shares its new point between both halves.
     var variations = List[Tuple[Int, Int]](length=len(pending), fill=(-1, -1))
+    # Single-root cells split by the side of their root: an enclosure of the
+    # root, inherited by the child that keeps it, decides it (_real_refine).
+    var enclosures = List[Optional[_Enclosure]](length=len(pending), fill=None)
+    var oracle = Optional[_RootOracle]()
     while len(pending):
         budget.charge(1)
         var cell = pending.pop()
         var known = variations.pop()
+        var enclosed = enclosures.pop()
         var enough = cell.count == 0 or (cell.count > 0 and _accurate(cell.interval, options, budget) and (not options.require_isolation or cell.count == 1))
         if enough or splits == options.max_subdivisions:
             complete = complete and cell.count >= 0
@@ -231,6 +237,28 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
             sink.write(cell^, budget)
             continue
         splits += 1
+        if exact and cell.count == 1:
+            ref chain = sequence.value()
+            if not oracle:
+                oracle = _root_oracle(exact.value(), chain.polynomials[len(chain.polynomials) - 1], budget)
+            var enclosure = enclosed.take() if enclosed else _enclosure(oracle.value(), cell.interval.real_low, cell.interval.real_high, budget)
+            _tighten(oracle.value(), enclosure, cell.interval.real_high.sub(cell.interval.real_low, budget), 32, budget)
+            var cut = _oracle_split(oracle.value(), enclosure, cell.interval.real_low, cell.interval.real_high, degree, budget)
+            var below = cut[1] < 0
+            var lower = NumericBox.real_interval(cell.interval.real_low, cut[0], budget)
+            var upper = NumericBox.real_interval(cut[0], cell.interval.real_high, budget)
+            _allocation[RealRootCell](2, budget)
+            pending.append(RealRootCell(upper^, 0 if below else 1, 0, List[EnclosureEvaluation[BallDomain]]()))
+            pending.append(RealRootCell(lower^, 1 if below else 0, 0, List[EnclosureEvaluation[BallDomain]]()))
+            variations.append((-1, -1))
+            variations.append((-1, -1))
+            if below:
+                enclosures.append(None)
+                enclosures.append(enclosure^)
+            else:
+                enclosures.append(enclosure^)
+                enclosures.append(None)
+            continue
         var split = _real_split(coefficients, cell.interval, exact, degree, budget)
         var left = NumericBox.real_interval(cell.interval.real_low, split, budget)
         var right = NumericBox.real_interval(split, cell.interval.real_high, budget)
@@ -244,6 +272,8 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
             pending.append(RealRootCell(left^, low - middle, 0, List[EnclosureEvaluation[BallDomain]]()))
             variations.append((middle, high))
             variations.append((low, middle))
+            enclosures.append(None)
+            enclosures.append(None)
             continue
         var right_cell = _real_cell(coefficients, derivative, exact, sequence, right, options, budget)
         var left_cell = _real_cell(coefficients, derivative, exact, sequence, left, options, budget)
@@ -259,6 +289,8 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
         pending.append(left_cell^)
         variations.append((-1, -1))
         variations.append((-1, -1))
+        enclosures.append(None)
+        enclosures.append(None)
     var outcome = NumericOutcome.SUCCESS if complete and accurate and (isolated or not options.require_isolation) else NumericOutcome.SUBDIVISION_LIMIT
     _require_success(outcome, complete_only)
     return RootStreamReceipt(outcome, complete, accurate, isolated, items)
