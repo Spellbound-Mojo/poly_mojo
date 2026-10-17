@@ -8,10 +8,11 @@ candidates that are Gröbner bases. A candidate G is one exactly when every
 leading monomial of the reduced basis of <G> is divisible by one of G's, which
 the library's own Gröbner computation decides independently.
 """
+from std.bit import count_leading_zeros
 from std.math import max
 from apn_mojo import Integer, Rational, div_rem_euclid, div_rem_trunc, inverse_mod
 from polynomials import Budget, QQ, ZZ, NoContext, SparsePoly, Term, Monomial, MonomialOrder, groebner
-from polynomials._integer_f4 import _IFMA, _PAD, _Basis, _Euclid, _Row, _accumulate, _append_digits, _bits, _divide_exact, _divide_exact_limbs, _euclid, _ifma, _limbs_of, _pair_routes, _pairs_reduce_to_zero, _Routes, _shift_out
+from polynomials._integer_f4 import _IFMA, _PAD, _Basis, _Euclid, _Row, _accumulate, _append_digits, _bits, _divide_exact, _divide_exact_limbs, _euclid, _ifma, _limbs_of, _pair_routes, _pairs_reduce_to_zero, _rescale, _Routes, _shift_out, _shifted_limbs
 from polynomials._packed_groebner import _Engine, _Term, _divides, _pack
 from polynomials._rational_groebner import _integral
 from polynomials._f4 import _LANES
@@ -258,6 +259,28 @@ def check_fractions(mut c: Checker, mut work: Budget) raises:
         c.check(same, "limb reconstruction at step " + String(step))
 
 
+def check_rescale(mut c: Checker) raises:
+    """Values below Q times b modulo Q, in limbs, against Integers."""
+    var rng = SplitMix64(53)
+    for step in range(400):
+        var limbs = 1 + rng.below(12)
+        var modulus = random_magnitude(rng, limbs)
+        if modulus.magnitude_bit_length() <= 64 * (limbs - 1):
+            modulus = modulus + (Integer(1) << Integer(64 * limbs - 1))
+        var x = div_rem_euclid(random_magnitude(rng, limbs), modulus)[1].copy()
+        var b = (random_magnitude(rng, 1 + rng.below(limbs)) >> Integer(rng.below(64))) + Integer(1)
+        var q_limbs = _limbs_of(modulus)
+        var shift = Int(count_leading_zeros(q_limbs[limbs - 1]))
+        var divisor = _shifted_limbs(q_limbs, shift)
+        var factor = _shifted_limbs(_limbs_of(b), shift)
+        var x_limbs = _limbs_of(x)
+        while len(x_limbs) < limbs:
+            x_limbs.append(0)
+        var scratch = List[UInt64](length=2 * limbs + 4, fill=0)
+        _rescale(x_limbs.unsafe_ptr(), limbs, factor, divisor, shift, scratch)
+        c.check(limbs_value(x_limbs) == div_rem_euclid(x * b, modulus)[1], "rescaled value at step " + String(step))
+
+
 def check_crt_spread(mut c: Checker, mut work: Budget) raises:
     """CRT values formed `_LANES` at a time against one at a time."""
     var rng = SplitMix64(47)
@@ -459,6 +482,7 @@ def main() raises:
     check_exact_division_limbs(c)
     check_fractions(c, work)
     check_crt_spread(c, work)
+    check_rescale(c)
     check_row(c, work)
     check_bases(c, work)
     c.finish()
