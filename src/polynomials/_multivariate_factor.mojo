@@ -407,6 +407,71 @@ def _squarefree_image(f: SparsePoly[QQ], main: Int64, mut budget: Budget) raises
     return False
 
 
+def _univariate_image(f: SparsePoly[ZZ], variable: Int64, degree: Int, p: UInt64, trial: Int, field: _nmod._Field, mut budget: Budget) raises PolyError -> List[UInt64]:
+    # f mod p with every variable but `variable` at seeded points, in
+    # Montgomery residues of length degree + 1 (trailing zeros kept).
+    _allocation[UInt64](_sum(degree, 1), budget)
+    var image = List[UInt64](length=degree + 1, fill=0)
+    for term in f.terms:
+        budget.charge(1)
+        var value = _residue(term.coefficient.value, p, budget)
+        var k = 0
+        for pair in term.monomial.pairs:
+            budget.charge(1)
+            if pair[0] == variable:
+                k = Int(pair[1])
+            else:
+                var point = (UInt64(pair[0]) * 0x9E3779B97F4A7C15 + UInt64(trial + 1) * 0xBF58476D1CE4E5B9) % p
+                value = _mod_mul(value, _mod_pow(point, UInt64(pair[1]), p, budget), p)
+        image[k] = (image[k] + value) % p
+    for i in range(len(image)):
+        image[i] = _nmod._to(image[i], field)
+    return image^
+
+
+def _trivial_content(f: SparsePoly[QQ], main: Int64, mut budget: Budget) raises PolyError -> Bool:
+    # The content c in the main variable is constant when, for every other
+    # variable v, some prime image of the coefficients in v has gcd 1 while
+    # one coefficient keeps its degree in v: lc_v(c) divides that
+    # coefficient's leading coefficient, so c's image would keep its degree.
+    var coefficients = _split(_integer_image(f, budget), main, budget)
+    var nonzero = List[Int]()
+    for i in range(len(coefficients)):
+        budget.charge(1)
+        if not coefficients[i].is_zero():
+            nonzero.append(i)
+    if len(nonzero) < 2:
+        return False
+    for v in f.variables(budget):
+        budget.charge(1)
+        if v == main:
+            continue
+        var proved = False
+        for trial in range(2):
+            budget.charge(1)
+            var p = prime(trial, budget)
+            var field = _nmod._field(p)
+            var kept = False
+            var common = List[UInt64]()
+            for index in nonzero:
+                budget.charge(1)
+                ref g = coefficients[index]
+                var degree = g.degree_in(v, budget)
+                var image = _univariate_image(g, v, max(degree, 0), p, trial, field, budget)
+                if image[len(image) - 1] != 0:
+                    kept = True
+                _nmod._trim(image)
+                common = _nmod._gcd(common, image, field, budget)
+                if len(common) == 1 and kept:
+                    break
+            if len(common) == 1 and kept:
+                proved = True
+                break
+        if not proved:
+            return False
+    return True
+
+
 def _atoms(f: SparsePoly[QQ], mut budget: Budget) raises PolyError -> List[SparsePoly[QQ]]:
     var variables = f.variables(budget)
     if len(variables) == 0:
@@ -421,9 +486,14 @@ def _atoms(f: SparsePoly[QQ], mut budget: Budget) raises PolyError -> List[Spars
             result.append(entry[0].to_sparse(f.order, budget))
         return result^
     # This recursion strictly removes the main variable (PG5).
-    var content = _content(f, main, budget)
-    var result = _atoms(content, budget)
-    var primitive = _exact_poly(f, content, budget)
+    var result = List[SparsePoly[QQ]]()
+    var primitive: SparsePoly[QQ]
+    if _trivial_content(f, main, budget):
+        primitive = f._copy(budget)
+    else:
+        var content = _content(f, main, budget)
+        result = _atoms(content, budget)
+        primitive = _exact_poly(f, content, budget)
     var squarefree: SparsePoly[QQ]
     if _squarefree_image(primitive, main, budget):
         squarefree = primitive._copy(budget)
