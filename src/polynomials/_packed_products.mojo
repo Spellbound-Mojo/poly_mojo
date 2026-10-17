@@ -28,9 +28,12 @@ from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size,
 from .monomial import Monomial, MonomialOrder
 from .sparse import SparsePoly, Term
 from std.collections import Dict
+from std.math import log2
 
 comptime _WINDOW = 1 << 18
 """The largest dense accumulation window, in slots."""
+comptime _POWER_GATE = 1
+"""The power recurrence runs when its heap steps stay below this many times the products of the last square."""
 comptime _KEY_LIMIT = UInt64(1) << 62
 """Keys stay below this, so prefix and window arithmetic never wraps."""
 
@@ -812,3 +815,267 @@ struct _MaxHeap(Movable):
             self.items[largest] = self.items[i]
             self.items[i] = held
             i = largest
+
+
+# ----------------------------------------------------------------- powers
+
+def _exponent(m: Monomial, v: Int) -> Int:
+    for pair in m.pairs:
+        if Int(pair[0]) == v:
+            return Int(pair[1])
+    return 0
+
+
+def _grading[C: CoefficientRing](f: SparsePoly[C], n: Int) -> Int:
+    """A variable whose exponent is strictly largest at f's leading term, or -1."""
+    ref lead = f.terms[len(f.terms) - 1].monomial
+    for v in range(n):
+        var top = _exponent(lead, v)
+        var unique = top > 0
+        for i in range(len(f.terms) - 1):
+            if _exponent(f.terms[i].monomial, v) >= top:
+                unique = False
+                break
+        if unique:
+            return v
+    return -1
+
+
+def _term_estimate(t: Int, j: Int, top: List[UInt64]) -> Float64:
+    """Terms of f^j for t terms, at most C(t + j - 1, j) and the exponent box (j top_i + 1)."""
+    var choose = Float64(1)
+    for i in range(1, t):
+        choose = choose * Float64(j + i) / Float64(i)
+    var box = Float64(1)
+    for e in top:
+        box *= Float64(j) * Float64(e) + 1
+    return min(choose, box)
+
+
+def _packed_power[C: CoefficientRing](f: SparsePoly[C], k: Int, mut budget: Budget) raises PolyError -> Optional[SparsePoly[C]]:
+    """f^k by the power recurrence, or None when repeated squaring is expected to be faster or the kernel does not apply.
+
+    The recurrence takes about (terms of f - 1) * (terms of f^k) heap steps and
+    the last square of repeated squaring about (terms of f^(k/2))^2 / 2 products;
+    both counts are estimated from the exponents alone.
+
+    With D the derivation multiplying a monomial by its exponent of a variable v,
+    g = f^k satisfies f D(g) = k D(f) g. If f's leading term f_0 has the
+    strictly largest exponent of v, the coefficient of f_0 g_j in that identity
+    gives g_j from the larger terms of g:
+        g_j (d_j - k e_0) f_0 = - sum over i > 0, f_i g_l = f_0 g_j of f_i g_l (d_l - k e_i),
+    where e_i and d_l are exponents of v. A heap merges the products f_i g as
+    g grows, from the top down (Monagan and Pearce), so the work is about
+    (terms of f - 1) * (terms of g) instead of the products of the last square.
+    """
+    comptime if not (C == ZZ):
+        return None
+    var t = len(f.terms)
+    if t < 2 or k < 3 or not _usable(f, f):
+        return None
+    var n = len(f.order.variables)
+    var top = _maxima(f, n)
+    if Float64(t - 1) * _term_estimate(t, k, top) >= Float64(_POWER_GATE) * _term_estimate(t, k // 2, top) ** 2 / 2:
+        return None
+    return _power_recurrence(f, k, budget)
+
+
+def _power_recurrence[C: CoefficientRing](f: SparsePoly[C], k: Int, mut budget: Budget) raises PolyError -> Optional[SparsePoly[C]]:
+    """f^k by the power recurrence for any k >= 2, or None when the kernel does not apply."""
+    comptime if not (C == ZZ):
+        return None
+    var t = len(f.terms)
+    if t < 2 or k < 2 or not _usable(f, f):
+        return None
+    var n = len(f.order.variables)
+    var v = _grading(f, n)
+    if v < 0:
+        return None
+    var top = _maxima(f, n)
+    # Products f_i g_l have exponents up to (k + 1) top_i: keys carry no digit.
+    var scaled = List[UInt64](capacity=n)
+    var zeros = List[UInt64](length=n, fill=0)
+    for i in range(n):
+        scaled.append(UInt64(k + 1) * top[i])
+    var radix = _radices(scaled, zeros)
+    if not radix:
+        return None
+    var packing = _Packing(radix.take())
+    # |g| <= |f|_1^k; each recurrence sum adds t - 1 products of at most
+    # max|f_i| * (k + 1) top_v * |g| and must stay below 2^127.
+    var norm = Float64(0)
+    var largest = Float64(1)
+    for term in f.terms:
+        var c = abs(Float64(_signed(term.coefficient)))
+        norm += c
+        largest = max(largest, c)
+    var bits = Float64(k) * log2(norm) + log2(Float64(t) * largest * Float64(k + 1) * (Float64(top[v]) + 1)) + 2
+    if bits > 124:
+        return None
+    var key_bits = _bit_length(Int(packing.weight[0] * packing.radix[0]))
+    var stream_bits = _bit_length(t - 1)
+    if key_bits + stream_bits > 63:
+        return None
+    # f's terms from the leading one down.
+    var fk = List[UInt64](capacity=t)
+    var fc = List[Int128](capacity=t)
+    var fd = List[Int](capacity=t)
+    var fe = List[Int](capacity=t * n)
+    for x in range(t):
+        ref term = f.terms[t - 1 - x]
+        budget.charge(1)
+        fk.append(packing.key(term.monomial))
+        fc.append(Int128(_signed(term.coefficient)))
+        fd.append(_exponent(term.monomial, v))
+        for i in range(n):
+            fe.append(_exponent(term.monomial, i))
+    _allocation[UInt64](_product(n + 3, t + 1), budget)
+    var expected = Int(min(_term_estimate(t, k, top), Float64(1 << 20)))
+    var gk = List[UInt64](capacity=expected)
+    var gc = List[Int128](capacity=expected)
+    var gd = List[Int](capacity=expected)
+    var ge = List[Int](capacity=expected * n)
+    var lead = Int128(1)
+    for _ in range(k):
+        lead *= fc[0]
+    gk.append(UInt64(k) * fk[0])
+    gc.append(lead)
+    gd.append(k * fd[0])
+    for i in range(n):
+        ge.append(k * fe[i])
+    var shift = UInt64(stream_bits)
+    var mask = (UInt64(1) << shift) - 1
+    var entries = List[UInt64](capacity=t - 1)
+    for x in range(1, t):
+        entries.append(((fk[x] + gk[0]) << shift) | UInt64(x))
+    var heap = _StreamHeap(entries^)
+    var position = List[Int](length=t, fill=0)
+    var stalled = List[Int](capacity=t)
+    var exponents = List[Int](length=n, fill=0)
+    while heap.size:
+        var key = heap.top() >> shift
+        var sum = Int128(0)
+        var x = 0
+        var l = 0
+        while heap.size and (heap.top() >> shift) == key:
+            budget.charge(1)
+            x = Int(heap.top() & mask)
+            l = position[x]
+            sum += fc[x] * Int128(gd[l] - k * fd[x]) * gc[l]
+            position[x] = l + 1
+            if l + 1 < len(gk):
+                heap.replace_top(((fk[x] + gk[l + 1]) << shift) | UInt64(x))
+            else:
+                heap.pop()
+                stalled.append(x)
+        if sum == 0:
+            continue
+        # The new term is (f_x g_l) / f_0, which the identity makes exact.
+        for i in range(n):
+            exponents[i] = fe[x * n + i] + ge[l * n + i] - fe[i]
+            if exponents[i] < 0:
+                return None
+        var d = fd[x] + gd[l] - fd[0]
+        var denominator = fc[0] * Int128(d - k * fd[0])
+        var quotient: Int128
+        # Most sums fit a word, where division is a machine instruction.
+        if Int128(Int64.MIN) < sum and sum <= Int128(Int64.MAX) and Int128(Int64.MIN) < denominator and denominator <= Int128(Int64.MAX):
+            var word = Int64(sum)
+            var by = Int64(denominator)
+            if word % by != 0:
+                return None
+            quotient = Int128(word // by)
+        else:
+            quotient = sum // denominator
+            if quotient * denominator != sum:
+                return None
+        _allocation[UInt64](n + 3, budget)
+        gk.append(key - fk[0])
+        gc.append(-quotient)
+        gd.append(d)
+        for i in range(n):
+            ge.append(exponents[i])
+        for s in stalled:
+            heap.push(((fk[s] + gk[position[s]]) << shift) | UInt64(s))
+        stalled.clear()
+    var result = SparsePoly[C].zero(f.order, f.ring, budget)
+    var count = len(gk)
+    _allocation[Term[C]](count, budget)
+    result.terms.reserve(count)
+    var j = count - 1
+    while j >= 0:
+        budget.charge(1)
+        var used = 0
+        for i in range(n):
+            used += Int(ge[j * n + i] != 0)
+        _allocation[Tuple[Int64, UInt32]](used, budget)
+        var monomial = Monomial()
+        monomial.pairs.reserve(used)
+        for i in range(n):
+            if ge[j * n + i]:
+                monomial.pairs.append((Int64(i), UInt32(ge[j * n + i])))
+        var c = gc[j]
+        var words = UInt128(c)
+        result.terms.append(Term[C](monomial^, rebind_var[C](ZZ(_integer((UInt64(words), UInt64(words >> 64), UInt64(0) - UInt64(Int(c < 0))))))))
+        j -= 1
+    return result^
+
+
+struct _StreamHeap(Movable):
+    """A max-heap of at most its initial number of words, without reallocation."""
+    var items: List[UInt64]
+    var size: Int
+
+    def __init__(out self, var items: List[UInt64]):
+        self.size = len(items)
+        self.items = items^
+        var i = self.size // 2 - 1
+        while i >= 0:
+            self._down(i, self.items.unsafe_get(i))
+            i -= 1
+
+    @always_inline
+    def top(self) -> UInt64:
+        return self.items.unsafe_get(0)
+
+    @always_inline
+    def replace_top(mut self, value: UInt64):
+        self._down(0, value)
+
+    @always_inline
+    def pop(mut self):
+        self.size -= 1
+        if self.size:
+            self._down(0, self.items.unsafe_get(self.size))
+
+    def push(mut self, value: UInt64):
+        var i = self.size
+        self.size += 1
+        while i > 0:
+            var parent = (i - 1) // 2
+            var above = self.items.unsafe_get(parent)
+            if above >= value:
+                break
+            self.items.unsafe_get(i) = above
+            i = parent
+        self.items.unsafe_get(i) = value
+
+    @always_inline
+    def _down(mut self, start: Int, value: UInt64):
+        """Place value at start and sift it down."""
+        var i = start
+        while True:
+            var child = 2 * i + 1
+            if child >= self.size:
+                break
+            var c = self.items.unsafe_get(child)
+            if child + 1 < self.size:
+                var other = self.items.unsafe_get(child + 1)
+                if other > c:
+                    child += 1
+                    c = other
+            if c <= value:
+                break
+            self.items.unsafe_get(i) = c
+            i = child
+        self.items.unsafe_get(i) = value

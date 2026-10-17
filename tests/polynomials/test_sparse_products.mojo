@@ -6,6 +6,7 @@ from support.check import Checker
 from support.gen import polynomial
 from support.rng import SplitMix64
 from polynomials.sparse import _heap_product
+from polynomials._packed_products import _packed_power, _power_recurrence
 
 
 def products[C: CoefficientRing](base: C, mut c: Checker) raises:
@@ -130,8 +131,58 @@ def packed[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
     c.check(a.mul(a, work) == _heap_product(a, a, work), "wide exponents fall back to the heap")
 
 
+def few_terms(spec: List[Tuple[Int, Int, Int, Int]], order: MonomialOrder, mut work: Budget) raises -> SparsePoly[ZZ]:
+    """A polynomial from (coefficient, e0, e1, e2) terms."""
+    var terms = List[Term[ZZ]]()
+    for t in spec:
+        var pairs = List[Tuple[Int64, UInt32]]()
+        if t[1]:
+            pairs.append((Int64(0), UInt32(t[1])))
+        if t[2]:
+            pairs.append((Int64(1), UInt32(t[2])))
+        if t[3]:
+            pairs.append((Int64(2), UInt32(t[3])))
+        terms.append(Term[ZZ](Monomial(pairs^, work), ZZ(Integer(t[0]))))
+    return SparsePoly[ZZ].from_terms(terms^, order, NoContext(), work)
+
+
+def powers(mut c: Checker) raises:
+    """Powers of few-term bases by the power recurrence agree with repeated heap products."""
+    var work = Budget()
+    var order = MonomialOrder(MonomialOrder.LEX, [Int64(0), Int64(1), Int64(2)], work)
+    # Fateman-like; a negative non-unit leading coefficient; a leading term that
+    # ties in the first variable, so the recurrence grades by the second; and
+    # sums of about 105 bits against the 124-bit bound.
+    var bases = [
+        few_terms([(1, 0, 0, 0), (1, 1, 0, 0), (1, 0, 1, 0), (1, 0, 0, 1)], order, work),
+        few_terms([(-1, 0, 0, 0), (3, 0, 1, 0), (-2, 1, 0, 0), (5, 0, 2, 3)], order, work),
+        few_terms([(1, 1, 0, 0), (-4, 1, 1, 0), (7, 0, 0, 2), (1, 0, 0, 0)], order, work),
+        few_terms([(3, 0, 0, 0), (-5, 0, 0, 1), (7, 0, 1, 0), (9, 1, 0, 0)], order, work),
+    ]
+    var exponents = [[3, 7, 16, 30], [3, 5, 12, 2], [4, 9, 13, 2], [3, 8, 20, 6]]
+    var taken = 0
+    for b in range(len(bases)):
+        ref f = bases[b]
+        for k in exponents[b]:
+            var expected = f.copy()
+            for _ in range(k - 1):
+                expected = _heap_product(expected, f, work)
+            var direct = _power_recurrence(f, k, work)
+            c.check(Bool(direct), String("power recurrence applies, base ", b, ", exponent ", k))
+            if direct:
+                direct.value().check_invariants(work)
+                c.check(direct.value() == expected, String("power recurrence, base ", b, ", exponent ", k))
+            if _packed_power(f, k, work):
+                taken += 1
+            var got = f.pow(UInt64(k), work)
+            c.check(got == expected, String("power, base ", b, ", exponent ", k))
+    c.check(taken >= 4, "large powers of few-term bases take the recurrence")
+    c.check(not _packed_power(bases[0], 2, work), "squares use the product kernel")
+
+
 def main() raises:
     var c = Checker("sparse products")
+    powers(c)
     var work = Budget()
     products(ZZ(Integer(1) << 127), c)
     products(QQ(Rational(1, 1009)), c)
