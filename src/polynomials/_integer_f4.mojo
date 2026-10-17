@@ -33,6 +33,7 @@ from std.collections import Dict
 from std.math import max, min
 from std.sys import CompilationTarget, llvm_intrinsic
 from std.sys._assembly import inlined_assembly
+from std.ffi import external_call
 from std.time import perf_counter_ns
 from apn_mojo import Integer, div_rem_trunc, gcd as integer_gcd
 from .coefficients import ZZ, _prime
@@ -1469,6 +1470,14 @@ def _limbs_of(value: Integer) -> List[UInt64]:
     return limbs^
 
 
+def _trim():
+    """Return freed heap memory to the system: the elements just released are
+    many small blocks, which the allocator would otherwise keep through the
+    certificate's peak (with glibc only)."""
+    comptime if CompilationTarget.is_linux():
+        _ = external_call["malloc_trim", Int32](0)
+
+
 def _pairs_reduce_to_zero[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget) raises PolyError -> Bool:
     """Whether the S-polynomial of every pending pair reduces to zero against the active elements, exactly.
 
@@ -1508,6 +1517,7 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
     # The pairs need the elements only as limbs and store entries: the
     # engine's copies are dropped for the peak, and restored on return.
     coefficients.release(engine, store)
+    _trim()
     var images = _PairPrimes(coefficients, primes, budget)
     var counts = List[Int](length=10, fill=0)
     # With `_CERT_STATS`: nanoseconds in passes and in proofs, attempts, fractions, slots combined.
