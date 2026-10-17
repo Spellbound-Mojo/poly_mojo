@@ -100,7 +100,7 @@ def evaluate[C: CoefficientRing](p: SparsePoly[C], point: List[Tuple[Int64, C]],
     return values.pop()
 
 comptime _FRACTION_FREE = 32
-"""Integer polynomial length from which evaluation at a fraction runs by halves."""
+"""Integer polynomial length from which evaluation at an integer or a fraction runs by halves."""
 
 
 def _cancel(numerator: Integer, b: Integer) raises -> Integer:
@@ -108,12 +108,45 @@ def _cancel(numerator: Integer, b: Integer) raises -> Integer:
     return _gcd_integer(numerator % b, b)
 
 
+def _halves(var level: List[ZZ], a: ZZ, b: ZZ, mut budget: Budget) raises PolyError -> ZZ:
+    """sum e_i a^i b^(L-1-i) for the L integers e_i in `level`, by balanced halves.
+
+    A block of width w holds the same sum over its coefficients; a full left
+    block and its right neighbour of width v combine as
+    S_left * b^v + a^w * S_right. Powers of b are skipped when b is one.
+    """
+    var whole = b.value == Integer(1)
+    var power_a = a.copy()
+    var power_b = b.copy()
+    # Every block has width `width` except the last, whose width is `last`.
+    var width = 1
+    var last = 1
+    while len(level) > 1:
+        var next = List[ZZ](capacity=(len(level) + 1) // 2)
+        for j in range(0, len(level) - 1, 2):
+            budget.charge(1)
+            var right = power_a.mul(level[j + 1], budget)
+            if whole:
+                next.append(level[j].add(right, budget))
+            else:
+                var shift = power_b.copy() if j + 2 < len(level) or last == width else _pow(b, UInt64(last), budget)
+                next.append(level[j].mul(shift, budget).add(right, budget))
+        if len(level) % 2:
+            next.append(level[len(level) - 1].copy())
+        else:
+            last += width
+        level = next^
+        width *= 2
+        if len(level) > 1:
+            power_a = power_a.mul(power_a, budget)
+            if not whole:
+                power_b = power_b.mul(power_b, budget)
+    return level[0].copy()
+
+
 def _evaluate_fraction(p: DensePoly[QQ], x: QQ, mut budget: Budget) raises PolyError -> Optional[QQ]:
     # For integer coefficients e_i and x = a/b in lowest terms, the value is
-    # S / b^(L-1) with S = sum e_i a^i b^(L-1-i). A block of width w holds the
-    # same sum over its coefficients; a full left block and its right
-    # neighbour of width v combine as S_left * b^v + a^w * S_right, so the
-    # products stay balanced. A prime that
+    # S / b^(L-1) with S = sum e_i a^i b^(L-1-i), summed by _halves. A prime that
     # divides b and S divides the leading coefficient only (a and b are coprime),
     # so cancelling word gcds with b reduces the fraction without a long gcd.
     var count = len(p.coefficients)
@@ -125,28 +158,8 @@ def _evaluate_fraction(p: DensePoly[QQ], x: QQ, mut budget: Budget) raises PolyE
         if c.denominator() != Integer(1):
             return None
         level.append(ZZ(c.numerator()))
-    var power_a = ZZ(x.value.numerator())
-    var power_b = ZZ(x.value.denominator())
-    var b = power_b.copy()
-    # Every block has width `width` except the last, whose width is `last`.
-    var width = 1
-    var last = 1
-    while len(level) > 1:
-        var next = List[ZZ](capacity=(len(level) + 1) // 2)
-        for j in range(0, len(level) - 1, 2):
-            budget.charge(1)
-            var shift = power_b.copy() if j + 2 < len(level) or last == width else _pow(b, UInt64(last), budget)
-            next.append(level[j].mul(shift, budget).add(power_a.mul(level[j + 1], budget), budget))
-        if len(level) % 2:
-            next.append(level[len(level) - 1].copy())
-        else:
-            last += width
-        level = next^
-        width *= 2
-        if len(level) > 1:
-            power_a = power_a.mul(power_a, budget)
-            power_b = power_b.mul(power_b, budget)
-    var numerator = level[0].copy()
+    var b = ZZ(x.value.denominator())
+    var numerator = _halves(level^, ZZ(x.value.numerator()), b, budget)
     var denominator = _pow(b, UInt64(count - 1), budget)
     if numerator.value.sign() == 0:
         return QQ(Rational(0))
@@ -188,6 +201,14 @@ def evaluate_dense[C: CoefficientRing](p: DensePoly[C], x: C, mut budget: Budget
     """
     if x.context() != p.ring:
         raise PolyError(PolyErrorKind.DOMAIN, "evaluation point in another ring")
+    comptime if C == ZZ:
+        if len(p.coefficients) >= _FRACTION_FREE:
+            _allocation[ZZ](len(p.coefficients), budget)
+            var level = List[ZZ](capacity=len(p.coefficients))
+            for i in range(len(p.coefficients)):
+                budget.charge(1)
+                level.append(rebind[ZZ](p.coefficients[i]).copy())
+            return rebind_var[C](_halves(level^, rebind[ZZ](x), ZZ(Integer(1)), budget))
     comptime if C == QQ:
         if len(p.coefficients) >= _FRACTION_FREE and rebind[QQ](x).value.denominator() != Integer(1):
             var value = _evaluate_fraction(rebind[DensePoly[QQ]](p), rebind[QQ](x), budget)

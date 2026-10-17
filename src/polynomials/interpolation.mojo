@@ -1,5 +1,6 @@
 """Reusable product trees and independently checked exact interpolation."""
-from .coefficients import CoefficientField, ModInt, Modulus
+from .coefficients import CoefficientField, ModInt, Modulus, QQ
+from ._interpolate_rational import _interpolate_integer_nodes
 from .dense import DensePoly
 from .coefficient_buffer import _view
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _sum, _product
@@ -286,6 +287,10 @@ def interpolate[C: CoefficientField](variable: Int64, ring: C.Context, points: L
     Raises:
         PolyError: DOMAIN for invalid data, LIMIT or CAPACITY on work limits.
     """
+    comptime if C == QQ:
+        var fast = _interpolate_integer_nodes(variable, rebind[List[QQ]](points), rebind[List[QQ]](values), budget)
+        if fast:
+            return rebind_var[DensePoly[C]](fast.take())
     var plan = MultipointPlan[C].prepare(variable, ring, points, budget)
     return plan.interpolate(values, budget)
 

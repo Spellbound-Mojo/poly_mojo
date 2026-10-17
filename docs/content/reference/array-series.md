@@ -38,6 +38,10 @@ Save and restore these values with [poly.io](array-io.md).
 
 <!-- api: src/poly/series.mojo revert -->
 
+<!-- api: src/poly/series.mojo sqrt -->
+
+<!-- api: src/poly/series.mojo power -->
+
 <!-- api: src/poly/series.mojo truncate -->
 
 <!-- api: src/poly/series.mojo coefficients -->

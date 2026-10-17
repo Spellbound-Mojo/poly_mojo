@@ -13,6 +13,8 @@ from polynomials._dense_ops import _gcd as _field_gcd
 from polynomials.division import divide_exact
 from support.gen import polynomial
 from polynomials.certificates import check_common_divisor, check_bezout, check_coprimality
+from polynomials._univariate_modular import _divides_both, _Words
+from polynomials._ntt import _PRIMES
 
 def generated[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
     var work = Budget()
@@ -110,7 +112,8 @@ def word_field_cases(mut c: Checker) raises:
     """The word-size prime-field gcd matches the generic Euclidean loop."""
     var work = Budget()
     var rng = SplitMix64(4271)
-    var moduli: List[UInt64] = [3, 5, 101, 65521, prime(0, work), prime(7, work)]
+    # 1073741789 is the largest prime below 2^30, the bound of the 32-bit Montgomery kernel.
+    var moduli: List[UInt64] = [3, 5, 101, 65521, 1073741789, 1073741827, prime(0, work), prime(7, work)]
     for modulus in moduli:
         var ctx = Modulus(modulus, work)
         for degree in [0, 1, 2, 7, 23, 60]:
@@ -120,6 +123,29 @@ def word_field_cases(mut c: Checker) raises:
             var expected = _extended(f, h, work, carry=False)[0].copy()
             c.check(_field_gcd(f, h, work) == expected, "word field gcd matches the generic loop")
             c.check(_field_gcd(f, DensePoly[ModInt](0, ctx.copy()), work) == _extended(f, DensePoly[ModInt](0, ctx.copy()), work, carry=False)[0], "word field gcd with zero")
+
+
+def transform_division_cases(mut c: Checker) raises:
+    """Integer divisibility from transform-prime quotients and a size bound matches the construction."""
+    var work = Budget()
+    var rng = SplitMix64(9157)
+    var primes = materialize[_PRIMES]()
+    # A constant divisible by the first twenty transform primes leaves every
+    # one of their quotients exact, so only the size bound can reject it.
+    var product = Integer(1)
+    for i in range(20):
+        product = product * Integer(Int(primes[i]))
+    var constants: List[Integer] = [Integer(1), Integer(-1), product^]
+    for bits in [0, 70, 300]:
+        for degree in [4, 6, 17, 31, 45, 90]:
+            var g = dense_random[ZZ](NoContext(), degree, rng, work, bits)
+            var f = g.mul(dense_random[ZZ](NoContext(), degree // 2 + 3, rng, work, bits), work)
+            var h = g.mul(dense_random[ZZ](NoContext(), degree + 5, rng, work, bits), work)
+            c.check(_divides_both(f, _Words(f, work), h, _Words(h, work), g, work), "transform division accepts two multiples")
+            for constant in constants:
+                var shifted = f.add(DensePoly[ZZ].from_coefficients(0, NoContext(), [ZZ(constant.copy())], work), work)
+                c.check(not _divides_both(shifted, _Words(shifted, work), h, _Words(h, work), g, work), "transform division rejects a multiple plus a constant")
+                c.check(not _divides_both(f, _Words(f, work), shifted, _Words(shifted, work), g, work), "transform division rejects a second dividend off by a constant")
 
 
 def multi_prime_cases(mut c: Checker) raises:
@@ -325,6 +351,7 @@ def main() raises:
     generated[ModInt](Modulus(101, work), c)
     modular_cases(c)
     word_field_cases(c)
+    transform_division_cases(c)
     multi_prime_cases(c)
     division_cases[ZZ](NoContext(), c)
     division_cases[QQ](NoContext(), c)

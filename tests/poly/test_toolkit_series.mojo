@@ -37,6 +37,26 @@ def main() raises:
     var reversed = series.revert(f)
     assert_equal(series.coefficients(reversed).to_list(), [Rational(0), 1, -1, 2, -5, 14])
     assert_equal(series.coefficients(series.compose(f, reversed)).to_list(), series.coefficients(x).to_list())
+    var root = series.sqrt(series.asarray([1, 1], order=5))
+    assert_equal(series.coefficients(root).to_list(), [Rational(1), Rational(1, 2), Rational(-1, 8), Rational(1, 16), Rational(-5, 128)])
+    assert_equal(series.coefficients(series.multiply(root, root)).to_list(), [Rational(1), 1, 0, 0, 0])
+    assert_equal(series.coefficients(series.power([1, 1], 3, order=5)).to_list(), [Rational(1), 3, 3, 1, 0])
+    assert_equal(series.coefficients(series.power([2, 1], 0, order=3)).to_list(), [Rational(1), 0, 0])
+    var modular_root = series.sqrt(series.asarray(dense.asarray([1, 1], modulus=7), order=4))
+    assert_equal(series.multiply(modular_root, modular_root)[1].value, UInt64(1))
+    assert_equal(series.multiply(modular_root, modular_root)[3].value, UInt64(0))
+    for scenario in range(3):
+        var rejected = False
+        try:
+            if scenario == 0:
+                _ = series.sqrt([2, 1], order=3)
+            elif scenario == 1:
+                _ = series.sqrt(series.asarray(dense.asarray([1, 1], modulus=2), order=3))
+            else:
+                _ = series.power([1, 1], -1, order=3)
+        except:
+            rejected = True
+        assert_true(rejected)
     assert_equal(series.truncate(a, 3).order(), 3)
     assert_equal(series.add(a, series.truncate(a, 3), order=2).order(), 2)
     var total = Rational(0)

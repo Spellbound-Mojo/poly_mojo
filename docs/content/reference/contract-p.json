@@ -1,6 +1,6 @@
 {
   "contract": "P",
-  "revision": 3,
+  "revision": 4,
   "exports": [
     {
       "module": "algebraic_arithmetic",
@@ -2836,9 +2836,15 @@
       "members": []
     },
     {
+      "module": "gcd",
+      "name": "gcd_value",
+      "signature": "def gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budget: Budget) raises PolyError -> SparsePoly[C]",
+      "members": []
+    },
+    {
       "module": "groebner",
       "name": "groebner",
-      "signature": "def groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: MonomialOrder, mut budget: Budget, track_cofactors: Bool = False) raises PolyError -> GroebnerBasis[C]",
+      "signature": "def groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: MonomialOrder, mut budget: Budget, track_cofactors: Bool = False, certify: Bool = True) raises PolyError -> GroebnerBasis[C]",
       "members": []
     },
     {
@@ -3013,6 +3019,12 @@
       "module": "resultant",
       "name": "resultant",
       "signature": "def resultant[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], variable: Int64, mut budget: Budget) raises PolyError -> ResultantResult[C]",
+      "members": []
+    },
+    {
+      "module": "resultant",
+      "name": "resultant_value",
+      "signature": "def resultant_value[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], variable: Int64, mut budget: Budget) raises PolyError -> SparsePoly[C]",
       "members": []
     },
     {
