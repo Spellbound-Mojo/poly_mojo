@@ -13,6 +13,8 @@ from polynomials._dense_ops import _gcd as _field_gcd
 from polynomials.division import divide_exact
 from support.gen import polynomial
 from polynomials.certificates import check_common_divisor, check_bezout, check_coprimality
+from polynomials._univariate_modular import _dense_divides
+from polynomials._ntt import _PRIMES
 
 def generated[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
     var work = Budget()
@@ -121,6 +123,27 @@ def word_field_cases(mut c: Checker) raises:
             var expected = _extended(f, h, work, carry=False)[0].copy()
             c.check(_field_gcd(f, h, work) == expected, "word field gcd matches the generic loop")
             c.check(_field_gcd(f, DensePoly[ModInt](0, ctx.copy()), work) == _extended(f, DensePoly[ModInt](0, ctx.copy()), work, carry=False)[0], "word field gcd with zero")
+
+
+def transform_division_cases(mut c: Checker) raises:
+    """Integer divisibility from transform-prime quotients and a size bound matches the construction."""
+    var work = Budget()
+    var rng = SplitMix64(9157)
+    var primes = materialize[_PRIMES]()
+    # A constant divisible by the first twenty transform primes leaves every
+    # one of their quotients exact, so only the size bound can reject it.
+    var product = Integer(1)
+    for i in range(20):
+        product = product * Integer(Int(primes[i]))
+    var constants: List[Integer] = [Integer(1), Integer(-1), product^]
+    for bits in [0, 70, 300]:
+        for degree in [31, 45, 90]:
+            var g = dense_random[ZZ](NoContext(), degree, rng, work, bits)
+            var f = g.mul(dense_random[ZZ](NoContext(), degree // 2 + 3, rng, work, bits), work)
+            c.check(_dense_divides(f, g, work), "transform division accepts a multiple")
+            for constant in constants:
+                var shifted = f.add(DensePoly[ZZ].from_coefficients(0, NoContext(), [ZZ(constant.copy())], work), work)
+                c.check(not _dense_divides(shifted, g, work), "transform division rejects a multiple plus a constant")
 
 
 def multi_prime_cases(mut c: Checker) raises:
@@ -292,6 +315,7 @@ def main() raises:
     generated[ModInt](Modulus(101, work), c)
     modular_cases(c)
     word_field_cases(c)
+    transform_division_cases(c)
     multi_prime_cases(c)
     division_cases[ZZ](NoContext(), c)
     division_cases[QQ](NoContext(), c)

@@ -13,7 +13,7 @@ from ._coefficient_ops import _gcd_coefficient, _quotient, _exact
 from .dense import DensePoly
 from .primes import prime, _residue
 from .coefficient_buffer import _view
-from ._ntt import _ntt_divide_exact
+from ._ntt import _PRIMES, _PRIME_BITS, _PRIME_COUNT, _residues_zz, _quotient_mod, _equal_mod, _reconstruct_zz, _bits_zz, _bit_length
 from ._nmod_euclid import _Field, _gcd_words, _resultant_words, _trim_words
 
 
@@ -256,6 +256,46 @@ def _divide_scalar(f: DensePoly[ZZ], c: ZZ, mut budget: Budget) raises PolyError
     return DensePoly[ZZ]._from_canonical(f.variable, NoContext(), values^)
 
 
+def _transform_divides(f: DensePoly[ZZ], g: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Optional[Bool]:
+    """Whether g divides f, deg f >= deg g, from quotients modulo transform primes, or None when they cannot decide.
+
+    The quotient q_i of f by g modulo each prime must leave no remainder. Its
+    symmetric reconstruction Q modulo the product M then satisfies
+    g Q = f mod M, and once |f| and |g| |Q|_1 both stay below M/2 the
+    congruence is an identity: g divides f. No product is formed.
+    """
+    var a = _view(f.coefficients)
+    var b = _view(g.coefficients)
+    var primes = materialize[_PRIMES]()
+    var top_f = _bits_zz(a)
+    var top_g = _bits_zz(b)
+    var count = len(a) - len(b) + 1
+    var k = (top_f + _bit_length(len(a)) + 2 + _PRIME_BITS - 1) // _PRIME_BITS
+    var quotients = List[List[UInt64]]()
+    while k <= _PRIME_COUNT:
+        var all_a = _residues_zz(a, k, len(a), budget)
+        var all_b = _residues_zz(b, k, len(b), budget)
+        for i in range(len(quotients), k):
+            if all_b[i][len(b) - 1] == 0:
+                return None  # the divisor's degree drops modulo this prime
+            var q = _quotient_mod(all_a[i], all_b[i], primes[i], budget)
+            if not _equal_mod(all_a[i], q, all_b[i], primes[i], budget):
+                return Optional(False)
+            quotients.append(q^)
+        var candidate = _reconstruct_zz[ZZ](quotients, k, count, budget)
+        var top_q = 0
+        for i in range(len(candidate)):
+            top_q = max(top_q, candidate[i].value.magnitude_bit_length())
+        # Every transform prime exceeds 2^61, so M > 2^(61 k).
+        var room = _PRIME_BITS * k - 1
+        if top_f + 1 <= room and top_g + top_q + _bit_length(count) <= room:
+            return Optional(True)
+        if k == _PRIME_COUNT:
+            break
+        k = min(2 * k, _PRIME_COUNT)
+    return None
+
+
 def _dense_divides(f: DensePoly[ZZ], g: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Bool:
     """Whether g divides f over the integers, by transform division when it decides, else dense exact long division."""
     if f.is_zero():
@@ -264,9 +304,9 @@ def _dense_divides(f: DensePoly[ZZ], g: DensePoly[ZZ], mut budget: Budget) raise
     if f.degree() < n:
         return False
     if n >= 31:
-        var fast = _ntt_divide_exact(_view(f.coefficients), _view(g.coefficients), budget)
+        var fast = _transform_divides(f, g, budget)
         if fast:
-            return Bool(fast.value())
+            return fast.value()
     ref lc = g.coefficients[n]
     var r = f.coefficients.to_list(budget)
     for k in range(f.degree(), n - 1, -1):
