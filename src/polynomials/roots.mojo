@@ -1,13 +1,13 @@
 """Exact Sturm counts and dyadic real-root isolation with rational reconstruction."""
-from apn_mojo import Rational, div_rem_euclid
+from apn_mojo import Rational, Integer, gcd, lcm, div_rem_euclid, div_rem_floor
 from .coefficients import QQ, ZZ, NoContext, _work
 from .dense import DensePoly
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size
 from .evaluate import evaluate_dense, _derivative_dense
 from .division import divmod
-from .certificates import SturmSequence, RootCountCertificate
+from .certificates import SturmSequence, RootCountCertificate, _integer_form
 from ._dense_ops import _copy as _copy_poly
-from ._root_ops import _copy, _compare, _midpoint, _variations, _chain_variations
+from ._root_ops import _copy, _compare, _midpoint, _variations, _chain_variations, _one_sided
 from ._images import _integer_dense
 from ._integer_ops import _primitive
 
@@ -43,6 +43,38 @@ def sturm_sequence(f: DensePoly[QQ], mut budget: Budget) raises PolyError -> Stu
     Raises:
         PolyError: DOMAIN for zero or malformed input, LIMIT or CAPACITY on work limits.
     """
+    var chain = _IntegerChain()
+    return _sturm_chain(f, chain, budget, integer=False)
+
+
+struct _IntegerChain(Copyable, Movable):
+    """Integer data of a Sturm chain built by _sturm_chain, for exact signs.
+
+    Entry i is c_i P_i with P_i primitive; for i >= 1,
+    powers[i - 1] P_{i-1} = quotients[i - 1] P_i + contents[i - 1] P_{i+1}.
+    """
+    var first: List[Integer]
+    var second: List[Integer]
+    var degrees: List[Int]
+    var signs: List[Int]
+    var powers: List[Integer]
+    var quotients: List[List[Integer]]
+    var contents: List[Integer]
+
+    def __init__(out self):
+        self.first = List[Integer]()
+        self.second = List[Integer]()
+        self.degrees = List[Int]()
+        self.signs = List[Int]()
+        self.powers = List[Integer]()
+        self.quotients = List[List[Integer]]()
+        self.contents = List[Integer]()
+
+
+def _sturm_chain(f: DensePoly[QQ], mut chain: _IntegerChain, mut budget: Budget, *, integer: Bool = True) raises PolyError -> SturmSequence:
+    # Without integer data (integer=False) the chain stays empty, small
+    # rational entries divide as rationals, and integer forms are computed
+    # only when the entries grow.
     f.check_invariants(budget)
     if f.is_zero():
         raise PolyError(PolyErrorKind.DOMAIN, "zero polynomial has no finite root count")
@@ -52,19 +84,353 @@ def sturm_sequence(f: DensePoly[QQ], mut budget: Budget) raises PolyError -> Stu
     if f.degree() > 0:
         _allocation[DensePoly[QQ]](1, budget)
         polynomials.append(_derivative_dense(f, budget))
+        # Each entry is c P with P a primitive integer polynomial and c a
+        # rational scalar. rem(c0 P0, c1 P1) = c0 prem(P0, P1) / lc(P1)^(d+1),
+        # so the primitive PRS over the integers gives every remainder and
+        # quotient of the rational Euclidean sequence exactly, without
+        # normalizing rationals inside the division.
+        var before = (List[Integer](), Rational(1))
+        var current = (List[Integer](), Rational(1))
+        if integer:
+            before = _primitive_form(polynomials[0], budget)
+            current = _primitive_form(polynomials[1], budget)
+            chain.first = before[0].copy()
+            chain.second = current[0].copy()
+            chain.degrees = [len(before[0]) - 1, len(current[0]) - 1]
+            chain.signs = [before[1].sign(), current[1].sign()]
+        var forms = integer
         while True:
             budget.charge(1)
             var n = len(polynomials)
-            var division = divmod(polynomials[n - 2], polynomials[n - 1], budget)
-            var quotient = DensePoly[QQ](f.variable, NoContext())
-            swap(quotient, division.quotient)
+            if not integer and _small(polynomials[n - 1], budget):
+                var step = divmod(polynomials[n - 2], polynomials[n - 1], budget)
+                var quotient = DensePoly[QQ](f.variable, NoContext())
+                swap(quotient, step.quotient)
+                _allocation[DensePoly[QQ]](1, budget)
+                quotients.append(quotient^)
+                if step.remainder.is_zero():
+                    break
+                _allocation[DensePoly[QQ]](1, budget)
+                polynomials.append(step.remainder.neg(budget))
+                forms = False
+                continue
+            if not forms:
+                before = _primitive_form(polynomials[n - 2], budget)
+                current = _primitive_form(polynomials[n - 1], budget)
+                forms = True
+            if integer and _rational_cheaper(polynomials[n - 2], polynomials[n - 1], before[0], current[0], budget):
+                # Small rational entries divide faster than the integer
+                # forms, whose pseudo-remainder carries a power of lc.
+                var step = divmod(polynomials[n - 2], polynomials[n - 1], budget)
+                var quotient = DensePoly[QQ](f.variable, NoContext())
+                swap(quotient, step.quotient)
+                var finished = step.remainder.is_zero()
+                if not finished:
+                    var following = step.remainder.neg(budget)
+                    var form = _primitive_form(following, budget)
+                    _integer_step(chain, quotient, before[1], current[1], form[1], budget)
+                    chain.degrees.append(len(form[0]) - 1)
+                    chain.signs.append(form[1].sign())
+                    _allocation[DensePoly[QQ]](1, budget)
+                    polynomials.append(following^)
+                    before = current^
+                    current = form^
+                _allocation[DensePoly[QQ]](1, budget)
+                quotients.append(quotient^)
+                if finished:
+                    break
+                continue
+            var division = _pseudo_divide(before[0], current[0], budget)
+            var quotient_scale: Rational
+            var next_scale: Rational
+            var content: Integer
+            var primitive: List[Integer]
+            budget.charge(UInt64(len(division[1])))
+            _allocation[Integer](len(division[1]), budget)
+            try:
+                var parts = _content_parts(division[1])
+                content = parts[0].copy()
+                primitive = parts[1].copy()
+                var power = Rational(division[2])
+                quotient_scale = before[1] / (current[1] * power)
+                next_scale = -(before[1] * Rational(content)) / power
+            except e:
+                raise PolyError(PolyErrorKind.CAPACITY, String(e))
             _allocation[DensePoly[QQ]](1, budget)
-            quotients.append(quotient^)
-            if division.remainder.is_zero():
+            quotients.append(_scaled_poly(division[0], quotient_scale, f.variable, budget))
+            if len(division[1]) == 0:
                 break
+            if integer:
+                chain.powers.append(division[2].copy())
+                chain.quotients.append(division[0].copy())
+                chain.contents.append(content.copy())
+                chain.degrees.append(len(primitive) - 1)
+                chain.signs.append(next_scale.sign())
             _allocation[DensePoly[QQ]](1, budget)
-            polynomials.append(division.remainder.neg(budget))
+            polynomials.append(_scaled_poly(primitive, next_scale, f.variable, budget))
+            before = current^
+            current = (primitive^, next_scale^)
     return SturmSequence(polynomials^, quotients^)
+
+
+def _small(p: DensePoly[QQ], mut budget: Budget) raises PolyError -> Bool:
+    # A leading coefficient of at most 512 bytes: rational entries grow
+    # with their leading coefficients, and generic inputs outgrow this fast.
+    budget.charge(1)
+    return p.coefficients[p.degree()].size() <= 512
+
+
+def _rational_cheaper(a: DensePoly[QQ], b: DensePoly[QQ], pa: List[Integer], pb: List[Integer], mut budget: Budget) raises PolyError -> Bool:
+    # Compare the rational entries' sizes with the integer forms' sizes plus
+    # the leading-coefficient powers a pseudo-remainder multiplies in.
+    budget.charge(UInt64(len(a.coefficients) + len(b.coefficients)))
+    var rational = 0
+    for c in a.coefficients:
+        rational += c.size()
+    for c in b.coefficients:
+        rational += c.size()
+    var integer = 0
+    for v in pa:
+        integer += v.magnitude_bit_length() // 8 + 1
+    for v in pb:
+        integer += v.magnitude_bit_length() // 8 + 1
+    var lead = pb[len(pb) - 1].magnitude_bit_length() // 8 + 1
+    integer += 2 * lead * len(pa)
+    return rational < integer
+
+
+def _integer_step(mut chain: _IntegerChain, quotient: DensePoly[QQ], c0: Rational, c1: Rational, c2: Rational, mut budget: Budget) raises PolyError:
+    # From c0 P0 = q c1 P1 - c2 P2: with D clearing the denominators of
+    # q c1 / c0 and c2 / c0, D P0 = (D q c1 / c0) P1 + (-D c2 / c0) P2.
+    budget.charge(UInt64(len(quotient.coefficients) + 1))
+    try:
+        var ratio = c1 / c0
+        var tail = c2 / c0
+        var scaled = List[Rational](capacity=len(quotient.coefficients))
+        var common = tail.denominator()
+        for c in quotient.coefficients:
+            var value = c.value * ratio
+            var d = value.denominator()
+            if common % d:
+                common = lcm(common, d)
+            scaled.append(value^)
+        var integer = List[Integer](capacity=len(scaled))
+        for value in scaled:
+            integer.append(value.numerator() * (common // value.denominator()))
+        chain.powers.append(common.copy())
+        chain.quotients.append(integer^)
+        chain.contents.append(-(tail.numerator() * (common // tail.denominator())))
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+def _homogeneous(c: List[Integer], degree: Int, u: Integer, v: Integer, shift: Int) raises -> Integer:
+    # v^degree c(u / v); v = 2^shift when shift >= 0.
+    var t = c[len(c) - 1].copy()
+    var power = Integer(1)
+    for j in range(len(c) - 2, -1, -1):
+        if shift >= 0:
+            t = t * u + (c[j] << (shift * (degree - j)))
+        else:
+            power = power * v
+            t = t * u + c[j] * power
+    if len(c) - 1 < degree:
+        if shift >= 0:
+            t = t << (shift * (degree - len(c) + 1))
+        else:
+            for _ in range(degree - len(c) + 1):
+                t = t * v
+    return t^
+
+
+def _integer_variations(chain: _IntegerChain, sequence: SturmSequence, a: QQ, mut budget: Budget, side: Int = 0) raises PolyError -> Int:
+    """Sign variations of a chain from _sturm_chain at a, as _variations would count them.
+
+    With H_i = v^(d_i) P_i(u / v), the pseudo-division identities give
+    H_{i+1} = (L H_{i-1} - v^(d_{i-1} - d_i) Q(u / v) H_i) / (g v^(d_{i-1} - d_{i+1})),
+    an exact integer division, and sign(c_i P_i(a)) = sign(c_i) sign(H_i).
+    """
+    var n = len(chain.degrees)
+    if n < 2 or n != len(sequence.polynomials):
+        return _chain_variations(sequence.polynomials, sequence.quotients, a, budget, side)
+    var previous = 0
+    var count = 0
+    var before = Integer(0)
+    var current = Integer(0)
+    var size = 0
+    var u = a.value.numerator()
+    var v = a.value.denominator()
+    var shift: Int
+    try:
+        shift = v.magnitude_bit_length() - 1 if (Integer(1) << (v.magnitude_bit_length() - 1)) == v else -1
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    for i in range(n):
+        budget.charge(1)
+        try:
+            if i == 0:
+                current = _homogeneous(chain.first, chain.degrees[0], u, v, shift)
+            elif i == 1:
+                before = current^
+                current = _homogeneous(chain.second, chain.degrees[1], u, v, shift)
+            else:
+                ref q = chain.quotients[i - 2]
+                var lowered = chain.degrees[i - 2] - chain.degrees[i]
+                var scaled = _homogeneous(q, chain.degrees[i - 2] - chain.degrees[i - 1], u, v, shift)
+                var numerator = chain.powers[i - 2] * before - scaled * current
+                if chain.contents[i - 2] != Integer(1):
+                    numerator = numerator // chain.contents[i - 2]
+                if shift >= 0:
+                    numerator = numerator >> (shift * lowered)
+                else:
+                    for _ in range(lowered):
+                        numerator = numerator // v
+                before = current^
+                current = numerator^
+            size += current.magnitude_bit_length() // 8 + 1
+        except e:
+            raise PolyError(PolyErrorKind.CAPACITY, String(e))
+        var sign = current.sign() * chain.signs[i]
+        sign = _one_sided(sequence.polynomials[i], sign, a, side, budget)
+        if sign != 0:
+            if previous != 0 and previous != sign:
+                count += 1
+            previous = sign
+    _charge_size(size, budget)
+    return count
+
+
+def _primitive_form(p: DensePoly[QQ], mut budget: Budget) raises PolyError -> Tuple[List[Integer], Rational]:
+    # p = c P with P primitive over the integers and c = content / common denominator.
+    var form = _integer_form(p, budget)
+    var content: Integer
+    try:
+        content = _content_of(form[0])
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    var primitive = _divide_all(form[0], content, budget)
+    try:
+        return (primitive^, Rational(content, form[1]))
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+def _content_of(values: List[Integer]) raises -> Integer:
+    var result = Integer(0)
+    for v in values:
+        if v:
+            result = gcd(result, v)
+            if result == Integer(1):
+                break
+    return result^
+
+
+def _content_parts(values: List[Integer]) raises -> Tuple[Integer, List[Integer]]:
+    # The positive content and the primitive part in one pass: a gcd of two
+    # coefficients is usually the content already, and the exact quotients
+    # that confirm it are the primitive part; a nonzero remainder lowers it.
+    var result = List[Integer](capacity=len(values))
+    if len(values) == 0:
+        return (Integer(0), result^)
+    var content = gcd(values[len(values) - 1], values[0])
+    if not content:
+        content = abs(values[len(values) - 1])
+    while True:
+        result.clear()
+        var lowered = False
+        for v in values:
+            if content == Integer(1):
+                result.append(v.copy())
+                continue
+            var parts = div_rem_floor(v, content)
+            if parts[1]:
+                content = gcd(content, v)
+                lowered = True
+                break
+            result.append(parts[0].copy())
+        if not lowered:
+            return (content^, result^)
+
+
+def _divide_all(values: List[Integer], divisor: Integer, mut budget: Budget) raises PolyError -> List[Integer]:
+    budget.charge(UInt64(len(values)))
+    _allocation[Integer](len(values), budget)
+    var result = List[Integer](capacity=len(values))
+    try:
+        for v in values:
+            result.append(v.copy() if divisor == Integer(1) else v // divisor)
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    return result^
+
+
+def _pseudo_divide(a: List[Integer], b: List[Integer], mut budget: Budget) raises PolyError -> Tuple[List[Integer], List[Integer], Integer]:
+    # lc(b)^(d+1) a == q b + r with deg r < deg b, d = deg a - deg b; r is trimmed.
+    var db = len(b) - 1
+    var delta = len(a) - 1 - db
+    budget.charge(UInt64((delta + 1) * len(a)))
+    _allocation[Integer](len(a) + delta + 1, budget)
+    var r = a.copy()
+    var q = List[Integer](length=delta + 1, fill=Integer(0))
+    var size = 0
+    try:
+        ref lc = b[db]
+        var bits = lc.magnitude_bit_length()
+        var shift = bits - 1 if lc.sign() > 0 and (Integer(1) << (bits - 1)) == lc else -1
+        for k in range(delta, -1, -1):
+            var t = r[db + k].copy()
+            for j in range(k + 1, delta + 1):
+                q[j] = q[j] * lc if shift < 0 else q[j] << shift
+            q[k] = t.copy()
+            for j in range(db + k):
+                if r[j]:
+                    r[j] = r[j] * lc if shift < 0 else r[j] << shift
+            r[db + k] = Integer(0)
+            if t:
+                for j in range(db):
+                    r[k + j] = r[k + j] - t * b[j]
+            size += r[0].magnitude_bit_length() // 8 + 1
+        var length = db
+        while length > 0 and not r[length - 1]:
+            length -= 1
+        r.resize(length, Integer(0))
+        var power = Integer(1)
+        for _ in range(delta + 1):
+            power = power * lc
+        _charge_size(size, budget)
+        return (q^, r^, power^)
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+def _scaled_poly(values: List[Integer], scale: Rational, variable: Int64, mut budget: Budget) raises PolyError -> DensePoly[QQ]:
+    # The canonical coefficients scale * values[j]: with scale = n / d reduced
+    # and g = gcd(values[j], d), n (values[j] / g) and d / g are coprime.
+    budget.charge(UInt64(len(values)))
+    _allocation[QQ](len(values), budget)
+    var result = List[QQ](capacity=len(values))
+    var size = 0
+    try:
+        var n = scale.numerator()
+        var d = scale.denominator()
+        var unit = d == Integer(1)
+        for v in values:
+            if not v:
+                result.append(QQ.zero(NoContext()))
+                continue
+            if unit:
+                result.append(QQ(Rational(n * v)))
+                continue
+            var g = gcd(v, d)
+            if g == Integer(1):
+                result.append(QQ(Rational(_numerator=n * v, _denominator=d.copy())))
+            else:
+                result.append(QQ(Rational(_numerator=n * (v // g), _denominator=d // g)))
+            size += result[len(result) - 1].size()
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    _charge_size(size, budget)
+    return DensePoly[QQ]._from_canonical(variable, NoContext(), result^)
 
 
 def sign_changes(sequence: SturmSequence, a: QQ, mut budget: Budget) raises PolyError -> Int:
@@ -101,8 +467,9 @@ def count_roots(f: DensePoly[QQ], a: QQ, b: QQ, mut budget: Budget) raises PolyE
     """
     if _compare(a, b, budget) >= 0 or evaluate_dense(f, a, budget).is_zero() or evaluate_dense(f, b, budget).is_zero():
         raise PolyError(PolyErrorKind.DOMAIN, "root count requires ordered nonroot endpoints")
-    var sequence = sturm_sequence(f, budget)
-    var count = _chain_variations(sequence.polynomials, sequence.quotients, a, budget) - _chain_variations(sequence.polynomials, sequence.quotients, b, budget)
+    var integer = _IntegerChain()
+    var sequence = _sturm_chain(f, integer, budget)
+    var count = _integer_variations(integer, sequence, a, budget) - _integer_variations(integer, sequence, b, budget)
     return RootCountCertificate(sequence^, _copy(a, budget), _copy(b, budget), count)
 
 
@@ -202,7 +569,8 @@ def isolate_real_roots(f: DensePoly[QQ], mut budget: Budget) raises PolyError ->
     Raises:
         PolyError: DOMAIN for zero or malformed input, LIMIT or CAPACITY on work limits.
     """
-    var sequence = sturm_sequence(f, budget)
+    var integer = _IntegerChain()
+    var sequence = _sturm_chain(f, integer, budget)
     var exact = List[QQ]()
     var intervals = List[RootInterval]()
     if f.degree() == 0:
@@ -218,8 +586,8 @@ def isolate_real_roots(f: DensePoly[QQ], mut budget: Budget) raises PolyError ->
         display_width = _midpoint(QQ.zero(NoContext()), display_width, budget)
     var high = _bound(f, budget)
     var low = high.neg(budget)
-    var va = _chain_variations(sequence.polynomials, sequence.quotients, low, budget)
-    var vb = _chain_variations(sequence.polynomials, sequence.quotients, high, budget)
+    var va = _integer_variations(integer, sequence, low, budget)
+    var vb = _integer_variations(integer, sequence, high, budget)
     _allocation[_IntervalTask](1, budget)
     var pending: List[_IntervalTask] = [_IntervalTask(low^, high^, va, vb, False, False, False, False)]
     while len(pending):
@@ -247,8 +615,8 @@ def isolate_real_roots(f: DensePoly[QQ], mut budget: Budget) raises PolyError ->
                 continue
         var middle = _midpoint(task.low, task.high, budget)
         var root = evaluate_dense(f, middle, budget).is_zero()
-        var vm_left = _chain_variations(sequence.polynomials, sequence.quotients, middle, budget, side=-1 if root else 0)
-        var vm_right = _chain_variations(sequence.polynomials, sequence.quotients, middle, budget, side=1) if root else vm_left
+        var vm_left = _integer_variations(integer, sequence, middle, budget, side=-1 if root else 0)
+        var vm_right = _integer_variations(integer, sequence, middle, budget, side=1) if root else vm_left
         if root:
             _allocation[QQ](1, budget)
             exact.append(_copy(middle, budget))

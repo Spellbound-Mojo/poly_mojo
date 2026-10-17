@@ -1,6 +1,7 @@
 """Arithmetic certificates and independent checks of their stated identities."""
 from ._coefficient_ops import _copy as _copy_coefficient
-from .errors import Budget, PolyError, _charge_size, _sum
+from apn_mojo import Integer, lcm
+from .errors import Budget, PolyError, PolyErrorKind, _charge_size, _sum
 from .coefficients import CoefficientRing
 from .dense import DensePoly
 from .sparse import SparsePoly
@@ -601,14 +602,8 @@ def _check_root_count_parts(f: DensePoly[QQ], sequence: SturmSequence, a: QQ, b:
         return n == 1 and count == 0
     if n < 2 or not _dense_equal(_derivative_dense(f, budget), sequence.polynomials[1], budget):
         return False
-    for i in range(1, n):
-        budget.charge(1)
-        sequence.quotients[i - 1].check_invariants(budget)
-        var relation = sequence.quotients[i - 1].mul(sequence.polynomials[i], budget)
-        if i + 1 < n:
-            relation = relation.sub(sequence.polynomials[i + 1], budget)
-        if not _dense_equal(sequence.polynomials[i - 1], relation, budget):
-            return False
+    if not _chain_relations(sequence, budget):
+        return False
     return count == _chain_variations(sequence.polynomials, sequence.quotients, a, budget) - _chain_variations(sequence.polynomials, sequence.quotients, b, budget)
 
 
@@ -644,3 +639,97 @@ def check_cancellation(p: SparsePoly[QQ], q: SparsePoly[QQ], certificate: Cancel
     if q.is_zero():
         return False
     return _equal(p, certificate.common.mul(certificate.cofactors[0], budget), budget) and _equal(q, certificate.common.mul(certificate.cofactors[1], budget), budget)
+
+
+def _chain_relations(sequence: SturmSequence, mut budget: Budget) raises PolyError -> Bool:
+    # p[i - 1] == q[i - 1] * p[i] - p[i + 1] for every i. With each entry
+    # written as P / L (L the lcm of its denominators, usually one shared
+    # denominator), a linear quotient (B x + A) / E turns every relation into
+    # integer coefficient identities scaled by positive constants, so no
+    # rational normalization is needed. Longer quotients use the rational path.
+    var n = len(sequence.polynomials)
+    _allocation[List[Integer]](n, budget)
+    var forms = List[Tuple[List[Integer], Integer]](capacity=n)
+    for p in sequence.polynomials:
+        forms.append(_integer_form(p, budget))
+    var none = (List[Integer](), Integer(1))
+    for i in range(1, n):
+        budget.charge(1)
+        ref q = sequence.quotients[i - 1]
+        q.check_invariants(budget)
+        if q.degree() > 1:
+            var relation = q.mul(sequence.polynomials[i], budget)
+            if i + 1 < n:
+                relation = relation.sub(sequence.polynomials[i + 1], budget)
+            if not _dense_equal(sequence.polynomials[i - 1], relation, budget):
+                return False
+            continue
+        q._same(sequence.polynomials[i])
+        if sequence.polynomials[i - 1].variable != q.variable:
+            return False
+        if i + 1 < n:
+            sequence.polynomials[i + 1]._same(q)
+        var quotient = _integer_form(q, budget)
+        if i + 1 < n:
+            if not _linear_relation(forms[i - 1], forms[i], forms[i + 1], quotient, budget):
+                return False
+        elif not _linear_relation(forms[i - 1], forms[i], none, quotient, budget):
+            return False
+    return True
+
+
+def _integer_form(p: DensePoly[QQ], mut budget: Budget) raises PolyError -> Tuple[List[Integer], Integer]:
+    _allocation[Integer](len(p.coefficients), budget)
+    var values = List[Integer](capacity=len(p.coefficients))
+    var common = Integer(1)
+    for c in p.coefficients:
+        budget.charge(1)
+        _charge_size(c.size(), budget)
+    try:
+        for c in p.coefficients:
+            # Reduced denominators of one entry usually divide one shared
+            # denominator, so after a few lcm steps only remainders are needed.
+            var d = c.value.denominator()
+            if d != common and common % d:
+                common = lcm(common, d)
+        for c in p.coefficients:
+            var d = c.value.denominator()
+            values.append(c.value.numerator() if d == common else c.value.numerator() * (common // d))
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    return (values^, common^)
+
+
+def _linear_relation(before: Tuple[List[Integer], Integer], current: Tuple[List[Integer], Integer], after: Tuple[List[Integer], Integer], quotient: Tuple[List[Integer], Integer], mut budget: Budget) raises PolyError -> Bool:
+    # P0 / L0 == (B x + A) / E * P1 / L1 - P2 / L2, multiplied by E L0 L1 L2;
+    # the last relation has no P2 (an empty form with L2 = 1).
+    ref p0 = before[0]
+    ref p1 = current[0]
+    ref p2 = after[0]
+    var length = max(max(len(p0), len(p1) + 1), len(p2))
+    var size = 0
+    try:
+        var a = quotient[0][0].copy() if len(quotient[0]) > 0 else Integer(0)
+        var b = quotient[0][1].copy() if len(quotient[0]) > 1 else Integer(0)
+        ref l2 = after[1]
+        var left_scale = current[1] * l2 * quotient[1]
+        var middle_scale = before[1] * l2
+        var right_scale = quotient[1] * before[1] * current[1]
+        for j in range(length):
+            var term = Integer(0)
+            if j < len(p1) and a:
+                term = a * p1[j]
+            if j >= 1 and j - 1 < len(p1) and b:
+                term = term + b * p1[j - 1]
+            var rhs = term * middle_scale
+            if j < len(p2):
+                rhs = rhs - p2[j] * right_scale
+            var lhs = p0[j] * left_scale if j < len(p0) else Integer(0)
+            size += (lhs.magnitude_bit_length() + rhs.magnitude_bit_length()) // 8 + 1
+            if lhs != rhs:
+                return False
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    budget.charge(UInt64(length))
+    _charge_size(size, budget)
+    return True
