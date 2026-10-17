@@ -534,8 +534,8 @@ def check_coprimality[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], ce
 
 
 from .coefficients import QQ
-from .evaluate import evaluate_dense, _derivative_dense
-from ._root_ops import _compare as _root_compare, _variations
+from .evaluate import _derivative_dense
+from ._root_ops import _compare as _root_compare, _chain_variations, _sign_at
 
 
 @fieldwise_init
@@ -587,7 +587,7 @@ def _check_root_count_parts(f: DensePoly[QQ], sequence: SturmSequence, a: QQ, b:
     var n = len(sequence.polynomials)
     if f.is_zero() or n == 0 or len(sequence.quotients) != n - 1 or count < 0:
         return False
-    if _root_compare(a, b, budget) >= 0 or evaluate_dense(f, a, budget).is_zero() or evaluate_dense(f, b, budget).is_zero():
+    if _root_compare(a, b, budget) >= 0 or _sign_at(f, a, budget) == 0 or _sign_at(f, b, budget) == 0:
         return False
     for p in sequence.polynomials:
         budget.charge(1)
@@ -609,7 +609,7 @@ def _check_root_count_parts(f: DensePoly[QQ], sequence: SturmSequence, a: QQ, b:
             relation = relation.sub(sequence.polynomials[i + 1], budget)
         if not _dense_equal(sequence.polynomials[i - 1], relation, budget):
             return False
-    return count == _variations(sequence.polynomials, a, budget) - _variations(sequence.polynomials, b, budget)
+    return count == _chain_variations(sequence.polynomials, sequence.quotients, a, budget) - _chain_variations(sequence.polynomials, sequence.quotients, b, budget)
 
 
 @fieldwise_init

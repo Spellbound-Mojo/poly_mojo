@@ -1379,12 +1379,13 @@ def _mod_lanes(v: _Lanes, lanes: _Primes) -> _Lanes:
     return r.ge(lanes.primes).select(r - lanes.primes, r)
 
 
-@always_inline
+@no_inline
 def _axpy_lanes(data: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factor: SIMD[DType.uint32, _LANES], squares: _Lanes):
     """Add factor times a row, after its leading entry, to every lane of the dense accumulator.
 
     Both factors widen from 32 bits, so each product is one 32 by 32 bit
-    multiplication.
+    multiplication. Inlined, the widening is lost before instructions are
+    selected, which then multiply all 64 bits (as for `_axpy_block`).
     """
     var f = factor.cast[DType.uint64]()
     for k in range(1, n):

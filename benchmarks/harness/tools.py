@@ -325,6 +325,8 @@ TOOLS = {t.name: t for t in [
     Singular('std'), Singular('slimgb'), Singular('modStd'),
     Msolve(),
 ]}
+from . import real_roots as _real_roots  # noqa: E402 (the family module imports helpers above)
+TOOLS |= {t.name: t for t in _real_roots.TOOLS}
 
 
 def prebuild(tools, cases, jobs):
