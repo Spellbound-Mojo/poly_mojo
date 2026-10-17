@@ -13,6 +13,8 @@ comma separated, or `-` for a full decomposition.
 | mccallum | `cad.decompose(lazard=False)` | `cad.check` |
 | stream | `cad.checker`, `cad.decompose_to`, `finish` (one region) | none |
 | solve | `cad.solve` of the conjunction | `cad.check` |
+| certificate | `cad.decompose` | `cad.check`; the answer is the whole evidence text |
+| certificate-solve | `cad.solve` | `cad.check`; the answer is the whole evidence text |
 
 The answer file lists, for a decomposition, one line per terminal cell with
 its dimension, signs and exact sample coordinates; for `solve`, the verdict
@@ -111,7 +113,14 @@ def main() raises:
     reset_peak()
     var peak: Int
 
-    if mode == "lazard" or mode == "mccallum":
+    if mode == "certificate":
+        var start = perf_counter_ns()
+        var result = cad.decompose(polys)
+        times.append(perf_counter_ns() - start)
+        peak = status_kb("VmHWM")
+        check_ok = cad.check(result)
+        answer.write(result.evidence())
+    elif mode == "lazard" or mode == "mccallum":
         var lazard = mode == "lazard"
         var start = perf_counter_ns()
         var result = cad.decompose(polys, lazard=lazard)
@@ -158,7 +167,7 @@ def main() raises:
         times.append(elapsed)
         extra.write(', "cells": ', receipt.cells, ', "stacks": ', receipt.stacks)
         answer.write(receipt.cells, "\n")
-    elif mode == "solve":
+    elif mode == "solve" or mode == "certificate-solve":
         var masks = args[5].split(",")
         var constraints = List[cad.Constraint[type_of(polys[0])._Power]]()
         for i in range(len(polys)):
@@ -197,7 +206,9 @@ def main() raises:
         check_ns = perf_counter_ns() - start
         var sat = result.satisfiable()
         extra.write(', "sat": ', "true" if sat else "false")
-        if sat:
+        if mode == "certificate-solve":
+            answer.write(result.evidence())
+        elif sat:
             answer.write("sat\n")
             point(cad.sample(result).value(), answer)
             answer.write("\n")

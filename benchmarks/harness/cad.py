@@ -676,7 +676,8 @@ def main_run(args):
     with open(results, 'a') as out:
         for c in todo:
             for tool in selected:
-                if not tool.supports(c) or (c['id'], tool.name) in done and not args.rerun:
+                previous = done.get((c['id'], tool.name))
+                if not tool.supports(c) or previous and previous['outcome'] != 'error' and not args.rerun:
                     continue
                 base = {'case': c['id'], 'kind': c['kind'], 'ladder': c['ladder'], 'nvars': len(c['variables']),
                         'npolys': len(c['polys']), 'tool': tool.name, 'library': tool.system,
