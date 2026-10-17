@@ -1,6 +1,6 @@
 """Private arithmetic schedules shared by exact and numerical coefficient vectors."""
 from .coefficient_buffer import _CoefficientView, _view
-from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
+from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product, _sum
 from .coefficients import ModInt, Modulus, QQ
 from ._series_rational import _compose_rational
 from ._nmod import _field, _to, _from
@@ -64,6 +64,10 @@ def _convolve_values[O: _ScalarOps](a: _CoefficientView[O.Scalar, _], b: _Coeffi
     if length < 0:
         raise PolyError(PolyErrorKind.DOMAIN, "negative truncation order")
     var n = min(length, _sum(len(a), len(b)) - 1) if len(a) and len(b) else 0
+    comptime if O.Scalar == ModInt and O.EXACT:
+        if n >= _NATIVE_SERIES:
+            ref ring = rebind[Modulus](context)
+            return _as_mod_ints[O.Scalar](_native_convolve(_residues_of(a), _residues_of(b), n, ring.value, budget), ring, budget)
     _allocation[O.Scalar](n, budget)
     var result = List[O.Scalar](length=n, fill=O.integer(0, context, budget))
     for i in range(min(n, len(a))):
@@ -165,6 +169,14 @@ def _divide_values[O: _ScalarOps, inverse_only: Bool = False](a: _CoefficientVie
         raise PolyError(PolyErrorKind.DOMAIN, "negative truncation order")
     if not len(b):
         raise PolyError(PolyErrorKind.DOMAIN, "zero series divisor")
+    comptime if O.Scalar == ModInt and O.EXACT:
+        # A zero constant takes the generic path, which raises.
+        if length >= _NATIVE_SERIES and rebind[ModInt](b[0]).value != 0:
+            ref ring = rebind[Modulus](context)
+            var numerator = List[UInt64]() if inverse_only else _residues_of(a)
+            if inverse_only:
+                numerator.append(1)
+            return _as_mod_ints[O.Scalar](_native_divide(numerator, _residues_of(b), length, ring.value, budget), ring, budget)
     var inverse = O.apply(O.integer(1, context, budget), b[0], 3, context, budget)
     _allocation[O.Scalar](length, budget)
     var result = List[O.Scalar](capacity=length)
@@ -245,3 +257,116 @@ def _hermite_values[O: _ScalarOps](points: _CoefficientView[O.Scalar, _], jets: 
             var updated_basis_5 = _mul_values[O](_view(basis), _view(linear), _sum(total, 1), context, budget)
             basis = updated_basis_5^
     return result^
+
+
+# ------------------------------------------- native residue recurrences
+
+comptime _NATIVE_SERIES = 32
+"""Prime-field quadratic recurrences of at least this length run on native words."""
+
+
+@always_inline
+def _wide_mod(low: UInt128, carry: UInt64, p: UInt64, wrap: UInt64) -> UInt64:
+    """(carry * 2^128 + low) mod p, given wrap = 2^128 mod p."""
+    var r = UInt64(low % UInt128(p))
+    if carry:
+        r = UInt64((UInt128(r) + UInt128(carry) * UInt128(wrap)) % UInt128(p))
+    return r
+
+
+def _wrap(p: UInt64) -> UInt64:
+    var r = UInt64((UInt128(1) << 64) % UInt128(p))
+    return UInt64((UInt128(r) * UInt128(r)) % UInt128(p))
+
+
+def _residues_of[T: Copyable & Deinitable](values: _CoefficientView[T, _]) -> List[UInt64]:
+    var out = List[UInt64](capacity=len(values))
+    for i in range(len(values)):
+        out.append(rebind[ModInt](values[i]).value)
+    return out^
+
+
+def _native_divide(a: List[UInt64], b: List[UInt64], length: Int, p: UInt64, mut budget: Budget) raises PolyError -> List[UInt64]:
+    """The first `length` coefficients of a / b modulo p, for b[0] invertible; one reduction per coefficient."""
+    var inverse = _mod_power(b[0], p - 2, p)
+    var wrap = _wrap(p)
+    var r = List[UInt64](capacity=length)
+    for k in range(length):
+        var terms = min(k + 1, len(b)) - 1
+        _charge_size(_sum(_product(2, terms), 2), budget)
+        var low = UInt128(0)
+        var carry = UInt64(0)
+        for j in range(1, terms + 1):
+            var t = low + UInt128(b.unsafe_get(j)) * UInt128(r.unsafe_get(k - j))
+            carry += UInt64(1) if t < low else UInt64(0)
+            low = t
+        var sum = _wide_mod(low, carry, p, wrap)
+        var value = a[k] if k < len(a) else UInt64(0)
+        value = value - sum if value >= sum else value + p - sum
+        r.append(UInt64((UInt128(value) * UInt128(inverse)) % UInt128(p)))
+    return r^
+
+
+def _native_exp(a: List[UInt64], length: Int, p: UInt64, mut budget: Budget) raises PolyError -> List[UInt64]:
+    """exp(a) to `length` coefficients modulo p > length, a[0] = 0: n g_n = sum k a_k g_(n-k)."""
+    var wrap = _wrap(p)
+    # Inverses of 1 ..< length in linear time: 1/i = -(p // i) / (p mod i).
+    var inverses = List[UInt64](length=max(length, 2), fill=0)
+    inverses[1] = 1
+    for i in range(2, length):
+        inverses[i] = UInt64((UInt128(p - p // UInt64(i)) * UInt128(inverses[Int(p % UInt64(i))])) % UInt128(p))
+    var scaled = List[UInt64](length=len(a), fill=0)
+    for k in range(1, len(a)):
+        scaled[k] = UInt64((UInt128(a[k]) * UInt128(UInt64(k))) % UInt128(p))
+    var g = List[UInt64](capacity=length)
+    g.append(1)
+    for n in range(1, length):
+        var terms = max(0, min(n + 1, len(a)) - 1)
+        _charge_size(_sum(_product(4, terms), 2), budget)
+        var low = UInt128(0)
+        var carry = UInt64(0)
+        for k in range(1, terms + 1):
+            var t = low + UInt128(scaled.unsafe_get(k)) * UInt128(g.unsafe_get(n - k))
+            carry += UInt64(1) if t < low else UInt64(0)
+            low = t
+        g.append(UInt64((UInt128(_wide_mod(low, carry, p, wrap)) * UInt128(inverses[n])) % UInt128(p)))
+    return g^
+
+
+def _native_convolve(a: List[UInt64], b: List[UInt64], n: Int, p: UInt64, mut budget: Budget) raises PolyError -> List[UInt64]:
+    """The first n coefficients of a * b modulo p, one reduction per coefficient."""
+    var wrap = _wrap(p)
+    var out = List[UInt64](capacity=n)
+    for s in range(n):
+        var lo = max(0, s - len(b) + 1)
+        var hi = min(s, len(a) - 1)
+        _charge_size(_product(2, max(0, hi - lo + 1)), budget)
+        var low = UInt128(0)
+        var carry = UInt64(0)
+        for i in range(lo, hi + 1):
+            var t = low + UInt128(a.unsafe_get(i)) * UInt128(b.unsafe_get(s - i))
+            carry += UInt64(1) if t < low else UInt64(0)
+            low = t
+        out.append(_wide_mod(low, carry, p, wrap))
+    return out^
+
+
+def _mod_power(a: UInt64, e: UInt64, p: UInt64) -> UInt64:
+    var base = a % p
+    var exponent = e
+    var result = UInt64(1)
+    while exponent:
+        if exponent & 1:
+            result = UInt64((UInt128(result) * UInt128(base)) % UInt128(p))
+        exponent >>= 1
+        if exponent:
+            base = UInt64((UInt128(base) * UInt128(base)) % UInt128(p))
+    return result
+
+
+def _as_mod_ints[T: Writable & Copyable & Deinitable](values: List[UInt64], ring: Modulus, mut budget: Budget) raises PolyError -> List[T]:
+    _allocation[T](len(values), budget)
+    var out = List[T](capacity=len(values))
+    for v in values:
+        out.append(rebind_var[T](ModInt(v, ring)))
+    return out^

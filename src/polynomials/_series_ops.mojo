@@ -1,7 +1,8 @@
 """Shared formal-series schedules with explicit truncation and scalar domains."""
 from .coefficient_buffer import _CoefficientView, _view
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
-from ._toolkit_ops import _ScalarOps, _values, _mul_values, _divide_values, _compose_values, _derivative_values
+from ._toolkit_ops import _ScalarOps, _values, _mul_values, _divide_values, _compose_values, _derivative_values, _NATIVE_SERIES, _native_exp, _residues_of, _as_mod_ints
+from .coefficients import ModInt, Modulus
 
 
 def _series_shape(order: Int, count: Int, mut budget: Budget) raises PolyError:
@@ -56,6 +57,11 @@ def _exp_values[O: _ScalarOps](a: _CoefficientView[O.Scalar, _], length: Int, co
     if length < 1:
         raise PolyError(PolyErrorKind.DOMAIN, "exponential needs a known constant coefficient")
     _series_constant[O](_view(a), 0, context, budget)
+    comptime if O.Scalar == ModInt and O.EXACT:
+        # Every n < length must be invertible; otherwise the generic path raises.
+        ref ring = rebind[Modulus](context)
+        if length >= _NATIVE_SERIES and UInt64(length) <= ring.value:
+            return _as_mod_ints[O.Scalar](_native_exp(_residues_of(a), length, ring.value, budget), ring, budget)
     _allocation[O.Scalar](length, budget)
     var result = List[O.Scalar](capacity=length)
     result.append(O.integer(1, context, budget))

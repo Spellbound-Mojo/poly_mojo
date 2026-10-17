@@ -2,13 +2,18 @@
 
 Residues modulo primes 2^49.99 < p < 2^50 are exact integers in a Float64, and
 every operation below is exact. The bounds hold for any residues below p and
-any length, so no input needs the integer kernel instead. With u = 2^-53:
+any length, so no input needs the integer kernel instead. The argument needs
+IEEE double arithmetic with round-to-nearest and a correctly rounded fma
+(hardware FMA, or a correctly rounded software fma; both qualify). With
+u = 2^-53:
 
 - _mulmod(a, b) for |a b| <= M p^2, M <= 1. h = fl(a b) has |a b - h| <= u M p^2
   < 2^47, and l = fma(a, b, -h) is that error exactly. fl(h fl(1/p)) is within
-  3u M p < 0.375 M of a b / p, so the rounded quotient Q leaves
-  |a b - Q p| <= (0.5 + 0.375 M) p. fma(-Q, p, h) = h - Q p is an integer below
-  2^51, so it is exact, and adding l is exact: the result is a b - Q p.
+  3u M p < 0.375 M of a b / p, so the rounded quotient Q is within one of the
+  nearest integer to a b / p and leaves |a b - Q p| <= (0.5 + 0.375 M) p. Q is
+  not corrected: the result is a b - Q p, a correct residue in that wider range,
+  and the stage invariants below absorb it. fma(-Q, p, h) = h - Q p is an
+  integer below 2^51, so it is exact, and adding l is exact.
 - _reduce(x) for |x| < 2 p: x - Q p, within p / 2 + 1, exactly by one fma.
 - Twiddles are reduced, within p / 2 + 1.
 - Forward (decimation in frequency): inputs lie in [0, p). With values within p,
