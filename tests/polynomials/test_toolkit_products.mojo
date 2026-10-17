@@ -6,7 +6,7 @@ from polynomials._toolkit_exact import _exact_product, _ExactOps
 from polynomials._toolkit_ops import _divide_values, _convolve_values
 from polynomials._series_ops import _exp_values
 from polynomials._fntt import _fconvolve, _FPRIMES, _FPRIME_COUNT
-from polynomials._ntt import _transform_length, _ntt_middle_product, _ks_range, _zz_range, _transform_quotient, _shoup_quotient, _PRIMES, _PRIME_COUNT
+from polynomials._ntt import _transform_length, _ntt_middle_product, _ks_range, _ks_core, _Segments, _zz_range, _transform_quotient, _shoup_quotient, _PRIMES, _PRIME_COUNT
 from polynomials.coefficient_buffer import _view
 from apn_mojo import Integer
 
@@ -90,6 +90,16 @@ def segmented(mut check: Checker) raises:
             var expected = _zz_range(_view(a), _view(b), bounds[0], bounds[1], work)
             var got = _ks_range(_view(a), _view(b), bounds[0], bounds[1], False, work)
             check.check(Bool(got) and Bool(expected) and got.value() == expected.value(), String("segmented range ", sizes[0], "x", sizes[1], " ", bounds[0], "..", bounds[1]))
+        # Both prime families of the segmented core agree.
+        var la = sizes[0]
+        var lb = sizes[1]
+        var left = _Segments(_view(a), la, work)
+        var right = _Segments(_view(b), lb, work)
+        var stride = left.widest + right.widest - 1
+        var n = _transform_length((la + lb - 1) * stride)
+        var by_float = _ks_core[ZZ, True](left, right, 0, la + lb - 1, stride, n, False, work)
+        var by_integer = _ks_core[ZZ, False](left, right, 0, la + lb - 1, stride, n, False, work)
+        check.check(Bool(by_float) and Bool(by_integer) and by_float.value() == by_integer.value(), "segmented float and integer primes agree")
         var square = _ks_range(_view(a), _view(a), 0, 2 * sizes[0] - 1, True, work)
         check.check(Bool(square) and square.value() == _zz_range(_view(a), _view(a), 0, 2 * sizes[0] - 1, work).value(), "segmented square")
 

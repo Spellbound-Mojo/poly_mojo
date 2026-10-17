@@ -1435,15 +1435,23 @@ def _ks_range[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView
     var n = _transform_length(max(hi, la + lb - 1 - lo) * stride)
     if n > (1 << 30):
         return None
+    # Point sums below 2^(129 + 18) fit three float primes (above 2^149.99).
+    if _bit_length(min(la, lb)) + _bit_length(min(left.widest, right.widest)) <= 18:
+        return _ks_core[C, True](left, right, lo, hi, stride, n, square, budget)
+    return _ks_core[C, False](left, right, lo, hi, stride, n, square, budget)
+
+
+def _ks_core[C: CoefficientRing, F: Bool](left: _Segments, right: _Segments, lo: Int, hi: Int, stride: Int, n: Int, square: Bool, mut budget: Budget) raises PolyError -> Optional[List[C]]:
+    """The convolution and reassembly of _ks_range modulo three primes of one family."""
     _charge_transforms(_SEGMENT_PRIMES, n, square, budget)
     var count = (hi - lo) * stride
     _allocation[UInt64](_product(_SEGMENT_PRIMES + 2, n), budget)
-    var primes = materialize[_PRIMES]()
+    var primes = _moduli[F](_SEGMENT_PRIMES)
     var residues = List[List[UInt64]](capacity=_SEGMENT_PRIMES)
     for p in range(_SEGMENT_PRIMES):
         var x = left.points(primes[p], stride, n)
         var y = List[UInt64]() if square else right.points(primes[p], stride, n)
-        var column = _convolve(x^, y^, hi * stride, square, p, n)
+        var column = _modular_convolve[F](x^, y^, hi * stride, square, p, n)
         var kept = List[UInt64](capacity=count)
         for i in range(lo * stride, hi * stride):
             kept.append(column.unsafe_get(i))
@@ -1451,8 +1459,8 @@ def _ks_range[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView
     # Each point is v_0 + q_0 (v_1 + q_1 v_2) in mixed radix, then symmetric.
     _charge_size(_product(count, 8), budget)
     _allocation[C](hi - lo, budget)
-    var g = _garner(_SEGMENT_PRIMES)
-    var modulus = _radix_limbs(_SEGMENT_PRIMES)
+    var g = _garner[F](_SEGMENT_PRIMES)
+    var modulus = _radix_limbs[F](_SEGMENT_PRIMES)
     modulus.resize(3, 0)
     var half = List[UInt64](length=3, fill=0)
     half[0] = (modulus[0] >> 1) | (modulus[1] << 63)
