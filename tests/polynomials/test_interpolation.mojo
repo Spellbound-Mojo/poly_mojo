@@ -37,9 +37,35 @@ def exact[C: CoefficientField](ctx: C.Context, zero: C, one: C, two: C, mut c: C
         c.check(e.kind == PolyErrorKind.LIMIT, "prepared evaluation budget")
 
 
+def integer_nodes(mut c: Checker, mut work: Budget) raises:
+    # The multimodular route for small integer nodes must match the generic tree.
+    var small: List[Int] = [-7, 3, 0, 12, -2, 5, 9]
+    for scenario in range(3):
+        var points = List[QQ]()
+        var values = List[QQ]()
+        var count = 7 if scenario == 0 else 40
+        for i in range(count):
+            var node = i * 7 - 150 if scenario != 0 else small[i]
+            if scenario == 2 and i == 5:
+                node = 1 << 30  # beyond the residue-count bound: generic route
+            points.append(QQ(Rational(node)))
+            values.append(QQ(Rational(i * i * i - 5 * i + 1, i % 4 + 1)))
+        var fast = interpolate[QQ](0, NoContext(), points, values, work)
+        var generic = MultipointPlan[QQ].prepare(0, NoContext(), points, work).interpolate(values, work)
+        c.check(fast == generic and check_interpolation(fast, points, values, work), "integer-node interpolation matches the tree")
+    var repeated: List[QQ] = [QQ(Rational(3)), QQ(Rational(-1)), QQ(Rational(3))]
+    var samples: List[QQ] = [QQ(Rational(1)), QQ(Rational(2)), QQ(Rational(1))]
+    try:
+        _ = interpolate[QQ](0, NoContext(), repeated, samples, work)
+        c.check(False, "repeated integer nodes accepted")
+    except e:
+        c.check(e.kind == PolyErrorKind.DOMAIN, "repeated integer nodes rejected")
+
+
 def main() raises:
     var c = Checker("interpolation")
     var work = Budget()
+    integer_nodes(c, work)
     exact[QQ](NoContext(), QQ(Rational(0)), QQ(Rational(1)), QQ(Rational(2)), c, work)
     exact[QQi](NoContext(), QQi(ExactComplex(0)), QQi(ExactComplex(1)), QQi(ExactComplex(0, 1)), c, work)
     var prime = Modulus(101, work)
