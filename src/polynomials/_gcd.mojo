@@ -14,7 +14,7 @@ from ._prs import _prs
 from ._univariate_modular import _GcdSearch, _next_gcd_candidate, _univariate_gcd
 from .monomial import MonomialOrder
 from ._sparse_gcd import _sparse_gcd
-from ._heuristic_gcd import _heuristic
+from ._heuristic_gcd import _heuristic, _small_for_heuristic
 from ._brown_gcd import _brown_gcd
 from ._sparse_brown import _sparse_brown_gcd
 from ._multivariate_gcd import _deflation, _deflates, _scaled, _image_coprime
@@ -151,15 +151,23 @@ def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budge
                 var brown = _brown_gcd(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variables, budget)
                 if brown:
                     return _normalized(rebind_var[SparsePoly[C]](brown.take()), budget)
+            # Small dense inputs in four or more variables run GCDHEU first.
+            var heuristic_first = dense and heuristic and not high and _small_for_heuristic(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variables)
+            if dense and heuristic and heuristic_first:
+                use_heuristic = False
+                var first = _heuristic(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), budget)
+                if first:
+                    return _normalized(rebind_var[SparsePoly[C]](first.take()), budget)
             if not high:
                 var early = _sparse_brown_gcd(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variables, budget)
                 if early:
                     return _normalized(rebind_var[SparsePoly[C]](early.take()), budget)
-            if dense and heuristic:
+            if dense and heuristic and not heuristic_first:
                 use_heuristic = False
                 var guess = _heuristic(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), budget)
                 if guess:
                     return _normalized(rebind_var[SparsePoly[C]](guess.take()), budget)
+            if high:
                 var sparse = _sparse_brown_gcd(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variables, budget)
                 if sparse:
                     return _normalized(rebind_var[SparsePoly[C]](sparse.take()), budget)
