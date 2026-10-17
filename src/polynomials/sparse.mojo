@@ -1,9 +1,10 @@
 """Canonical sparse arithmetic by merging ordered exact terms."""
 from std.sys import size_of
 from .errors import Budget, PolyError, PolyErrorKind, _sum, _product, _charge_size, _allocation
-from .coefficients import CoefficientRing
+from .coefficients import CoefficientRing, ZZ, ModInt
 from .monomial import Monomial, MonomialOrder
 from ._ordering import _IndexedOrder, _stable_indices, _sift_min
+from ._packed_products import _packed_product
 
 @fieldwise_init
 struct Term[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
@@ -341,6 +342,12 @@ struct SparsePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
                 var right = other.reorder(order, budget)
                 var result = _heap_product[Self.C, True](left, right, budget) if len(left.terms) <= len(right.terms) else _heap_product[Self.C, True](right, left, budget)
                 return result.reorder(self.order, budget)
+        comptime if Self.C == ZZ or Self.C == ModInt:
+            if self.order.kind == MonomialOrder.LEX and count >= 4096:
+                # Kronecker-packed exponents and dense windows.
+                var packed = _packed_product(self, other, budget)
+                if packed:
+                    return packed.take()
         if self.order.kind != MonomialOrder.KERNEL and count >= 64:
             if len(self.terms) <= len(other.terms):
                 return _heap_product(self, other, budget)
