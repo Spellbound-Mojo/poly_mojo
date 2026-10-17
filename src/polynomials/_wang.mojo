@@ -539,7 +539,7 @@ def _mignotte(f: SparsePoly[ZZ], mut budget: Budget) raises PolyError -> Integer
     for v in f.variables(budget):
         n = _sum(n, f.degree_in(v, budget))
     var lead = _abs(f.terms[len(f.terms) - 1].coefficient.value)
-    var root = Integer(1)
+    var root: Integer
     try:
         root = isqrt(Integer(n + 1)) + Integer(1)
     except e:
