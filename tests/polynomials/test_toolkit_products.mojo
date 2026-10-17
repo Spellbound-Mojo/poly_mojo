@@ -2,11 +2,128 @@
 from apn_mojo import Rational, ExactComplex
 from polynomials import *
 from support.check import Checker
+from polynomials._toolkit_exact import _exact_product
+from polynomials._ntt import _ntt_middle_product, _ks_range, _zz_range, _transform_quotient, _shoup_quotient, _PRIMES, _PRIME_COUNT
+from polynomials.coefficient_buffer import _view
+from apn_mojo import Integer
+
+
+def value[C: CoefficientRing](ctx: C.Context, k: Int, bits: Int) raises -> C:
+    """A deterministic coefficient of about `bits` bits, with signs and denominators varying."""
+    var x = Integer(k * k * 7919 + 13 * k + 5)
+    var magnitude = x
+    while magnitude.magnitude_bit_length() < bits:
+        magnitude = magnitude * x + Integer(k + 1)
+    var signed = -magnitude if k % 3 == 1 else magnitude
+    comptime if C == ZZ:
+        return rebind_var[C](ZZ(signed))
+    elif C == QQ:
+        return rebind_var[C](QQ(Rational(signed, Integer(k % 7 + 1))))
+    else:
+        var p = rebind[Modulus](ctx).value
+        var r = UInt64(k * k * 7919 + 13 * k + 5) % p
+        return rebind_var[C](ModInt(p - 1 - r if k % 2 else r, rebind[Modulus](ctx)))
+
+
+def transform_products[C: CoefficientRing](ctx: C.Context, bits: Int, mut check: Checker) raises:
+    """Transform truncated products return the work stack's exact lists; middle products agree with the full product."""
+    var work = Budget()
+    for sizes in [(64, 64), (100, 70), (130, 257), (300, 300)]:
+        var a = List[C]()
+        var b = List[C]()
+        for k in range(sizes[0]):
+            a.append(value[C](ctx, k, bits))
+        for k in range(sizes[1]):
+            b.append(value[C](ctx, k + 1000, bits))
+        var full = DensePoly[C].from_coefficients(0, ctx, a.copy(), work).mul_schoolbook(DensePoly[C].from_coefficients(0, ctx, b.copy(), work), work)
+        var whole = sizes[0] + sizes[1] - 1
+        for length in [64, sizes[0] - 1, max(sizes[0], sizes[1]), max(sizes[0], sizes[1]) + 5, whole, whole + 9]:
+            var got = _exact_product(_view(a), _view(b), length, ctx, work)
+            var na = min(length, sizes[0])
+            var nb = min(length, sizes[1])
+            var n = min(length, na + nb - 1)
+            # The reference shape: n coefficients, or the trimmed full product truncated to n.
+            var expected = List[C]()
+            var head_a = List[C]()
+            var head_b = List[C]()
+            for i in range(na):
+                head_a.append(a[i].copy())
+            for i in range(nb):
+                head_b.append(b[i].copy())
+            var full_low = DensePoly[C].from_coefficients(0, ctx, head_a^, work).mul_schoolbook(DensePoly[C].from_coefficients(0, ctx, head_b^, work), work)
+            if n <= max(na, nb):
+                for i in range(n):
+                    expected.append(full_low.coefficients[i].copy() if i < len(full_low.coefficients) else C.zero(ctx))
+            else:
+                for i in range(min(n, len(full_low.coefficients))):
+                    expected.append(full_low.coefficients[i].copy())
+            check.check(got == expected, String("transform truncated product ", sizes[0], "x", sizes[1], " to ", length))
+        for bounds in [(0, 64), (sizes[0] - 1, sizes[0] + 60), (whole - 70, whole + 5)]:
+            var middle = _ntt_middle_product(_view(a), _view(b), bounds[0], bounds[1], work)
+            var valid = Bool(middle)
+            if middle:
+                ref m = middle.value()
+                valid = len(m) == bounds[1] - bounds[0]
+                for i in range(len(m)):
+                    var j = bounds[0] + i
+                    var e = full.coefficients[j].copy() if j < len(full.coefficients) else C.zero(ctx)
+                    valid = valid and m[i] == e
+            check.check(valid, String("middle product ", bounds[0], " to ", bounds[1]))
+
+
+def segmented(mut check: Checker) raises:
+    """Kronecker segmentation agrees with multi-modular CRT on ragged limb counts, signs, zeros and ranges."""
+    var work = Budget()
+    for sizes in [(1, 1), (5, 3), (40, 70), (130, 129)]:
+        var a = List[ZZ]()
+        var b = List[ZZ]()
+        for k in range(sizes[0]):
+            # Limb counts from zero to four, both signs.
+            a.append(value[ZZ](NoContext(), k, [0, 1, 64, 130, 250][k % 5]) if k % 7 != 3 else ZZ(Integer(0)))
+        for k in range(sizes[1]):
+            b.append(value[ZZ](NoContext(), k + 500, [190, 3, 70, 128][k % 4]))
+        var whole = sizes[0] + sizes[1] - 1
+        for bounds in [(0, whole), (0, 1), (whole // 2, whole + 3), (whole - 1, whole)]:
+            var expected = _zz_range(_view(a), _view(b), bounds[0], bounds[1], work)
+            var got = _ks_range(_view(a), _view(b), bounds[0], bounds[1], False, work)
+            check.check(Bool(got) and Bool(expected) and got.value() == expected.value(), String("segmented range ", sizes[0], "x", sizes[1], " ", bounds[0], "..", bounds[1]))
+        var square = _ks_range(_view(a), _view(a), 0, 2 * sizes[0] - 1, True, work)
+        check.check(Bool(square) and square.value() == _zz_range(_view(a), _view(a), 0, 2 * sizes[0] - 1, work).value(), "segmented square")
+
+
+def transform_quotients(mut check: Checker):
+    """The division-free Shoup quotient of the twiddle tables matches the 128-bit division for every transform prime."""
+    var primes = materialize[_PRIMES]()
+    var valid = True
+    for i in range(_PRIME_COUNT):
+        var q = primes[i]
+        var reciprocal = UInt64((UInt128(1) << 125) // UInt128(q))
+        var x = UInt64(i + 1)
+        for k in range(200):
+            x = x * 6364136223846793005 + 1442695040888963407
+            var y = (x >> 2) % q
+            if k < 4:
+                y = [UInt64(0), UInt64(1), q - 1, q - 2][k]
+            valid = valid and _transform_quotient(y, q, reciprocal) == _shoup_quotient(y, q)
+    check.check(valid, "transform quotients")
 
 
 def main() raises:
     var check = Checker("toolkit_products")
+    transform_quotients(check)
+    segmented(check)
     var work = Budget()
+    transform_products[ZZ](NoContext(), 8, check)
+    transform_products[ZZ](NoContext(), 200, check)
+    # Eighteen limbs carry the residue sums past 128 bits and take 38 primes.
+    transform_products[ZZ](NoContext(), 1100, check)
+    # Past the 48-prime table: Kronecker segmentation.
+    transform_products[ZZ](NoContext(), 1600, check)
+    transform_products[QQ](NoContext(), 40, check)
+    transform_products[ModInt](Modulus(65521, work), 0, check)
+    transform_products[ModInt](Modulus((UInt64(1) << 62) - 57, work), 0, check)
+
+
     var ctx = Modulus(65521, work)
     for size in [63, 64, 65, 127, 128, 129, 257]:
         for short in [size, size - 3, size // 2]:

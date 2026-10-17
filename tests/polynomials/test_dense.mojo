@@ -161,6 +161,7 @@ def main() raises:
     check_ring[ModInt](Modulus(101, work), c)
     native_transforms(c)
     transforms[ZZ](NoContext(), c)
+    transforms[ModInt](Modulus(2, work), c)
     transforms[ModInt](Modulus(101, work), c)
     transforms[ModInt](Modulus((UInt64(1) << 62) - 57, work), c)
     transforms[ModInt](Modulus(4611685941117976577, work), c)
