@@ -525,7 +525,15 @@ def _ntt_zz[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C
     var bits = bits_a + (bits_a if square else _bits_zz(b)) + _bit_length(min(len(a), len(b))) + 1
     var k = (bits + _PRIME_BITS - 1) // _PRIME_BITS
     var n = _transform_length(count)
-    if k > _PRIME_COUNT or n > (1 << 30):
+    if k > _PRIME_COUNT:
+        var segmented = _ks_range[C](a, b, 0, count, square, budget)
+        if not segmented:
+            return None
+        var values = segmented.take()
+        while len(values) and values[len(values) - 1].is_zero():
+            _ = values.pop()
+        return values^
+    if n > (1 << 30):
         return None
     _charge_transforms(k, n, square, budget)
     _allocation[UInt64](_product(k, count), budget)
@@ -1081,7 +1089,9 @@ def _zz_range[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView
     var bits = bits_a + (bits_a if square else _bits_zz(b)) + _bit_length(min(len(a), len(b))) + 1
     var k = (bits + _PRIME_BITS - 1) // _PRIME_BITS
     var n = _range_length(len(a), len(b), lo, hi)
-    if k > _PRIME_COUNT or n > (1 << 30):
+    if k > _PRIME_COUNT:
+        return _ks_range[C](a, b, lo, hi, square, budget)
+    if n > (1 << 30):
         return None
     _charge_transforms(k, n, square, budget)
     _allocation[UInt64](_product(k, hi), budget)
@@ -1230,3 +1240,142 @@ def _view_prefix[C: CoefficientRing](values: _CoefficientView[C, _], n: Int) -> 
     for i in range(n):
         out.append(values[i].copy())
     return out^
+
+
+# ------------------------------------------------ Kronecker segmentation
+
+comptime _SEGMENT_PRIMES = 3
+"""Transform primes per segmented product: their product exceeds 2^183."""
+
+
+struct _Segments(Movable):
+    """Each coefficient's 64-bit magnitude limbs and sign."""
+    var limbs: List[UInt64]
+    var offsets: List[Int]
+    var negative: List[Bool]
+    var widest: Int
+
+    def __init__[C: CoefficientRing](out self, values: _CoefficientView[C, _], count: Int, mut budget: Budget) raises PolyError:
+        """The first `count` coefficients."""
+        self.limbs = List[UInt64]()
+        self.offsets = List[Int](capacity=count + 1)
+        self.negative = List[Bool](capacity=count)
+        self.widest = 1
+        self.offsets.append(0)
+        for i in range(count):
+            ref c = rebind[ZZ](values[i])
+            _charge_size(c.size(), budget)
+            _magnitude(c.value, self.limbs)
+            self.offsets.append(len(self.limbs))
+            self.negative.append(c.value.sign() < 0)
+            self.widest = max(self.widest, self.offsets[i + 1] - self.offsets[i])
+
+    def points(self, q: UInt64, stride: Int, n: Int) -> List[UInt64]:
+        """The limbs as signed residues modulo q, limb j of coefficient i at i * stride + j, padded to n."""
+        var one_quotient = _shoup_quotient(1, q)
+        var out = List[UInt64](length=n, fill=0)
+        for i in range(len(self.negative)):
+            var start = self.offsets[i]
+            for l in range(start, self.offsets[i + 1]):
+                var r = _reduce_2q(_shoup(self.limbs.unsafe_get(l), 1, one_quotient, q), q)
+                out.unsafe_get(i * stride + l - start) = (q - r if r else r) if self.negative[i] else r
+        return out^
+
+
+def _ks_range[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _], lo: Int, hi: Int, square: Bool, mut budget: Budget) raises PolyError -> Optional[List[C]]:
+    """Coefficients lo ..< hi of a * b over ZZ by Kronecker segmentation, or None past the transform limits.
+
+    Limb j of coefficient i becomes point i L + j, signed by the coefficient,
+    with L = s_a + s_b - 1 for the widest limb counts s_a, s_b. Products of limbs
+    then land at (i + i') L + j + j' with j + j' < L, so slot t of the cyclic
+    convolution holds exactly the 64-bit digits of c_t: no carry crosses slots,
+    and any range of coefficients reads its own slots. Three primes hold every
+    point, a signed sum of at most min(len) * min(s) products below 2^128.
+    The work is linear in the bits, where multi-modular CRT is quadratic.
+    """
+    var la = min(len(a), hi)
+    var lb = min(len(b), hi)
+    if la == 0 or lb == 0 or lo >= hi:
+        return _zeros_like(a, b, hi - lo)
+    var left = _Segments(a, la, budget)
+    var right = _Segments(b, lb, budget)
+    var stride = left.widest + right.widest - 1
+    if _bit_length(min(la, lb)) + _bit_length(min(left.widest, right.widest)) > 52:
+        return None
+    var n = _transform_length(max(hi, la + lb - 1 - lo) * stride)
+    if n > (1 << 30):
+        return None
+    _charge_transforms(_SEGMENT_PRIMES, n, square, budget)
+    var count = (hi - lo) * stride
+    _allocation[UInt64](_product(_SEGMENT_PRIMES + 2, n), budget)
+    var primes = materialize[_PRIMES]()
+    var residues = List[List[UInt64]](capacity=_SEGMENT_PRIMES)
+    for p in range(_SEGMENT_PRIMES):
+        var x = left.points(primes[p], stride, n)
+        var y = List[UInt64]() if square else right.points(primes[p], stride, n)
+        var column = _convolve(x^, y^, hi * stride, square, p, n)
+        var kept = List[UInt64](capacity=count)
+        for i in range(lo * stride, hi * stride):
+            kept.append(column.unsafe_get(i))
+        residues.append(kept^)
+    # Each point is v_0 + q_0 (v_1 + q_1 v_2) in mixed radix, then symmetric.
+    _charge_size(_product(count, 8), budget)
+    _allocation[C](hi - lo, budget)
+    var g = _garner(_SEGMENT_PRIMES)
+    var modulus = _radix_limbs(_SEGMENT_PRIMES)
+    modulus.resize(3, 0)
+    var half = List[UInt64](length=3, fill=0)
+    half[0] = (modulus[0] >> 1) | (modulus[1] << 63)
+    half[1] = (modulus[1] >> 1) | (modulus[2] << 63)
+    half[2] = modulus[2] >> 1
+    var digits = List[UInt64](length=_SEGMENT_PRIMES, fill=0)
+    var limbs = List[UInt64](length=stride + 2, fill=0)
+    var bytes = List[UInt8](length=8 * (stride + 2), fill=0)
+    var result = List[C](capacity=hi - lo)
+    for t in range(hi - lo):
+        # c_t = sum_u z_u 2^(64 u), by a running signed three-word carry.
+        var r0 = UInt64(0)
+        var r1 = UInt64(0)
+        var r2 = Int64(0)
+        for u in range(stride + 2):
+            if u < stride:
+                _digits(g, residues, t * stride + u, digits)
+                var inner = UInt128(digits[1]) + UInt128(digits[2]) * UInt128(g.moduli[1])
+                var low = UInt128(g.moduli[0]) * UInt128(UInt64(inner)) + UInt128(digits[0])
+                var high = UInt128(g.moduli[0]) * UInt128(UInt64(inner >> 64)) + (low >> 64)
+                var z0 = UInt64(low)
+                var z1 = UInt64(high)
+                var z2 = UInt64(high >> 64)
+                # Above half the modulus the point is negative: subtract it.
+                if z2 > half[2] or (z2 == half[2] and (z1 > half[1] or (z1 == half[1] and z0 > half[0]))):
+                    var borrow = UInt64(1) if z0 < modulus[0] else UInt64(0)
+                    z0 = z0 - modulus[0]
+                    var b1 = UInt64(1) if (z1 < modulus[1] or (z1 == modulus[1] and borrow == 1)) else UInt64(0)
+                    z1 = z1 - modulus[1] - borrow
+                    z2 = z2 - modulus[2] - b1
+                var s0 = r0 + z0
+                var c0 = UInt64(1) if s0 < r0 else UInt64(0)
+                var s1 = r1 + z1
+                var c1 = UInt64(1) if s1 < r1 else UInt64(0)
+                var s1c = s1 + c0
+                c1 += UInt64(1) if s1c < s1 else UInt64(0)
+                r0 = s0
+                r1 = s1c
+                r2 = r2 + Int64(z2) + Int64(c1)
+            limbs.unsafe_get(u) = r0
+            r0 = r1
+            r1 = UInt64(r2)
+            r2 = r2 >> 63
+        # |c_t| < 2^(64 (stride + 1)), so what remains is the sign alone.
+        var negative = r2 < 0
+        if negative:
+            var carry = UInt64(1)
+            for u in range(stride + 2):
+                var v = ~limbs.unsafe_get(u) + carry
+                carry = UInt64(1) if (carry == 1 and v == 0) else UInt64(0)
+                limbs.unsafe_get(u) = v
+        var used = stride + 2
+        while used > 1 and limbs.unsafe_get(used - 1) == 0:
+            used -= 1
+        result.append(rebind_var[C](ZZ(_integer(limbs, used, negative, bytes))))
+    return result^
