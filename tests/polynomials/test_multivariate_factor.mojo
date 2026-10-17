@@ -75,6 +75,27 @@ def main() raises:
             if entry[0] == d:
                 multiplicity = entry[1]
         c.check(len(got.factors) == 3 and multiplicity == power and check_multivariate_factorization(g, got, work), "trivariate planted factors with squarefree image test")
+    # Wang's leading-coefficient distribution: every factor has a nonconstant
+    # leading coefficient in the main variable x3, sharing their factors.
+    var wang_factors = List[SparsePoly[QQ]]()
+    wang_factors.append(parse_polynomial("x1^2*x2*x3^2 + x3^2 + x1*x3 - x2", order, work))
+    wang_factors.append(parse_polynomial("x1*x2*x3 - 2*x3 + x1^2 + 3", order, work))
+    wang_factors.append(parse_polynomial("x3*x2^3 + x3*x1 + x0 + 1", order, work))
+    wang_factors.append(parse_polynomial("x0*x1*x2*x3^2 + x1^2*x2*x3^2 - 2*x0*x3^2 - 2*x1*x3^2 - x0*x2 + 5", order, work))
+    var wang_product = parse_polynomial("1", order, work)
+    for g in wang_factors:
+        wang_product = wang_product.mul(g, work)
+    var wang_integer = as_zz(wang_product, work)
+    var wang_result = factor_multivariate_integer(wang_integer, work)
+    c.check(len(wang_result.factors) == 4 and check_multivariate_factorization(wang_integer, wang_result, work), "Wang lifting with shared nonconstant leading coefficients")
+    var rational_result = factor_multivariate(wang_product, work)
+    var matched = 0
+    for g in wang_factors:
+        var alone = factor_multivariate(g, work)
+        for entry in rational_result.factors:
+            if len(alone.factors) == 1 and entry[0] == alone.factors[0][0] and entry[1] == 1:
+                matched += 1
+    c.check(matched == 4, "Wang factors match the planted irreducibles")
     var tiny = Budget(1)
     var exhausted = False
     try:

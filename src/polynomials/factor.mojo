@@ -119,17 +119,19 @@ comptime _PRIME_TRIALS = 3
 """Good primes whose modular factorizations are compared before lifting."""
 
 
-def _small_prime(index: Int, mut budget: Budget) raises PolyError -> UInt64:
-    """The index-th prime below 2^28, descending; such primes take the SIMD
-    residue products, and quadratic lifting makes their size irrelevant."""
-    var candidate = (UInt64(1) << 28) - 1
-    var found = -1
+def _next_small_prime(previous: UInt64, mut budget: Budget) raises PolyError -> UInt64:
+    """The largest prime below `previous`; starting from 2^28 this walks the
+    descending primes whose residue products take the SIMD path, and
+    quadratic lifting makes their size irrelevant."""
+    var candidate = previous - 1
+    if candidate % 2 == 0:
+        candidate -= 1
     while True:
         budget.charge(1)
+        if candidate < 3:
+            raise PolyError(PolyErrorKind.CAPACITY, "small prime sequence exhausted")
         if _prime(candidate, budget):
-            found += 1
-            if found == index:
-                return candidate
+            return candidate
         candidate -= 2
 
 
@@ -139,15 +141,14 @@ def _squarefree_factors(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -
         return [_copy(f, budget)]
     # Factor modulo several good primes. Each one's factor degrees bound the
     # degrees of true factors; lifting uses the prime with fewest factors.
-    var index = 0
+    var p = UInt64(1) << 28
     var trials = 0
     _allocation[Bool](_sum(f.degree(), 1), budget)
     var allowed = List[Bool](length=f.degree() + 1, fill=True)
     var best = List[DensePoly[ModInt]]()
     while trials < _PRIME_TRIALS:
         budget.charge(1)
-        var p = _small_prime(index, budget)
-        index = _sum(index, 1)
+        p = _next_small_prime(p, budget)
         if _residue(f.coefficients[f.degree()].value, p, budget) == 0:
             continue
         var ctx = Modulus(_prime_value=p)
@@ -252,9 +253,10 @@ def _sort[C: CoefficientRing](mut factors: List[Tuple[DensePoly[C], Int]], templ
 def _modular_squarefree(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Bool:
     # A prime that keeps the degree and leaves f coprime to f' proves f
     # squarefree over QQ: a repeated primitive factor would survive reduction.
-    for index in range(2):
+    var p = UInt64(1) << 28
+    for _ in range(2):
         budget.charge(1)
-        var p = _small_prime(index, budget)
+        p = _next_small_prime(p, budget)
         if _residue(f.coefficients[f.degree()].value, p, budget) == 0:
             continue
         var field = _nmod._field(p)

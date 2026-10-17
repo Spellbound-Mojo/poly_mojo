@@ -161,7 +161,7 @@ from apn_mojo import Rational
 from ._subsets import _Recombination
 from ._bounded_products import _truncated_product
 from .errors import Budget, PolyError, _allocation, _sum, _charge_size
-from .coefficients import QQ, NoContext
+from .coefficients import QQ, ZZ, NoContext
 from .monomial import Monomial
 from .sparse import SparsePoly, Term
 from .dense import DensePoly
@@ -174,7 +174,10 @@ from ._euclidean import _extended
 from .factor import factor
 from .division import divide_exact
 from ._root_ops import _compare as _compare_q, _copy as _copy_q
-from ._images import _integer_image
+from ._images import _integer_image, _rational_image
+from ._gcd import _primitive_zz
+from ._views import _lc
+from ._wang import _wang, _LeadFactor
 from .primes import prime, _residue
 from .coefficients import _mod_mul, _mod_pow
 from . import _nmod
@@ -417,8 +420,8 @@ def _atoms(f: SparsePoly[QQ], mut budget: Budget) raises PolyError -> List[Spars
             budget.charge(1)
             result.append(entry[0].to_sparse(f.order, budget))
         return result^
-    var content = _content(f, main, budget)
     # This recursion strictly removes the main variable (PG5).
+    var content = _content(f, main, budget)
     var result = _atoms(content, budget)
     var primitive = _exact_poly(f, content, budget)
     var squarefree: SparsePoly[QQ]
@@ -426,6 +429,14 @@ def _atoms(f: SparsePoly[QQ], mut budget: Budget) raises PolyError -> List[Spars
         squarefree = primitive._copy(budget)
     else:
         squarefree = _exact_poly(primitive, _gcd_value(primitive, derivative(primitive, main, budget), budget), budget)
+    _ = variables.pop()
+    var wang = _wang_atoms(squarefree, main, variables, budget)
+    if wang:
+        for g in wang.value():
+            budget.charge(1)
+            _allocation[SparsePoly[QQ]](1, budget)
+            result.append(_normalize(g.reorder(f.order, budget), budget))
+        return result^
     var coefficients = _split(squarefree, main, budget)
     var degree = len(coefficients) - 1
     ref leading = coefficients[degree]
@@ -436,7 +447,6 @@ def _atoms(f: SparsePoly[QQ], mut budget: Budget) raises PolyError -> List[Spars
         transformed_coefficients.append(coefficients[i].mul(leading.pow(UInt64(degree - 1 - i), budget), budget))
     transformed_coefficients.append(_one(f, budget))
     var transformed = _join(transformed_coefficients, main, f, budget)
-    _ = variables.pop()
     var factors = _monic_factors(transformed, main, variables, budget)
     var replacement = leading.mul(SparsePoly[QQ].variable(main, f.order, NoContext(), budget), budget)
     for g in factors:
@@ -445,4 +455,40 @@ def _atoms(f: SparsePoly[QQ], mut budget: Budget) raises PolyError -> List[Spars
         recovered = _exact_poly(recovered, _content(recovered, main, budget), budget)
         _allocation[SparsePoly[QQ]](1, budget)
         result.append(_normalize(recovered, budget))
+    return result^
+
+
+def _wang_atoms(f: SparsePoly[QQ], main: Int64, params: List[Int64], mut budget: Budget) raises PolyError -> Optional[List[SparsePoly[QQ]]]:
+    # Wang's EEZ algorithm over ZZ. The leading coefficient's irreducible
+    # factors come from this same recursion, which removes the main variable.
+    var integer = _primitive_zz(_integer_image(f, budget), budget)
+    var lead = _lc(integer, main, budget)
+    var lead_factors = List[_LeadFactor]()
+    var remaining = lead._copy(budget)
+    for atom in _atoms(_rational_image(lead, budget), budget):
+        budget.charge(1)
+        var t = _primitive_zz(_integer_image(atom, budget), budget)
+        var power = 0
+        while True:
+            budget.charge(1)
+            var quotient = divide_exact(remaining, t, budget)
+            if not quotient:
+                break
+            remaining = quotient.take()
+            power = _sum(power, 1)
+        if power == 0:
+            return None
+        _allocation[_LeadFactor](1, budget)
+        lead_factors.append(_LeadFactor(t^, power))
+    if len(remaining.terms) != 1 or len(remaining.terms[0].monomial.pairs) != 0:
+        return None
+    var ct = remaining.terms[0].coefficient.value.copy()
+    var factors = _wang(integer, main, params, lead_factors, ct, budget)
+    if not factors:
+        return None
+    var result = List[SparsePoly[QQ]]()
+    for g in factors.value():
+        budget.charge(1)
+        _allocation[SparsePoly[QQ]](1, budget)
+        result.append(_rational_image(g, budget))
     return result^
