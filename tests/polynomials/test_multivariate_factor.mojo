@@ -62,6 +62,19 @@ def main() raises:
         var constant = parse_polynomial(text, order, work)
         var constants = factor_multivariate(constant, work)
         c.check(len(constants.factors) == 0 and check_multivariate_factorization(constant, constants, work), "zero and constant factor products")
+    # Squarefree parts proved by a prime image, and a repeated trivariate
+    # factor that the image rejects, both with leading coefficients in x2.
+    var a = parse_polynomial("x2*x0 + x1^2 - 3", order, work)
+    var b = parse_polynomial("x2^2*x1 - x0 + 2", order, work)
+    var d = parse_polynomial("x2 + x1 + x0", order, work)
+    for power in range(1, 3):
+        var g = a.mul(b, work).mul(d.pow(UInt64(power), work), work)
+        var got = factor_multivariate(g, work)
+        var multiplicity = 0
+        for entry in got.factors:
+            if entry[0] == d:
+                multiplicity = entry[1]
+        c.check(len(got.factors) == 3 and multiplicity == power and check_multivariate_factorization(g, got, work), "trivariate planted factors with squarefree image test")
     var tiny = Budget(1)
     var exhausted = False
     try:

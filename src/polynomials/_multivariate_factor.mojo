@@ -174,6 +174,10 @@ from ._euclidean import _extended
 from .factor import factor
 from .division import divide_exact
 from ._root_ops import _compare as _compare_q, _copy as _copy_q
+from ._images import _integer_image
+from .primes import prime, _residue
+from .coefficients import _mod_mul, _mod_pow
+from . import _nmod
 
 
 def _normalize(f: SparsePoly[QQ], mut budget: Budget) raises PolyError -> SparsePoly[QQ]:
@@ -367,6 +371,39 @@ def _monic_factors(f: SparsePoly[QQ], main: Int64, parameters: List[Int64], mut 
     return factors^
 
 
+def _squarefree_image(f: SparsePoly[QQ], main: Int64, mut budget: Budget) raises PolyError -> Bool:
+    # A prime image f(x, a) mod p that keeps the degree in x and is coprime
+    # to its derivative proves a primitive f squarefree: each factor of f has
+    # positive degree in x and keeps it under the specialization.
+    var integer = _integer_image(f, budget)
+    var degree = Int(f.degree_in(main, budget))
+    for trial in range(2):
+        budget.charge(1)
+        var p = prime(trial, budget)
+        var field = _nmod._field(p)
+        _allocation[UInt64](_sum(degree, 1), budget)
+        var image = List[UInt64](length=degree + 1, fill=0)
+        for term in integer.terms:
+            budget.charge(1)
+            var value = _residue(term.coefficient.value, p, budget)
+            var k = 0
+            for pair in term.monomial.pairs:
+                budget.charge(1)
+                if pair[0] == main:
+                    k = Int(pair[1])
+                else:
+                    var point = (UInt64(pair[0]) * 0x9E3779B97F4A7C15 + UInt64(trial + 1) * 0xBF58476D1CE4E5B9) % p
+                    value = _mod_mul(value, _mod_pow(point, UInt64(pair[1]), p, budget), p)
+            image[k] = (image[k] + value) % p
+        if image[degree] == 0:
+            continue
+        for i in range(len(image)):
+            image[i] = _nmod._to(image[i], field)
+        if len(_nmod._gcd(image, _nmod._derivative(image, field, budget), field, budget)) == 1:
+            return True
+    return False
+
+
 def _atoms(f: SparsePoly[QQ], mut budget: Budget) raises PolyError -> List[SparsePoly[QQ]]:
     var variables = f.variables(budget)
     if len(variables) == 0:
@@ -384,7 +421,11 @@ def _atoms(f: SparsePoly[QQ], mut budget: Budget) raises PolyError -> List[Spars
     # This recursion strictly removes the main variable (PG5).
     var result = _atoms(content, budget)
     var primitive = _exact_poly(f, content, budget)
-    var squarefree = _exact_poly(primitive, _gcd_value(primitive, derivative(primitive, main, budget), budget), budget)
+    var squarefree: SparsePoly[QQ]
+    if _squarefree_image(primitive, main, budget):
+        squarefree = primitive._copy(budget)
+    else:
+        squarefree = _exact_poly(primitive, _gcd_value(primitive, derivative(primitive, main, budget), budget), budget)
     var coefficients = _split(squarefree, main, budget)
     var degree = len(coefficients) - 1
     ref leading = coefficients[degree]
