@@ -112,19 +112,38 @@ def _scale_words(mut a: List[UInt64], c: UInt64, field: _Field):
         a[i] = field.mul(a[i], c)
 
 
-def _reduce_monic(mut a: List[UInt64], b: List[UInt64], field: _Field, mut budget: Budget) raises PolyError:
-    """Replace a by a mod b for monic b, trimmed."""
+def _reduce(mut a: List[UInt64], b: List[UInt64], inverse: UInt64, field: _Field, mut budget: Budget) raises PolyError:
+    """Replace a by a mod b, trimmed, for b of positive length and inverse the Montgomery form of 1/lc(b).
+
+    Quotient terms are taken two at a time: subtracting (q1 x + q0) x^j b
+    combines both products of each coefficient into one 128-bit sum below
+    2p^2 < p 2^64, so one Montgomery reduction serves both.
+    """
     var db = len(b) - 1
     if len(a) <= db:
         return
     _charge_size((len(a) - db) * len(b), budget)
-    for k in range(len(a) - 1, db - 1, -1):
-        var q = a[k]
-        if q == 0:
-            continue
-        var base = k - db
-        for i in range(db):
-            a[base + i] = field.sub(a[base + i], field.mul(q, b[i]))
+    if db == 0:
+        a.clear()
+        return
+    var p = field.p
+    var k = len(a) - 1
+    while k > db:
+        var q1 = field.mul(a[k], inverse)
+        var q0 = field.mul(field.sub(a[k - 1], field.mul(q1, b[db - 1])), inverse)
+        var n1 = UInt128(p - q1 if q1 else 0)
+        var n0 = UInt128(p - q0 if q0 else 0)
+        var base = k - 1 - db
+        a[base] = field.add(a[base], field.reduce(n0 * UInt128(b[0])))
+        for i in range(1, db):
+            a[base + i] = field.add(a[base + i], field.reduce(n1 * UInt128(b[i - 1]) + n0 * UInt128(b[i])))
+        k -= 2
+    if k == db:
+        var q = field.mul(a[k], inverse)
+        if q:
+            var n = UInt128(p - q)
+            for i in range(db):
+                a[i] = field.add(a[i], field.reduce(n * UInt128(b[i])))
     a.resize(db, 0)
     _trim_words(a)
 
@@ -145,8 +164,7 @@ def _gcd_words(var a: List[UInt64], var b: List[UInt64], field: _Field, mut budg
         swap(a, b)
     while len(b):
         budget.charge(1)
-        _ = _make_monic(b, field)
-        _reduce_monic(a, b, field, budget)
+        _reduce(a, b, field.inverse(b[len(b) - 1]), field, budget)
         swap(a, b)
     if len(a):
         _ = _make_monic(a, field)
@@ -169,14 +187,13 @@ def _resultant_words(var a: List[UInt64], var b: List[UInt64], field: _Field, mu
             result = field.sub(0, result)
     while n > 0:
         budget.charge(1)
-        var lc = _make_monic(b, field)
-        _reduce_monic(a, b, field, budget)
+        var lc = b[n]
+        _reduce(a, b, field.inverse(lc), field, budget)
         if not len(a):
             return 0
         var k = len(a) - 1
-        # res(A, B) = (-1)^(mn) lc(B)^(m - k) res(B, A mod B), with B made monic:
-        # res(A, B) = lc(B)^m res(A, B/lc(B)) and res(A, B') = (-1)^(mn) res(B', R).
-        result = field.mul(result, field.power(lc, m))
+        # res(A, B) = (-1)^(mn) res(B, A) and res(B, A) = lc(B)^(m - k) res(B, A mod B).
+        result = field.mul(result, field.power(lc, m - k))
         if (m & 1) and (n & 1):
             result = field.sub(0, result)
         swap(a, b)
