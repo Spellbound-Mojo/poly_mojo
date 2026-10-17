@@ -4,7 +4,8 @@ from polynomials import Budget, QQ, ZZ, ModInt, Modulus, NoContext, CoefficientR
 from polynomials._prs import _prs
 from support.gen import coefficient
 from support.rng import SplitMix64
-from polynomials._gcd import _gcd_value, _modular_primitive, _primitive_zz
+from polynomials._gcd import _gcd_value, _modular_primitive, _primitive_zz, _normalized
+from polynomials._sparse_gcd import _sparse_gcd
 from support.corpus import read_cases, parse_order, parse_polynomial, as_zz
 from support.check import Checker
 from polynomials.gcd import gcd, gcd_value
@@ -307,6 +308,23 @@ def brown_cases(mut c: Checker) raises:
     c.check(_gcd_value(qd, qf.mul(qh, work), work) == _gcd_value(qd, qf.mul(qh, work), work, heuristic=False), "rational gcd matches the route without the heuristic")
 
 
+def sparse_brown_cases(mut c: Checker) raises:
+    """Sparse multivariate gcds (sparse Brown first) agree with sparse modular interpolation."""
+    var work = Budget()
+    var rng = SplitMix64(6421)
+    var order = MonomialOrder(MonomialOrder.LEX, [0, 1, 2, 3, 4], work)
+    for round in range(8):
+        var g = polynomial[ZZ](NoContext(), order, rng, work, terms=4 + round % 3, variables=5, degree=2 + round % 2, coefficient_bound=9)
+        var a = polynomial[ZZ](NoContext(), order, rng, work, terms=3 + round % 4, variables=5, degree=2, coefficient_bound=9)
+        var b = polynomial[ZZ](NoContext(), order, rng, work, terms=3 + round % 2, variables=5, degree=3, coefficient_bound=9)
+        if g.is_zero() or a.is_zero() or b.is_zero():
+            continue
+        var f = g.mul(a, work)
+        var h = g.mul(b, work)
+        var expected = _normalized(_sparse_gcd(f, h, work), work)
+        c.check(_gcd_value(f, h, work) == expected, "sparse Brown gcd equals sparse modular interpolation")
+
+
 def main() raises:
     var c = Checker("gcd")
     var work = Budget()
@@ -359,4 +377,5 @@ def main() raises:
     shortcut_cases(c)
     heuristic_cases(c)
     brown_cases(c)
+    sparse_brown_cases(c)
     c.finish()

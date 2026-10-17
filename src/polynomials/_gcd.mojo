@@ -16,6 +16,7 @@ from .monomial import MonomialOrder
 from ._sparse_gcd import _sparse_gcd
 from ._heuristic_gcd import _heuristic
 from ._brown_gcd import _brown_gcd
+from ._sparse_brown import _sparse_brown_gcd
 from ._multivariate_gcd import _deflation, _deflates, _scaled, _image_coprime
 from .primes import prime, _residue, _merge_residue, _symmetric
 
@@ -150,11 +151,18 @@ def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budge
                 var brown = _brown_gcd(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variables, budget)
                 if brown:
                     return _normalized(rebind_var[SparsePoly[C]](brown.take()), budget)
+            if not high:
+                var early = _sparse_brown_gcd(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variables, budget)
+                if early:
+                    return _normalized(rebind_var[SparsePoly[C]](early.take()), budget)
             if dense and heuristic:
                 use_heuristic = False
                 var guess = _heuristic(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), budget)
                 if guess:
                     return _normalized(rebind_var[SparsePoly[C]](guess.take()), budget)
+                var sparse = _sparse_brown_gcd(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variables, budget)
+                if sparse:
+                    return _normalized(rebind_var[SparsePoly[C]](sparse.take()), budget)
             if not dense:
                 var lex = MonomialOrder(MonomialOrder.LEX, variables.copy(), budget)
                 var modular = _sparse_gcd(rebind[SparsePoly[ZZ]](f).reorder(lex, budget), rebind[SparsePoly[ZZ]](h).reorder(lex, budget), budget)
