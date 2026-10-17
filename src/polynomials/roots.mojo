@@ -5,7 +5,7 @@ from .dense import DensePoly
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size
 from .evaluate import evaluate_dense, _derivative_dense
 from .division import divmod
-from .certificates import SturmSequence, RootCountCertificate, _integer_form
+from .certificates import SturmSequence, RootCountCertificate, _integer_form, _IntegerChain, _integer_variations
 from ._dense_ops import _copy as _copy_poly
 from ._root_ops import _copy, _compare, _midpoint, _variations, _chain_variations, _one_sided
 from ._images import _integer_dense
@@ -45,30 +45,6 @@ def sturm_sequence(f: DensePoly[QQ], mut budget: Budget) raises PolyError -> Stu
     """
     var chain = _IntegerChain()
     return _sturm_chain(f, chain, budget, integer=False)
-
-
-struct _IntegerChain(Copyable, Movable):
-    """Integer data of a Sturm chain built by _sturm_chain, for exact signs.
-
-    Entry i is c_i P_i with P_i primitive; for i >= 1,
-    powers[i - 1] P_{i-1} = quotients[i - 1] P_i + contents[i - 1] P_{i+1}.
-    """
-    var first: List[Integer]
-    var second: List[Integer]
-    var degrees: List[Int]
-    var signs: List[Int]
-    var powers: List[Integer]
-    var quotients: List[List[Integer]]
-    var contents: List[Integer]
-
-    def __init__(out self):
-        self.first = List[Integer]()
-        self.second = List[Integer]()
-        self.degrees = List[Int]()
-        self.signs = List[Int]()
-        self.powers = List[Integer]()
-        self.quotients = List[List[Integer]]()
-        self.contents = List[Integer]()
 
 
 def _sturm_chain(f: DensePoly[QQ], mut chain: _IntegerChain, mut budget: Budget, *, integer: Bool = True) raises PolyError -> SturmSequence:
@@ -222,82 +198,6 @@ def _integer_step(mut chain: _IntegerChain, quotient: DensePoly[QQ], c0: Rationa
         chain.contents.append(-(tail.numerator() * (common // tail.denominator())))
     except e:
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
-
-
-def _homogeneous(c: List[Integer], degree: Int, u: Integer, v: Integer, shift: Int) raises -> Integer:
-    # v^degree c(u / v); v = 2^shift when shift >= 0.
-    var t = c[len(c) - 1].copy()
-    var power = Integer(1)
-    for j in range(len(c) - 2, -1, -1):
-        if shift >= 0:
-            t = t * u + (c[j] << (shift * (degree - j)))
-        else:
-            power = power * v
-            t = t * u + c[j] * power
-    if len(c) - 1 < degree:
-        if shift >= 0:
-            t = t << (shift * (degree - len(c) + 1))
-        else:
-            for _ in range(degree - len(c) + 1):
-                t = t * v
-    return t^
-
-
-def _integer_variations(chain: _IntegerChain, sequence: SturmSequence, a: QQ, mut budget: Budget, side: Int = 0) raises PolyError -> Int:
-    """Sign variations of a chain from _sturm_chain at a, as _variations would count them.
-
-    With H_i = v^(d_i) P_i(u / v), the pseudo-division identities give
-    H_{i+1} = (L H_{i-1} - v^(d_{i-1} - d_i) Q(u / v) H_i) / (g v^(d_{i-1} - d_{i+1})),
-    an exact integer division, and sign(c_i P_i(a)) = sign(c_i) sign(H_i).
-    """
-    var n = len(chain.degrees)
-    if n < 2 or n != len(sequence.polynomials):
-        return _chain_variations(sequence.polynomials, sequence.quotients, a, budget, side)
-    var previous = 0
-    var count = 0
-    var before = Integer(0)
-    var current = Integer(0)
-    var size = 0
-    var u = a.value.numerator()
-    var v = a.value.denominator()
-    var shift: Int
-    try:
-        shift = v.magnitude_bit_length() - 1 if (Integer(1) << (v.magnitude_bit_length() - 1)) == v else -1
-    except e:
-        raise PolyError(PolyErrorKind.CAPACITY, String(e))
-    for i in range(n):
-        budget.charge(1)
-        try:
-            if i == 0:
-                current = _homogeneous(chain.first, chain.degrees[0], u, v, shift)
-            elif i == 1:
-                before = current^
-                current = _homogeneous(chain.second, chain.degrees[1], u, v, shift)
-            else:
-                ref q = chain.quotients[i - 2]
-                var lowered = chain.degrees[i - 2] - chain.degrees[i]
-                var scaled = _homogeneous(q, chain.degrees[i - 2] - chain.degrees[i - 1], u, v, shift)
-                var numerator = chain.powers[i - 2] * before - scaled * current
-                if chain.contents[i - 2] != Integer(1):
-                    numerator = numerator // chain.contents[i - 2]
-                if shift >= 0:
-                    numerator = numerator >> (shift * lowered)
-                else:
-                    for _ in range(lowered):
-                        numerator = numerator // v
-                before = current^
-                current = numerator^
-            size += current.magnitude_bit_length() // 8 + 1
-        except e:
-            raise PolyError(PolyErrorKind.CAPACITY, String(e))
-        var sign = current.sign() * chain.signs[i]
-        sign = _one_sided(sequence.polynomials[i], sign, a, side, budget)
-        if sign != 0:
-            if previous != 0 and previous != sign:
-                count += 1
-            previous = sign
-    _charge_size(size, budget)
-    return count
 
 
 def _primitive_form(p: DensePoly[QQ], mut budget: Budget) raises PolyError -> Tuple[List[Integer], Rational]:
