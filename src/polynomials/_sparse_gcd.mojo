@@ -196,19 +196,44 @@ def _primitive(f: SparsePoly[ZZ], g: SparsePoly[ZZ], main: Int64, mut budget: Bu
             return candidate^
 
 
+def _by_size(sizes: List[Int], mut budget: Budget) raises PolyError -> List[Int]:
+    """Indices in increasing size, ties by index (insertion sort; there are few coefficients)."""
+    _allocation[Int](len(sizes), budget)
+    var order = List[Int](capacity=len(sizes))
+    for i in range(len(sizes)):
+        budget.charge(1)
+        var position = len(order)
+        order.append(i)
+        while position > 0 and sizes[order[position - 1]] > sizes[i]:
+            budget.charge(1)
+            order[position] = order[position - 1]
+            position -= 1
+        order[position] = i
+    return order^
+
+
 def _sparse_content(f: SparsePoly[ZZ], main: Int64, mut budget: Budget) raises PolyError -> SparsePoly[ZZ]:
+    # The content is the same in any visiting order; small coefficients first
+    # reach a unit, or a small common divisor, soonest.
     var result = _zero(f, budget)
     if len(f.terms) >= 64:
         var groups = _CoefficientGroups(f, main, budget)
+        var sizes = List[Int]()
         for i in range(len(groups.starts) - 1):
+            sizes.append(groups.starts[i + 1] - groups.starts[i])
+        for i in _by_size(sizes, budget):
             var coefficient = groups.coefficient(f, i, budget)
             result = _sparse_gcd(result, coefficient, budget)
             if _is_unit(result, budget):
                 break
         return result^
-    for coefficient in _coefficients(f, main, False, budget):
+    var coefficients = _coefficients(f, main, False, budget)
+    var sizes = List[Int]()
+    for coefficient in coefficients:
+        sizes.append(len(coefficient.terms))
+    for i in _by_size(sizes, budget):
         budget.charge(1)
-        result = _sparse_gcd(result, coefficient, budget)
+        result = _sparse_gcd(result, coefficients[i], budget)
         if _is_unit(result, budget):
             break
     return result^

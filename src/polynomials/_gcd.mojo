@@ -12,6 +12,8 @@ from ._views import _is_unit
 from ._tower import _split, _one, _zero, _constant, _variables, _exact_poly
 from ._prs import _prs
 from ._univariate_modular import _GcdSearch, _next_gcd_candidate, _univariate_gcd
+from .monomial import MonomialOrder
+from ._sparse_gcd import _sparse_gcd
 from ._multivariate_gcd import _deflation, _deflates, _scaled, _image_coprime
 from .primes import prime, _residue, _merge_residue, _symmetric
 
@@ -75,6 +77,25 @@ def _content[C: CoefficientRing](p: SparsePoly[C], variable: Int64, mut budget: 
     return result^
 
 
+def _dense_in_total_degree[C: CoefficientRing](p: SparsePoly[C], n: Int, mut budget: Budget) raises PolyError -> Bool:
+    """Whether p has at least 3/5 of the C(d + n, n) monomials of degree at most its total degree d."""
+    var d = 0
+    for t in p.terms:
+        budget.charge(1)
+        var total = 0
+        for pair in t.monomial.pairs:
+            total += Int(pair[1])
+        d = max(d, total)
+    # C(d + n, n) built incrementally; stop once it exceeds 5/3 of the term count.
+    var count = 1
+    var limit = (5 * len(p.terms)) // 3
+    for i in range(1, n + 1):
+        count = count * (d + i) // i
+        if count > limit:
+            return False
+    return True
+
+
 def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budget: Budget) raises PolyError -> SparsePoly[C]:
     f._same(h, budget)
     if f.is_zero():
@@ -109,6 +130,12 @@ def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budge
                 return _normalized(_scaled(deflated, variables, exponents, True, budget), budget)
             if _image_coprime(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variable, variables, budget):
                 return _normalized(_gcd_value(_content(f, variable, budget), _content(h, variable, budget), budget), budget)
+            # Sparse modular interpolation, unless both inputs fill most of their
+            # total-degree box, where the subresultant PRS measures faster.
+            if not (_dense_in_total_degree(f, len(variables), budget) and _dense_in_total_degree(h, len(variables), budget)):
+                var lex = MonomialOrder(MonomialOrder.LEX, variables.copy(), budget)
+                var modular = _sparse_gcd(rebind[SparsePoly[ZZ]](f).reorder(lex, budget), rebind[SparsePoly[ZZ]](h).reorder(lex, budget), budget)
+                return _normalized(rebind_var[SparsePoly[C]](modular.reorder(f.order, budget)), budget)
     var cf = _content(f, variable, budget)
     var ch = _content(h, variable, budget)
     var common = _gcd_value(cf, ch, budget)
