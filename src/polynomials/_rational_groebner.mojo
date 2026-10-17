@@ -1220,10 +1220,9 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
                 if certifications >= _CERTIFY_LIMIT:
                     return None
                 # The images may follow an unlucky recorded run: record anew,
-                # so that differing leading monomials can show.
+                # so that differing leading monomials can show. The lanes
+                # were emptied before certifying.
                 learned = False
-                ahead = _LaneBases()
-                ahead_primes = List[UInt64]()
             candidate = None
         if lane >= 0:
             images.add_lane(trace.steps[len(trace.steps) - 1], generation, ahead, lane, p, budget)
