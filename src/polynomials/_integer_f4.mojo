@@ -33,12 +33,13 @@ from std.collections import Dict
 from std.math import max, min
 from std.sys import CompilationTarget, llvm_intrinsic
 from std.sys._assembly import inlined_assembly
+from std.ffi import external_call
 from std.time import perf_counter_ns
 from apn_mojo import Integer, div_rem_trunc, gcd as integer_gcd
 from .coefficients import ZZ, _prime
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product
 from ._f4 import _Matrix, _Store, _raw_hash
-from ._packed_groebner import _Engine, _Packed, _Term, _div
+from ._packed_groebner import _Engine, _Packed, _Term, _div, _packed
 
 comptime _SLACK = 16
 """Bits of growth a widened row leaves room for before it is measured again."""
@@ -200,6 +201,40 @@ struct _Coefficients(Movable):
             self.twos.append(twos)
             self.inverses.append(inverse)
             self.leads.append(lead.copy())
+
+    def release[W: Int](self, mut engine: _Engine[ZZ, W, True], store: _Store[W]):
+        """Drop the engine's coefficients, which these limbs repeat, and the term lists `store.release` drops; `restore` gives them back."""
+        store.release(engine)
+        for ref p in engine.polys:
+            for ref t in p:
+                t.coefficient = ZZ(Integer(0))
+
+    def restore[W: Int](self, mut engine: _Engine[ZZ, W, True], store: _Store[W], mut budget: Budget) raises PolyError:
+        """Undo `release`: each coefficient from its limbs, each dropped term list from the store's exponent bytes."""
+        for g in range(len(engine.polys)):
+            var n = len(self.starts[g]) - 1
+            if len(engine.polys[g]) == 0:
+                _allocation[_Term[ZZ, W]](n, budget)
+                var p = List[_Term[ZZ, W]](capacity=n)
+                for k in range(n - 1, -1, -1):
+                    p.append(_Term[ZZ, W](_packed(store.keys[g][k].cast[DType.uint32]()), ZZ(Integer(0))))
+                engine.polys[g] = p^
+            ref limbs = self.limbs[g]
+            ref starts = self.starts[g]
+            for k in range(n):
+                budget.charge(UInt64(starts[k + 1] - starts[k] + 1))
+                var used = starts[k + 1] - starts[k]
+                var value: Integer
+                if used == 1 and limbs[starts[k]] < (UInt64(1) << 63):
+                    var word = Int64(limbs[starts[k]])
+                    value = Integer(-word if self.negative[g][k] else word)
+                else:
+                    var bytes = List[UInt8](length=8 * used, fill=0)
+                    for l in range(used):
+                        comptime for shift in range(8):
+                            bytes[8 * l + shift] = UInt8((limbs[starts[k] + l] >> UInt64(8 * shift)) & 0xFF)
+                    value = Integer.from_bytes(bytes, negative=self.negative[g][k])
+                engine.polys[g][n - 1 - k].coefficient = ZZ(value^)
 
 
 struct _Row(Movable):
@@ -1435,6 +1470,14 @@ def _limbs_of(value: Integer) -> List[UInt64]:
     return limbs^
 
 
+def _trim():
+    """Return freed heap memory to the system: the elements just released are
+    many small blocks, which the allocator would otherwise keep through the
+    certificate's peak (with glibc only)."""
+    comptime if CompilationTarget.is_linux():
+        _ = external_call["malloc_trim", Int32](0)
+
+
 def _pairs_reduce_to_zero[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget) raises PolyError -> Bool:
     """Whether the S-polynomial of every pending pair reduces to zero against the active elements, exactly.
 
@@ -1471,6 +1514,10 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
     var store = _Store[W]()
     store.extend(engine, budget)
     var coefficients = _Coefficients(engine, budget)
+    # The pairs need the elements only as limbs and store entries: the
+    # engine's copies are dropped for the peak, and restored on return.
+    coefficients.release(engine, store)
+    _trim()
     var images = _PairPrimes(coefficients, primes, budget)
     var counts = List[Int](length=10, fill=0)
     # With `_CERT_STATS`: nanoseconds in passes and in proofs, attempts, fractions, slots combined.
@@ -1568,6 +1615,7 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
             var terms = 0
             var t = _clock()
             if not _reduces(row, matrix, pivot, coefficients, a, b, quotient, terms, budget):
+                coefficients.restore(engine, store, budget)
                 return _Routes(False, modular, exact, used, counts.copy())
             var e = _exact_cost(Int(before - budget.remaining()), terms, ncols - Int(matrix.entries[matrix.starts[a]]))
             counts[8] += e
@@ -1577,6 +1625,7 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
                 sample_exact += e
                 # The modular route's cost: its attempt, and the exact check after a failure.
                 sample_modular += spent + (e if exactly else 0)
+    coefficients.restore(engine, store, budget)
     return _Routes(True, modular, exact, used, counts.copy())
 
 

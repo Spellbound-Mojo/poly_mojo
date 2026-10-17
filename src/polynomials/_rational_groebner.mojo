@@ -35,6 +35,8 @@ certified, and setting h = 1 then gives the basis of the input ideal.
    (d) every element is monic and no tail monomial is divisible by a leading
        monomial, so G is the reduced basis of J.
    Correctness never depends on a prime being lucky; bad primes cost time.
+   The images are freed once a candidate goes to certification, so that
+   they do not add to its peak memory; after a failure they start over.
    If reconstruction needs more than `_PRIME_LIMIT` primes or certification
    fails `_CERTIFY_LIMIT` times, J is computed exactly instead: the packed
    engine runs fraction-free Buchberger on the homogenized inputs, degree by
@@ -1214,7 +1216,13 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
                 trace = _Trace[W]()
                 ahead = _LaneBases()
                 ahead_primes = List[UInt64]()
-                var certified = _certify(kind, inputs, images.written(candidate.take(), budget), budget)
+                var written = images.written(candidate.take(), budget)
+                # Nor the images, once the candidate is written out: their
+                # residues are freed for the certificate's peak, and a
+                # failure starts them over.
+                images.reset()
+                attempt = 1
+                var certified = _certify(kind, inputs, written^, budget)
                 if certified:
                     return certified.take()
                 if certifications >= _CERTIFY_LIMIT:
