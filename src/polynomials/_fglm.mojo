@@ -1,4 +1,4 @@
-"""FGLM: the reduced LEX basis of a zero-dimensional ideal from its GREVLEX basis, over a prime field.
+"""FGLM: the reduced LEX basis of a zero-dimensional ideal from its GREVLEX basis, over a prime field and over QQ.
 
 A zero-dimensional ideal I leaves finitely many standard monomials, the D
 monomials no GREVLEX leading monomial divides, and they are a basis of the
@@ -19,10 +19,35 @@ form is M_k applied to w's, all of whose columns come earlier. Only a
 monomial all of whose divisors by one variable are standard can be neither,
 and that is a leading monomial of the reduced basis.
 
-The linear algebra is dense on D entries, so the cost grows as n D^3 for n
-variables. `_fglm` declines (None) for an ideal that is not zero-dimensional
-or has more than `_FGLM_LIMIT` standard monomials; the caller then computes
-the LEX basis directly.
+The walk reduces each new normal form by the earlier rows in 64-bit sums
+kept below p^2 and records the multiple of each row it takes out; only for
+the few monomials that turn out dependent is their combination of the LEX
+standard monomials rebuilt from those multiples. The linear algebra is dense
+on D entries, so the cost grows as n D^3 for n variables. `_fglm` declines
+(None) for an ideal that is not zero-dimensional or has more than
+`_FGLM_LIMIT` standard monomials; the caller then computes the LEX basis
+directly.
+
+Over QQ (`_fglm_rational`) the GREVLEX basis G of I comes from the certified
+multimodular computation. Its primitive integer elements modulo primes above
+2^31, made monic, are converted by FGLM, and the LEX images are combined
+and reconstructed as for GREVLEX bases (`_Images`), each candidate checked
+against the next prime's image. With certification, a candidate C is proved
+to be the reduced LEX basis of I in three steps, by fraction-free reduction
+in the packed engine, which never reduces C's long elements by G:
+
+1. Every element of G reduces to zero modulo C, so I lies in the ideal J
+   that C generates.
+2. The S-polynomial of every two elements of C whose leading monomials share
+   a variable reduces to zero modulo C; those of coprime ones always do. So
+   C is a Groebner basis of J, and dim R/J is the number of monomials that
+   C's leading monomials leave.
+3. That number is D = dim R/I, counted from G's leading monomials. So R/I,
+   which maps onto R/J since I lies in J, has the same finite dimension,
+   the map is an isomorphism, and J = I.
+
+C is reduced and monic by construction, so it is then the reduced LEX basis.
+A candidate that fails any step is not returned.
 """
 from std.math import max, min
 from .coefficients import ModInt, Modulus, NoContext, QQ, ZZ
