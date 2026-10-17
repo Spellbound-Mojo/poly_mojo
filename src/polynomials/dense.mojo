@@ -5,7 +5,8 @@ from .coefficients import CoefficientRing, ModInt, ZZ
 from .monomial import Monomial, MonomialOrder
 from .sparse import Term, SparsePoly
 from ._ntt import _ntt_product
-from ._nmod import _Field, _field, _to, _from, _mul as _residue_mul
+from ._nmod import _Field, _field, _from, _mulm, _uses_transform, _mul as _residue_mul
+from ._ntt import _modular_product
 
 comptime KARATSUBA_THRESHOLD = 32
 """The measured Karatsuba threshold for arbitrary-precision coefficients."""
@@ -25,15 +26,35 @@ def _residue_product[C: CoefficientRing](a: _CoefficientView[C, _], b: _Coeffici
         return None
     var f = _field(lead.modulus)
     _allocation[UInt64](_sum(len(a), len(b)), budget)
+    # Transforms take plain residues; Montgomery form serves only Karatsuba
+    # and schoolbook. Canonical residues need no reduction before either.
+    var plain = _uses_transform(min(len(a), len(b)), f.p)
     var x = List[UInt64](capacity=len(a))
     for i in range(len(a)):
-        x.append(_to(rebind[ModInt](a[i]).value, f))
+        var v = rebind[ModInt](a[i]).value
+        x.append(v if plain else _mulm(v, f.r2, f))
+    var y = List[UInt64]()
+    if not square:
+        y.reserve(len(b))
+        for i in range(len(b)):
+            var v = rebind[ModInt](b[i]).value
+            y.append(v if plain else _mulm(v, f.r2, f))
+    if plain:
+        var values: List[UInt64]
+        if square:
+            values = _modular_product(x, x, len(a) + len(b) - 1, f.p, True, budget)
+        else:
+            values = _modular_product(x, y, len(a) + len(b) - 1, f.p, False, budget)
+        while len(values) and values[len(values) - 1] == 0:
+            _ = values.pop()
+        _allocation[C](len(values), budget)
+        var result = List[C](capacity=len(values))
+        for v in values:
+            result.append(rebind_var[C](lead._with_residue(v)))
+        return result^
     if square:
         # One list for both operands lets the kernels take their square paths.
         return _residues[C](lead, _residue_mul(x, x, f, budget), f, budget)
-    var y = List[UInt64](capacity=len(b))
-    for i in range(len(b)):
-        y.append(_to(rebind[ModInt](b[i]).value, f))
     return _residues[C](lead, _residue_mul(x, y, f, budget), f, budget)
 
 
