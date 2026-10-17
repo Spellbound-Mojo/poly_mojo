@@ -1,6 +1,7 @@
 """Exact scalar operations for shared coefficient-vector algorithms."""
 from ._toolkit_ops import _ScalarOps, _convolve_values
-from .coefficients import CoefficientRing, ModInt
+from .coefficients import CoefficientRing, ModInt, ZZ, QQ
+from ._ntt import _ntt_low_product
 from .dense import _karatsuba, _slice
 from ._coefficient_ops import _exact, _copy
 from .evaluate import _natural
@@ -69,6 +70,12 @@ def _exact_product[C: CoefficientRing](a: _CoefficientView[C, _], b: _Coefficien
     var nb = min(length, len(b))
     if min(na, nb) < 64:
         return _convolve_values[_ExactOps[C]](_view(a), _view(b), length, context, budget)
+    comptime if C == ModInt or C == ZZ or C == QQ:
+        # Rational operands first pay for a common denominator and its gcds.
+        if C != QQ or min(na, nb) >= 128:
+            var transformed = _transform_product(a, b, na, nb, length, budget)
+            if transformed:
+                return transformed.take()
     _allocation[_LowProduct[C]](1, budget)
     var tasks = List[_LowProduct[C]]()
     tasks.append(_LowProduct[C](_slice(_view(a), 0, na, budget), _slice(_view(b), 0, nb, budget), length, 0))
@@ -122,6 +129,30 @@ def _exact_product[C: CoefficientRing](a: _CoefficientView[C, _], b: _Coefficien
             tasks.append(_LowProduct[C](a1^, b0^, n - k, 0))
             tasks.append(_LowProduct[C](a0^, b1^, n - k, 0))
     return answers.pop()
+
+
+def _transform_product[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _], na: Int, nb: Int, length: Int, mut budget: Budget) raises PolyError -> Optional[List[C]]:
+    """The work-stack product's exact output by transforms, or None when they do not apply.
+
+    The work stack returns n = min(length, na + nb - 1) coefficients when n is
+    at most max(na, nb); otherwise its full product loses trailing zeros
+    before truncation to n. The transform result keeps both shapes.
+    """
+    var full = na + nb - 1
+    var n = min(length, full)
+    if n <= max(na, nb):
+        return _ntt_low_product(a, b, length, budget)
+    var values = _ntt_low_product(a, b, full, budget)
+    if not values:
+        return None
+    var result = values.take()
+    while len(result) and result[len(result) - 1].is_zero():
+        budget.charge(1)
+        _ = result.pop()
+    while len(result) > n:
+        budget.charge(1)
+        _ = result.pop()
+    return result^
 
 
 def _use_newton[C: CoefficientRing](length: Int, divisor_length: Int) -> Bool:

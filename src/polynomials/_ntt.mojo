@@ -13,9 +13,9 @@ Every choice depends only on operand lengths and coefficient sizes, and work
 is charged before it is done, so budgets stay deterministic.
 """
 from .coefficient_buffer import _CoefficientView, _view
-from .coefficients import CoefficientRing, ZZ, ModInt, _mod_mul
+from .coefficients import CoefficientRing, ZZ, QQ, ModInt, _mod_mul
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product, _sum
-from apn_mojo import Integer
+from apn_mojo import Integer, Rational, lcm
 
 comptime _PRIME_COUNT = 48
 comptime _PRIMES: Array[UInt64, _PRIME_COUNT] = [
@@ -1013,3 +1013,188 @@ def _ntt_product[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientV
         return _ntt_modular(a, b, square, budget)
     else:
         return None
+
+
+# ------------------------------------------------- truncated and middle products
+
+def _range_length(la: Int, lb: Int, lo: Int, hi: Int) -> Int:
+    """A transform length whose cyclic convolution keeps coefficients lo ..< hi of an la by lb product intact.
+
+    Index j >= n wraps to j - n, which lands in lo ..< hi only when j >= n + lo,
+    so n >= max(hi, la + lb - 1 - lo) suffices.
+    """
+    return _transform_length(max(hi, la + lb - 1 - lo, 1))
+
+
+def _modular_range(a: List[UInt64], b: List[UInt64], lo: Int, hi: Int, p: UInt64, mut budget: Budget) raises PolyError -> List[UInt64]:
+    """Coefficients lo ..< hi of a * b modulo p, for residues below p < 2^62."""
+    var convolver = _Convolver(p, _range_length(len(a), len(b), lo, hi), budget)
+    var square = a == b
+    var ta = convolver.transform(a, budget)
+    var full: List[UInt64]
+    if square:
+        full = convolver.multiply(ta, ta, hi, budget)
+    else:
+        full = convolver.multiply(ta, convolver.transform(b, budget), hi, budget)
+    var out = List[UInt64](capacity=hi - lo)
+    for i in range(lo, hi):
+        out.append(full[i])
+    return out^
+
+
+def _zz_range[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _], lo: Int, hi: Int, mut budget: Budget) raises PolyError -> Optional[List[C]]:
+    """Coefficients lo ..< hi of a * b over ZZ, or None when they need more primes than the table holds."""
+    var square = len(a) == len(b) and _same_zz(a, b)
+    var bits_a = _bits_zz(a)
+    var bits = bits_a + (bits_a if square else _bits_zz(b)) + _bit_length(min(len(a), len(b))) + 1
+    var k = (bits + _PRIME_BITS - 1) // _PRIME_BITS
+    var n = _range_length(len(a), len(b), lo, hi)
+    if k > _PRIME_COUNT or n > (1 << 30):
+        return None
+    _charge_transforms(k, n, square, budget)
+    _allocation[UInt64](_product(k, hi), budget)
+    var left = _residues_zz(a, k, n, budget)
+    var right = List[List[UInt64]]() if square else _residues_zz(b, k, n, budget)
+    var residues = List[List[UInt64]](capacity=k)
+    for p in range(k):
+        var x = List[UInt64]()
+        swap(x, left[p])
+        var y = List[UInt64]()
+        if not square:
+            swap(y, right[p])
+        var column = _convolve(x^, y^, hi, square, p, n)
+        var kept = List[UInt64](capacity=hi - lo)
+        for i in range(lo, hi):
+            kept.append(column[i])
+        residues.append(kept^)
+    return _reconstruct_zz[C](residues, k, hi - lo, budget)
+
+
+def _same_zz[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _]) -> Bool:
+    for i in range(len(a)):
+        if not (rebind[ZZ](a[i]) == rebind[ZZ](b[i])):
+            return False
+    return True
+
+
+def _scaled_zz[C: CoefficientRing](values: _CoefficientView[C, _], mut budget: Budget) raises PolyError -> Tuple[List[ZZ], Integer]:
+    """QQ values as integers over their least common denominator, and that denominator."""
+    var common = Integer(1)
+    for i in range(len(values)):
+        ref v = rebind[QQ](values[i]).value
+        _charge_size(rebind[QQ](values[i]).size(), budget)
+        var d = v.denominator()
+        if not (d == Integer(1)):
+            try:
+                common = lcm(common, d)
+            except e:
+                raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    _allocation[ZZ](len(values), budget)
+    var out = List[ZZ](capacity=len(values))
+    for i in range(len(values)):
+        ref v = rebind[QQ](values[i]).value
+        try:
+            out.append(ZZ(v.numerator() * (common // v.denominator())))
+        except e:
+            raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    return (out^, common^)
+
+
+def _ring_range[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _], lo: Int, hi: Int, mut budget: Budget) raises PolyError -> Optional[List[C]]:
+    """Coefficients lo ..< hi of a * b for nonempty ModInt, ZZ or QQ operands, or None."""
+    comptime if C == ModInt:
+        ref lead = rebind[ModInt](a[0])
+        var x = List[UInt64](capacity=len(a))
+        for i in range(len(a)):
+            x.append(rebind[ModInt](a[i]).value)
+        var y = List[UInt64](capacity=len(b))
+        for i in range(len(b)):
+            y.append(rebind[ModInt](b[i]).value)
+        var values = _modular_range(x, y, lo, hi, lead.modulus, budget)
+        _allocation[C](hi - lo, budget)
+        var result = List[C](capacity=hi - lo)
+        for v in values:
+            result.append(rebind_var[C](lead._with_residue(v)))
+        return result^
+    elif C == ZZ:
+        return _zz_range(a, b, lo, hi, budget)
+    elif C == QQ:
+        var left = _scaled_zz(a, budget)
+        var right = _scaled_zz(b, budget)
+        var integers = _zz_range(_view(left[0]), _view(right[0]), lo, hi, budget)
+        if not integers:
+            return None
+        var denominator: Integer
+        try:
+            denominator = left[1] * right[1]
+        except e:
+            raise PolyError(PolyErrorKind.CAPACITY, String(e))
+        _allocation[C](hi - lo, budget)
+        var result = List[C](capacity=hi - lo)
+        for c in integers.value():
+            _charge_size(c.size(), budget)
+            try:
+                result.append(rebind_var[C](QQ(Rational(c.value, denominator))))
+            except e:
+                raise PolyError(PolyErrorKind.CAPACITY, String(e))
+        return result^
+    else:
+        return None
+
+
+def _ntt_low_product[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _], length: Int, mut budget: Budget) raises PolyError -> Optional[List[C]]:
+    """The first min(length, len(a) + len(b) - 1) coefficients of a * b, untrimmed, by transforms.
+
+    Covers ModInt, ZZ and QQ (scaled to ZZ by common denominators); None for
+    other rings, and when ZZ or scaled QQ coefficients need more than the
+    table's primes.
+    """
+    var la = min(len(a), length)
+    var lb = min(len(b), length)
+    if la == 0 or lb == 0:
+        return List[C]()
+    var n = min(length, la + lb - 1)
+    var pa = _view_prefix(a, la)
+    var pb = _view_prefix(b, lb)
+    return _ring_range(_view(pa), _view(pb), 0, n, budget)
+
+
+def _ntt_middle_product[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _], lo: Int, hi: Int, mut budget: Budget) raises PolyError -> Optional[List[C]]:
+    """Coefficients lo ..< hi of a * b (zero beyond the product), by one cyclic transform where the wrap allows.
+
+    Covers the same rings as _ntt_low_product, with the same None rule.
+    """
+    if lo < 0 or hi < lo:
+        raise PolyError(PolyErrorKind.DOMAIN, "invalid middle product range")
+    var la = min(len(a), hi)
+    var lb = min(len(b), hi)
+    if la == 0 or lb == 0 or hi == lo:
+        return _zeros_like(a, b, hi - lo)
+    var top = min(hi, la + lb - 1)
+    if top <= lo:
+        return _zeros_like(a, b, hi - lo)
+    var pa = _view_prefix(a, la)
+    var pb = _view_prefix(b, lb)
+    var values = _ring_range(_view(pa), _view(pb), lo, top, budget)
+    if not values:
+        return None
+    var result = values.take()
+    while len(result) < hi - lo:
+        result.append(C.zero(a[0].context()))
+    return result^
+
+
+def _zeros_like[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _], count: Int) -> Optional[List[C]]:
+    var result = List[C]()
+    if count and (len(a) or len(b)):
+        var ctx = a[0].context() if len(a) else b[0].context()
+        for _ in range(count):
+            result.append(C.zero(ctx))
+    return result^
+
+
+def _view_prefix[C: CoefficientRing](values: _CoefficientView[C, _], n: Int) -> List[C]:
+    var out = List[C](capacity=n)
+    for i in range(n):
+        out.append(values[i].copy())
+    return out^
