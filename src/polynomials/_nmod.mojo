@@ -343,8 +343,17 @@ def _gcd(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) raises
 comptime _SPECTRAL = 128
 """Modulus degree from which reductions, modular products and compositions
 keep their fixed operands as transforms modulo one transform prime."""
+comptime _SPECTRAL_SMALL = 64
+"""The same, when the vectorized 32-bit transform prime holds the sums."""
 comptime _SPECTRAL_BOUND = UInt128(1) << 61
 """Every transform prime exceeds 2^61: exact integer coefficients below it survive."""
+
+
+def _spectral_from(f: _Field, terms: Int) -> Int:
+    """The modulus degree from which fixed operands are kept as transforms: lower when the 32-bit transform prime holds the sums."""
+    if UInt128(f.p - 1) * UInt128(f.p - 1) * UInt128(terms) < UInt128(_SMALL_Q):
+        return _SPECTRAL_SMALL
+    return _SPECTRAL
 
 
 def _spectral_ok(f: _Field, terms: Int) -> Bool:
@@ -653,7 +662,7 @@ def _modulus(f: List[UInt64], field: _Field, mut budget: Budget) raises PolyErro
     var g = _reversed(buffer, len(buffer), budget)
     _trim(g)
     var spectra = Optional[ArcPointer[_ModulusSpectra]](None)
-    if n >= _SPECTRAL and _spectral_ok(field, n + 1):
+    if n >= _spectral_from(field, 2 * n + 2) and _spectral_ok(field, n + 1):
         # Distinct-degree interval factors have entries below 2p: 2n + 2 terms.
         var spectral = _Spectral(_transform_length(2 * n), field, 2 * n + 2, budget)
         var tf = spectral.forward(f, budget)
@@ -781,7 +790,7 @@ def _composer(h: List[UInt64], m: _Modulus, field: _Field, mut budget: Budget) r
         giants.append(_mulmod(giants[j - 1], powers[block], m, field, budget))
     var spectra = Optional[ArcPointer[_ComposerSpectra]](None)
     # A composition sums `blocks` products of at most n terms each.
-    if n >= _SPECTRAL and _spectral_ok(field, _product(blocks, n)):
+    if n >= _spectral_from(field, _product(blocks, n)) and _spectral_ok(field, _product(blocks, n)):
         var spectral = _Spectral(_transform_length(2 * n), field, _product(blocks, n), budget)
         var transforms = List[List[UInt64]](capacity=blocks)
         for j in range(blocks):
