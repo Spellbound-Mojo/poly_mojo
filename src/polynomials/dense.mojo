@@ -19,6 +19,39 @@ comptime _RESIDUE_THRESHOLD = 16
 """The shorter operand length from which odd prime-field products run on native Montgomery residues."""
 
 
+def _word_residues[C: CoefficientRing](values: _CoefficientView[C, _]) -> List[UInt64]:
+    """The ModInt residues, read run by run."""
+    var out = List[UInt64](capacity=len(values))
+    var i = 0
+    while i < len(values):
+        var run = values._run(i)
+        for j in range(len(run)):
+            out.append(rebind[ModInt](run[j]).value)
+        i += len(run)
+    return out^
+
+
+def _equal_residues[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _]) -> Bool:
+    """Whether two ModInt coefficient views hold the same values; shared storage answers at once."""
+    if len(a) != len(b):
+        return False
+    if not len(a):
+        return True
+    var i = 0
+    while i < len(a):
+        var left = a._run(i)
+        var right = b._run(i)
+        var count = min(len(left), len(right))
+        if left.unsafe_ptr() == right.unsafe_ptr():
+            i += count
+            continue
+        for j in range(count):
+            if rebind[ModInt](left[j]).value != rebind[ModInt](right[j]).value:
+                return False
+        i += count
+    return True
+
+
 def _residue_product[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _], square: Bool, mut budget: Budget) raises PolyError -> Optional[List[C]]:
     """The product over an odd prime field by the native residue kernels (SIMD schoolbook, Karatsuba, transforms), or None for p = 2."""
     ref lead = rebind[ModInt](a[0])
@@ -29,16 +62,13 @@ def _residue_product[C: CoefficientRing](a: _CoefficientView[C, _], b: _Coeffici
     # Transforms take plain residues; Montgomery form serves only Karatsuba
     # and schoolbook. Canonical residues need no reduction before either.
     var plain = _uses_transform(min(len(a), len(b)), f.p)
-    var x = List[UInt64](capacity=len(a))
-    for i in range(len(a)):
-        var v = rebind[ModInt](a[i]).value
-        x.append(v if plain else _mulm(v, f.r2, f))
-    var y = List[UInt64]()
-    if not square:
-        y.reserve(len(b))
-        for i in range(len(b)):
-            var v = rebind[ModInt](b[i]).value
-            y.append(v if plain else _mulm(v, f.r2, f))
+    var x = _word_residues(a)
+    var y = List[UInt64]() if square else _word_residues(b)
+    if not plain:
+        for i in range(len(x)):
+            x.unsafe_get(i) = _mulm(x.unsafe_get(i), f.r2, f)
+        for i in range(len(y)):
+            y.unsafe_get(i) = _mulm(y.unsafe_get(i), f.r2, f)
     if plain:
         var values: List[UInt64]
         if square:
@@ -431,7 +461,7 @@ struct DensePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
         var shorter = min(len(self.coefficients), len(other.coefficients))
         comptime if Self.C == ModInt:
             if shorter >= _RESIDUE_THRESHOLD:
-                var product = _residue_product(_view(self.coefficients), _view(other.coefficients), self.coefficients == other.coefficients, budget)
+                var product = _residue_product(_view(self.coefficients), _view(other.coefficients), _equal_residues(_view(self.coefficients), _view(other.coefficients)), budget)
                 if product:
                     return Self._from_canonical(self.variable, self.ring, product.take())
         comptime if Self.C == ZZ or Self.C == ModInt:
