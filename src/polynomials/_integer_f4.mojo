@@ -2005,6 +2005,8 @@ struct _Basis(Movable):
     var basis: List[UInt64]
     var digits: List[UInt64]
     """The e_i in 32-bit digits, 2 `limbs` each."""
+    var qdigits: List[UInt64]
+    """Q in 32-bit digits, 2 `limbs` + 2 of them, the top ones zero."""
     var weights: List[Float64]
     var limbs: Int
     var modulus: Integer
@@ -2044,6 +2046,12 @@ struct _Basis(Movable):
         for limb in self.basis:
             self.digits.append(limb & 0xFFFFFFFF)
             self.digits.append(limb >> 32)
+        self.qdigits = List[UInt64](capacity=2 * self.limbs + 2)
+        for limb in self.product:
+            self.qdigits.append(limb & 0xFFFFFFFF)
+            self.qdigits.append(limb >> 32)
+        self.qdigits.append(0)
+        self.qdigits.append(0)
         var bytes = List[UInt8](length=8 * self.limbs, fill=0)
         for l in range(self.limbs):
             comptime for shift in range(8):
@@ -2096,26 +2104,54 @@ struct _Basis(Movable):
                 high = x >> 32
             var column = columns.unsafe_offset(_CERT_LANES * digits)
             column.unsafe_store[width=_CERT_LANES](column.unsafe_load[width=_CERT_LANES]() + high)
-        var carry = _CertLanes(0)
+        # Less m Q, m the estimate of floor(sum r_i c_i / p_i), in every lane
+        # at once, carries kept signed. The estimate's error is far below one,
+        # so the value lies in [-Q, 2Q): add Q where it is negative, then
+        # subtract Q where it is not below Q.
+        # m is below k 2^31: as m1 2^16 + m0, digit d of m Q is m0 q_d plus the
+        # low 16 bits of m1 q_d shifted up and the high bits of m1 q_(d-1),
+        # every product below 2^51.
+        var low = mask.cast[DType.int64]()
+        var m = estimate.cast[DType.int64]()
+        var m0 = m & 0xFFFF
+        var m1 = m >> 16
+        var carry = SIMD[DType.int64, _CERT_LANES](0)
+        var below = SIMD[DType.int64, _CERT_LANES](0)
         for d in range(digits + 2):
-            var x = columns.unsafe_offset(_CERT_LANES * d).unsafe_load[width=_CERT_LANES]() + carry
-            columns.unsafe_offset(_CERT_LANES * d).unsafe_store[width=_CERT_LANES](x & mask)
-            carry = x >> 32
+            var at = columns.unsafe_offset(_CERT_LANES * d)
+            var q = Int64(self.qdigits.unsafe_get(d))
+            var upper = m1 * q
+            var t = at.unsafe_load[width=_CERT_LANES]().cast[DType.int64]() + carry - m0 * q - ((upper & 0xFFFF) << 16) - below
+            below = upper >> 16
+            at.unsafe_store[width=_CERT_LANES]((t & low).cast[DType.uint64]())
+            carry = t >> 32
+        var negative = carry.lt(0)
+        carry = SIMD[DType.int64, _CERT_LANES](0)
+        for d in range(digits + 2):
+            var at = columns.unsafe_offset(_CERT_LANES * d)
+            var t = at.unsafe_load[width=_CERT_LANES]().cast[DType.int64]() + carry + negative.select(SIMD[DType.int64, _CERT_LANES](Int64(self.qdigits.unsafe_get(d))), SIMD[DType.int64, _CERT_LANES](0))
+            at.unsafe_store[width=_CERT_LANES]((t & low).cast[DType.uint64]())
+            carry = t >> 32
+        # The borrow of x - Q says where x is below Q.
+        var borrow = SIMD[DType.int64, _CERT_LANES](0)
+        for d in range(digits + 2):
+            var t = columns.unsafe_offset(_CERT_LANES * d).unsafe_load[width=_CERT_LANES]().cast[DType.int64]() + borrow - Int64(self.qdigits.unsafe_get(d))
+            borrow = t >> 32
+        var above = borrow.ge(0)
+        borrow = SIMD[DType.int64, _CERT_LANES](0)
+        for d in range(digits + 2):
+            var at = columns.unsafe_offset(_CERT_LANES * d)
+            var t = at.unsafe_load[width=_CERT_LANES]().cast[DType.int64]() + borrow - above.select(SIMD[DType.int64, _CERT_LANES](Int64(self.qdigits.unsafe_get(d))), SIMD[DType.int64, _CERT_LANES](0))
+            at.unsafe_store[width=_CERT_LANES]((t & low).cast[DType.uint64]())
+            borrow = t >> 32
         var n = self.limbs + 2
         for lane in range(_CERT_LANES):
             var data = work.unsafe_ptr().unsafe_offset(lane * n)
             for l in range(self.limbs + 1):
-                var low = columns.unsafe_offset(_CERT_LANES * 2 * l + lane).unsafe_load()
-                var high = columns.unsafe_offset(_CERT_LANES * (2 * l + 1) + lane).unsafe_load()
-                data.unsafe_offset(l).unsafe_store(low | (high << 32))
+                var low_digit = columns.unsafe_offset(_CERT_LANES * 2 * l + lane).unsafe_load()
+                var high_digit = columns.unsafe_offset(_CERT_LANES * (2 * l + 1) + lane).unsafe_load()
+                data.unsafe_offset(l).unsafe_store(low_digit | (high_digit << 32))
             data.unsafe_offset(self.limbs + 1).unsafe_store(0)
-            var m = UInt64(estimate[lane])
-            if m:
-                _sub_mul_1(data, n, m, self.product.unsafe_ptr(), self.limbs)
-            while (data.unsafe_offset(n - 1).unsafe_load() >> 63) != 0:
-                _add_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
-            while not self._below(data):
-                _sub_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
 
     def _below(self, data: Pointer[mut=False, UInt64, _]) -> Bool:
         """Whether the nonnegative limbs + 2 limbs at data are below Q."""
