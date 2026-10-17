@@ -2,6 +2,7 @@
 from polynomials import Budget, PolyErrorKind, ModInt, Modulus, DensePoly, MonomialOrder, factor_mod_p, divmod
 from support.corpus import read_cases, parse_polynomial, as_mod
 from support.check import Checker
+from polynomials._nmod import _field, _to, _modulus, _Modulus, _rem, _mulmod, _composer, _Composer, _compose
 
 
 def exhaustive(prime: UInt64, mut c: Checker) raises:
@@ -121,6 +122,99 @@ def large_prime(mut c: Checker) raises:
             c.check(factor_mod_p(f, work, UInt64(seed)) == first, "62-bit prime factors are seed independent")
 
 
+def _power_mod(a: UInt64, e: UInt64, p: UInt64) -> UInt64:
+    var result = UInt64(1)
+    var base = a % p
+    var n = e
+    while n:
+        if n & 1:
+            result = UInt64((UInt128(result) * UInt128(base)) % UInt128(p))
+        base = UInt64((UInt128(base) * UInt128(base)) % UInt128(p))
+        n >>= 1
+    return result
+
+
+def draw(length: Int, monic: Bool, prime: UInt64, mut state: UInt64) raises -> List[UInt64]:
+    """Random native residues modulo prime, trimmed, optionally with a leading one."""
+    var field = _field(prime)
+    var out = List[UInt64]()
+    for _ in range(length):
+        state = state * 6364136223846793005 + 1442695040888963407
+        out.append(_to((state >> 17) % prime, field))
+    if monic:
+        out.append(_to(1, field))
+    while len(out) and out[len(out) - 1] == 0:
+        _ = out.pop()
+    return out^
+
+
+def spectral_kernels(mut c: Checker) raises:
+    """Reductions, products and compositions kept in transform space agree with the plain kernels."""
+    var work = Budget()
+    var state = UInt64(98765)
+    var primes: List[UInt64] = [3, 65521, 1000003]
+    for prime in primes:
+        var field = _field(prime)
+        var n = 300
+
+        var f = draw(n, True, prime, state)
+        var m = _modulus(f, field, work)
+        c.check(Bool(m.spectra), "the modulus keeps transforms")
+        var plain = _Modulus(m.f.copy(), m.inverse.copy(), None)
+        var a = draw(2 * n - 1, False, prime, state)
+        c.check(_rem(a, m, field, work) == _rem(a, plain, field, work), "transform reduction matches the plain one")
+        var x = draw(n, False, prime, state)
+        var y = draw(n, False, prime, state)
+        c.check(_mulmod(x, y, m, field, work) == _mulmod(x, y, plain, field, work), "transform modular product matches the plain one")
+        var composer = _composer(draw(n, False, prime, state), m, field, work)
+        c.check(Bool(composer.spectra), "the composer keeps transforms")
+        var flat = _Composer(composer.block, composer.columns.copy(), composer.giants.copy(), None)
+        var g = draw(n, False, prime, state)
+        c.check(_compose(g, composer, m, field, work) == _compose(g, flat, plain, field, work), "transform composition matches the plain one")
+
+
+def planted_binomials(mut c: Checker) raises:
+    """Degree 280 over GF(65521) from planted irreducibles: distinct linears and x^r - a for primes r | p - 1 with a no r-th power."""
+    var work = Budget()
+    var prime = UInt64(65521)
+    var ctx = Modulus(prime, work)
+    var expected = List[DensePoly[ModInt]]()
+    for i in range(130):
+        expected.append(DensePoly[ModInt].from_coefficients(0, ctx, [ModInt(prime - UInt64(7 * i + 1), ctx), ModInt.one(ctx)], work))
+    for pair in [(2, 20), (3, 10), (5, 6), (7, 4), (13, 2)]:
+        var r = pair[0]
+        var found = 0
+        var a = UInt64(2)
+        while found < pair[1]:
+            if _power_mod(a, (prime - 1) // UInt64(r), prime) != 1:
+                var values = List[ModInt]()
+                values.append(ModInt(prime - a, ctx))
+                for _ in range(1, r):
+                    values.append(ModInt.zero(ctx))
+                values.append(ModInt.one(ctx))
+                expected.append(DensePoly[ModInt].from_coefficients(0, ctx, values^, work))
+                found += 1
+            a += 1
+    var product = DensePoly[ModInt].from_coefficients(0, ctx, [ModInt.one(ctx)], work)
+    var degree = 0
+    for g in expected:
+        product = product.mul(g, work)
+        degree += g.degree()
+    c.check(degree == 130 + 40 + 30 + 30 + 28 + 26, "planted degree")
+    var got = factor_mod_p(product, work, 0)
+    c.check(len(got) == len(expected), "planted irreducibles over GF(65521) all split off")
+    var all = True
+    for g in expected:
+        var hit = False
+        for h in got:
+            if h == g:
+                hit = True
+        all = all and hit
+    c.check(all, "planted irreducibles over GF(65521) recovered")
+    for seed in range(1, 3):
+        c.check(factor_mod_p(product, work, UInt64(seed)) == got, "planted factors are seed independent")
+
+
 def main() raises:
     var work = Budget()
     var c = Checker("finite_field")
@@ -153,4 +247,6 @@ def main() raises:
     exhaustive(3, c)
     exhaustive(5, c)
     large_prime(c)
+    spectral_kernels(c)
+    planted_binomials(c)
     c.finish()
