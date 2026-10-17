@@ -1962,6 +1962,10 @@ def _cert_mod(v: _CertLanes, lanes: _CertPrimes) -> _CertLanes:
 comptime _PAIR_PRIMES = 128
 """Primes a pair's modular standard representation may use before the pair is reduced exactly."""
 
+comptime _RESIDUE_BYTES = 3 << 30
+"""Bytes of residues the certificate's primes may hold, with every element's
+terms modulo each prime: it caps the primes a pair may use."""
+
 comptime _FIRST_PRIMES = _CERT_LANES
 """Primes of a pair's first attempt; each later batch of `_CERT_LANES` primes makes another."""
 
@@ -2248,7 +2252,13 @@ struct _PairPrimes(Movable):
     """The CRT basis of the first `_CERT_LANES` * (i + 1) primes."""
 
     def __init__(out self, coefficients: _Coefficients, limit: Int, mut budget: Budget) raises PolyError:
-        self.limit = (limit // _CERT_LANES) * _CERT_LANES
+        # A batch holds `_CERT_LANES` residues of every term: past
+        # `_RESIDUE_BYTES` of them, pairs go to the exact check instead.
+        var terms = 0
+        for g in range(len(coefficients.starts)):
+            terms += len(coefficients.starts[g]) - 1
+        var batches = _RESIDUE_BYTES // max(_product(4 * _CERT_LANES, terms), 1)
+        self.limit = (min(limit, _CERT_LANES * batches) // _CERT_LANES) * _CERT_LANES
         self.primes = List[UInt64]()
         self.batches = List[_CertPrimes]()
         self.values = List[List[List[UInt32]]]()
