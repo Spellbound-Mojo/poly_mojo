@@ -40,6 +40,7 @@ FAMILY_TOOLS = {
                  'singular-std', 'singular-slimgb', 'singular-modstd', 'msolve'],
     'streaming': ['polymojo-decompose', 'polymojo-materialized', 'polymojo-streaming'],
     'arith': ['polymojo-arith', 'flint-arith', 'singular-arith', 'sympy-arith'],
+    'roots': ['polymojo-roots', 'flint-roots', 'flint-roots-sturm', 'sympy-roots', 'msolve-roots'],
 }
 
 
@@ -148,6 +149,8 @@ def run_case(tool, case, settings, baseline):
     else:
         rows = result['answer']
         record |= {k: result[k] for k in ('count', 'bytes') if k in result}
+        if result.get('check_ok') is False:
+            record['outcome'] = 'wrong'
     record['answer_digest'] = digest(rows)
     if tool.in_process:
         record['peak_incremental_kib'] = result['peak_kb'] - result['rss_before_kb']

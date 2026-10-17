@@ -1,0 +1,222 @@
+# Source: D. J. Wilson, CAD Example Bank (QEPCAD text), University of Bath,
+# https://researchdata.bath.ac.uk/67/2/Wilson_2012_QEPCAD_text
+# Licence: CC BY-SA 4.0. Copied verbatim below this header.
+#===================================================
+#
+#  Examples for CAD - QEPCAD file
+#   Each example is given with their inputs for
+#   QEPCAD for easy copy/pasting
+#
+#===================================================
+
+#===================================================
+# CMXY09 Examples
+# Examples sourced from "Computing Cylindrical Alg-
+# -ebraic Decomposition via Triangular Decomposition"
+
+#1: Parametric Parabola
+[Parametric Parabola]
+(a,b,c,x)
+3
+(E x)[a x^2 + b x + c = 0].
+
+#2: Whitney Umbrella
+[Whitney Umbrella]
+(x,y,z,u,v)
+3
+(E u)(E v)[[x - u v = 0] /\ [y - v = 0] /\ [z - u^2 = 0]].
+
+#3: Quartic
+[Positivity of Quartic] 
+(r,q,p,x)
+3
+(A x)[x^4 + p x^2 + q x + r >= 0].
+
+#4: Sphere and Catastrophe
+[Sphere and Catastrophe]
+(z,y,x)
+3
+[[z^2 + y^2 + x^2 - 1 = 0] /\ [z^3 + x z + y = 0]].
+
+#5: Arnon-84
+[Arnon-84]
+(x,y)
+2
+[y^4 - 2 y^3 + y^2 - 3 x^2 y + 2 x^4 = 0].
+
+#6: Arnon-84-2
+[Arnon-84-2]
+(x,y)
+2
+[[144 y^2 + 96 x^2 y + 9 x^4 + 105 x^2 + 70 x - 98 = 0] /\ [x y^2 + 6 x y + x^3 + 9 x = 0]].
+
+#7: A Real Implicitization Problem
+[A Real Implicitization Problem]
+(x,y,z,u,v)
+3
+(E u)(E v)[[x - u v = 0] /\ [y - u v^2 = 0] /\ [z - u^2 = 0]].
+
+#8: Ball and Circular Cylinder
+[Ball and Circular Cylinder]
+(z,x,y)
+0
+(E z)(E x)(E y)[[x^2 + y^2 + z^2 - 1 < 0] /\ [x^2 + (y + z - 2)^2 - 1 < 0]].
+
+#9: Termination of Term Rewrite System
+[Term Rewrite]
+(r,x,y)
+0
+(E r)(A x)(A y)[[[x - r > 0] /\ [y - r > 0]] ==> [x^2 (1 + 2 y)^2 - y^2 (1 + 2 x^2) > 0]].
+
+#10: Collins and Johnson
+[Collins and Johnson]
+(b,a,r)
+2
+(E r)[[3 a^2 r + 3 b^2 - 1 a r - a^2 - b^2 < 0] /\ [3 a^2 r + 3 b^2 r - 4 a r + r - 2 a^2 - 2 b^2 + 2 a > 0] /\ [2 a - 1 >= 0] /\ [b > 0] /\ [r > 0] /\ [r - 1 < 0]].
+
+#11: Range of Lower Bounds
+[Range of Lower Bounds]
+(y,x,a,b,c,z)
+1
+(A x)(A a)(A b)(A c)(E z)[[[a > 0] /\ [a z^2 + b z + c /= 0]] ==> [y < a x^2 + b x + c]].
+
+#12: X-axis Ellipse Problem
+[X-axis Ellipse Problem]
+(a,c,b,x,y)
+3
+(A x)(A y)[[a b /= 0] /\ [[b^2 (x - c)^2 + a^2 y^2 - a^2 b^2 = 0]==>[x^2 + y^2 - 1 <= 0]]].
+
+#13: Davenport and Heintz
+[Davenport and Heintz]
+(d,c,b,a)
+1
+(E c)(A b)(A a)[[[[a - d = 0] /\ [b - c = 0]] \/ [[a - c = 0] /\ [b - 1 = 0]]] ==> [a^2 - b = 0]].
+
+#14: Hong-90
+[Hong-90]
+(r,s,t,a,b)
+3
+(E a)(E b)[[r + s + t = 0] /\ [r s + s t + t r - a = 0] /\ [r s t - b = 0]].
+
+#15: Solotareff-3
+[Solotareff-3]
+(a,r,b,u,v)
+3
+(E u)(E v)[[r > 1] /\ [u + 1 > 0] /\ [u - v < 0] /\ [v - 1 < 0] /\ [3 u^2 + 2 r u - a = 0] /\ [3 v^2 + 2 r v - a = 0] /\ [u^3 + r u^2 - a u + a - r - 1 = 0] /\ [v^3 +r v^2 - a v - 2 b - a + r + 1 = 0]].
+
+#16: Collision Problem
+[Collision of Circle and Square]
+(t,x,y)
+0
+(E t)(E x)(E y)[[17 t - 96 >= 0] /\ [17 t - 160 <= 0] /\ [16 x - 17 t + 16 >= 0] /\ [16 x - 17 t - 16 <= 0] /\ [16 y - 17 t + 144 >= 0] /\ [16 y - 17 t + 112 <= 0] /\ [(x - t)^2 + y^2 - 1 <= 0]].
+
+#17: McCallum Trivariate Random Polynomial
+[McCallum Trivariate Random Polynomial]
+(x,y,z)
+0
+(E x)(E y)(E z)[(y - 1) z^4 + x z^3 + x (1 - y) z^2 + (y - x - 1) z + y = 0].
+
+#18: Ellipse Problem
+[Ellipse Problem]
+(a,b,c,d,x,y)
+4
+(A x)(A y)[[a b /= 0] /\ [[b^2 (x - c)^2 + a^2 (y - d)^2 - a^2 b^2 = 0] ==> [x^2 + y^2 - 1 <= 0]]].
+
+
+#===================================================
+# Branch Cut Examples
+# Examples from using CAD to deal with branch cuts
+
+
+#===================================================
+# Motion Planning Examples
+# Examples from using CAD to solve problems in robot
+# motion planning
+
+#1: Piano Mover's Problem (Davenport)
+[Piano Mover's Problem (Davenport)]
+(x,y,a,b)
+2
+(E a)(E b)[[(x - a)^2 + (y - b)^2 - 9 = 0] /\ [[y b >= 0] \/ [x (y - b)^2 + y (a - x) (y - b) >= 0]] /\ [[(y - 1) (b - 1) >= 0] \/ [(x + 1) (y - b)^2 + (y - 1) (a - x) (y - b) >= 0]] /\ [[x a >= 0] \/ [y (x - a)^2 + x (b - y) (x - a) >= 0]] /\ [[(x + 1) (a + 1) >= 0] \/ [(y - 1)(x - a)^2 + (x + 1) (b - y) (x - a) >= 0]]].
+
+#===================================================
+# Other Examples
+
+#1: Off-Center Ellipse
+[Off-Center Ellipse]
+(a,x,y)
+1
+(A x)(A y)[[a /= 0] /\ [[16 a^2 y^2 - 8 a^2 y + 4 x^2 - 4 x - 3 a^2 + 1 = 0] ==> [y^2 + x^2 - 1 <= 0]]].
+
+#2: Concentric Circles
+[Concentric Circles]
+(x,y)
+2
+[[x^2 + y^2 - 9 = 0] \/ [x^2 + y^2 - 1 = 0]].
+
+#3: Non-Concentric Circles
+[Non-Concentric Circles]
+(x,y)
+2
+[[x^2 + y^2 - 9 = 0] \/ [x^2 + (y - 1)^2 - 1 = 0]].
+
+#4: Edges Square Product
+[Edges Square Product]
+(x,y,a,b,c)
+2
+(E a)(E b)(E c)[[x = a b - c] /\ [y = a c + x + 2] /\ [0 <= a] /\ [a <= 2] /\ [2 <= b] /\ [b <= 4] /\ [-1 <= c] /\ [c <= 1] /\ [-1 <= x] /\ [x <= 9] /\ [-6 <= y] /\ [y <= 6]].
+
+#5: Simplified Edges Square Product
+[Simplified Edges Square Product]
+(x,y,a)
+2
+(E a)[[-a <= 0] /\ [a <= 2] /\ [0 <= 1 + x] /\ [x <= 9] /\ [0 <= y + 6] /\ [y <= 6] /\ [0 <= -(a^2 + 1) (-y - a x + 2 a^2 + 2)] /\ [((-x + a y) (a^2 + 1)) <= ((a^2 + 1)^2)] /\ [a^2 + 1 /= 0] /\ [0 <= (a^2 + 1) (a^2 + 1 - x + a y)] /\ [((a^2 + 1) (y + a x)) <= 4 (a^2 + 1)^2]].
+
+#6: Putnum Example
+[Putnum Example]
+(x,y,a,b,c,d)
+2
+(E a)(E b)(E c)(E d)[[a^2 + b^2 - 1 = 0] /\ [(c - 10)^2 + d^2 - 9 = 0] /\ [2 x = a + c] /\ [2 y = b + d]].
+
+#7: Simplified Putnum Example
+[Simplified Putnum Example]
+(x,y,a,d)
+2
+(E a)(E d)[[a^2 + 4 y^2 - 4 y d + d^2 - 1 = 0] /\ [4 x^2 - 4 x a - 40 x + a^2 + 20 a + 91 + d^2 = 0]].
+
+#8: YangXia
+[YangXia]
+(a,h,R,s,b,c)
+3
+(E s)(E b)(E c)[[a^2 h^2 - 4 s (s - a) (s - b) (s - c) = 0] /\ [2 R h - b c = 0] /\ [2 s - a - b - c = 0] /\ [b > 0] /\ [c > 0] /\ [R > 0] /\ [h > 0] /\ [a + b - c > 0] /\ [b + c - a > 0] /\ [c + a - b > 0]].
+
+#9: Simplified YangXia
+[Simplified YangXia]
+(R,h,a,b)
+3
+(E b)[[b /= 0] /\ [0 < R] /\ [0 < b] /\ [0 < h] /\ [4 a^2 h^2 b^4 - 2 a^2 b^6 - 8 a^2 R^2 h^2 b^2 - 8 R^2 h^2 b^4 + b^8 + a^4 b^4 + 16 R^4 h^4 = 0] /\ [0 < (a b + b^2 - 2 R h) b] /\ [0 < R h b] /\ [0 < (2 R h + a b - b^2) b] /\ [0 < (b^2 + 2 R h - a b) b]].
+
+#10: SEIT Model
+[SEIT Model]
+(b,c,d,q,r,u,v,s,F,J,T)
+7
+(E s)(E F)(E J)(E T)[[d - d s - b J s = 0] /\ [v F - (d + u) J = 0] /\ [b J + c J T - (d + v + r) F + (1 - q) u J = 0] /\ [-d T + r F + q u J - b^2 T J = 0] /\ [F > 0] /\ [J > 0] /\ [T > 0] /\ [s > 0] /\ [b > 0] /\ [d > 0] /\ [v > 0] /\ [r > 0] /\ [u > 0] /\ [q > 0] /\ [b > c]].
+
+#11: Simplified SEIT Model
+[Simplified SEIT Model]
+(b,d,v,c,u,q,r,J)
+7
+(E J)[[0 < d] /\ [0 < r] /\ [0 < u] /\ [0 < q] /\ [c < b] /\ [0 < v] /\ [0 < J] /\ [0 < b] /\ [0 < c] /\ [d + J b /= 0] /\ [-v /= 0] /\ [0 < (d + u) J v] /\ [v c /= 0] /\ [0 < d (d + J b)] /\ [0 < (d + J b) c v (-d v c + d^2 v + d^2 u + d v u q + d^3 + d^2 r + J b v u q + d u r + J b d v + J b d u + J b u r + J b d^2 + J b d r)] /\ [-(d + J b) c v^3 d (-d v b - J b v c + d^2 v + d^2 r + d v u q + d^3 + c J d^2 + d^2 u + d u r + c J d v + c J d u + J b d v + J b d r + J b v u q + J b d^2 + J^2 b d c + J b d u + J b u r + J^2 b c v + J^2 b u c) = 0]].
+
+#12: Cyclic-3
+[Cyclic-3]
+(a,b,c)
+1
+(E b)(E c)[[a + b + c = 0] /\ [a b + b c + c a = 0] /\ [a b c - 1 = 0]].
+
+#13: Cyclic-4
+[Cyclic-4]
+(a,b,c,d)
+1
+(E b)(E c)(E d)[[a + b + c + d = 0] /\ [a b + b c + c d + d a = 0] /\ [a b c + b c d + c d a + d a b = 0] /\ [a b c d - 1 = 0]].
+

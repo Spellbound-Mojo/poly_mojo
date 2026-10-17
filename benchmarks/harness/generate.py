@@ -271,6 +271,8 @@ def main(argv=None):
     print(f"streaming: {write(streaming_cases(), 'streaming')} cases")
     from .arith import cases as arith_cases
     print(f"arith: {write(arith_cases(), 'arith')} cases")
+    from . import real_roots
+    print(f"roots: {write(real_roots.cases(), 'roots')} cases")
 
 
 if __name__ == '__main__':
