@@ -8,6 +8,7 @@ budget in proportion to its coefficient work before doing it.
 """
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product, _sum
 from ._ntt import _modular_product
+from ._nmod_euclid import _Field as _EuclidField, _gcd_words
 
 comptime _KARATSUBA = 128
 """Operand length at which products switch from schoolbook to Karatsuba;
@@ -329,15 +330,13 @@ def _divmod_classic(a: List[UInt64], b: List[UInt64], quotient: Bool, f: _Field,
 
 
 def _gcd(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
-    """The monic gcd; zero only when both inputs are zero."""
-    var x = a.copy()
-    var y = b.copy()
-    while len(y):
-        budget.charge(1)
-        var r = _divmod_classic(x, y, False, f, budget)[1].copy()
-        x = y^
-        y = r^
-    return _monic(x, f, budget)
+    """The monic gcd; zero only when both inputs are zero.
+
+    Residues share the Montgomery form a 2^64 mod p of the word-size Euclidean
+    kernels, which run the remainder sequence.
+    """
+    _allocation[UInt64](len(a) + len(b), budget)
+    return _gcd_words(a.copy(), b.copy(), _EuclidField.of(f.p), budget)
 
 
 @fieldwise_init
