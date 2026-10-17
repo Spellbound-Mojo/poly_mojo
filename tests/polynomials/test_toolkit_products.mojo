@@ -76,6 +76,8 @@ def main() raises:
     var work = Budget()
     transform_products[ZZ](NoContext(), 8, check)
     transform_products[ZZ](NoContext(), 200, check)
+    # Eighteen limbs carry the residue sums past 128 bits and take 38 primes.
+    transform_products[ZZ](NoContext(), 1100, check)
     transform_products[QQ](NoContext(), 40, check)
     transform_products[ModInt](Modulus(65521, work), 0, check)
     transform_products[ModInt](Modulus((UInt64(1) << 62) - 57, work), 0, check)
