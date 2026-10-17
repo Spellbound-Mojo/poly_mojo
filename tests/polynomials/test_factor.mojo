@@ -38,9 +38,43 @@ def boundaries[C: CoefficientRing](mut c: Checker) raises:
         c.check(e.kind == PolyErrorKind.LIMIT and f == before, "factor budget preserves input")
 
 
+def zz(values: List[Int], mut work: Budget) raises -> DensePoly[ZZ]:
+    var coefficients = List[ZZ]()
+    for v in values:
+        coefficients.append(ZZ(Integer(v)))
+    return DensePoly[ZZ].from_coefficients(0, NoContext(), coefficients^, work)
+
+
+def repeated_blocks(mut c: Checker) raises:
+    # Integer Yun blocks: multiplicities, content and signs survive exactly.
+    var work = Budget()
+    var a = zz([1, 0, 1], work)
+    var b = zz([3, 2], work)
+    var d = zz([7, -1, 0, 0, 0, 1], work)
+    var e = zz([-1, 1], work)
+    var f = a.pow(3, work).mul(b.pow(2, work), work).mul(d, work).mul(e.pow(4, work), work).scale(ZZ(Integer(-6)), work)
+    var got = factor_integer(f, work)
+    c.check(check_factorization(f, got, work), "repeated blocks reconstruct")
+    c.check(got.unit == ZZ(Integer(-6)), "repeated blocks keep signed content")
+    c.check(len(got.factors) == 4, "four distinct repeated blocks")
+    for entry in got.factors:
+        if entry[0] == a:
+            c.check(entry[1] == 3, "cube block")
+        elif entry[0] == b:
+            c.check(entry[1] == 2, "square block")
+        elif entry[0] == d:
+            c.check(entry[1] == 1, "simple block")
+        else:
+            c.check(entry[0] == e and entry[1] == 4, "fourth power block")
+    var high = zz([-2, 0, 1], work).pow(7, work)
+    var seven = factor_integer(high, work)
+    c.check(len(seven.factors) == 1 and seven.factors[0][1] == 7, "seventh power")
+
+
 def main() raises:
     var work = Budget()
     var c = Checker("factor")
+    repeated_blocks(c)
     var count = 0
     for record in read_cases():
         var op = record.field("op ")
