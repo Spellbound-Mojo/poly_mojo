@@ -11,6 +11,7 @@ from ._dense_ops import _constant, _remainder, _exact
 from ._euclidean import _extended
 from ._images import _mod_image
 from .primes import _symmetric
+from ._ntt import _ntt_low_product
 
 
 def _lift_image(f: DensePoly[ModInt], mut budget: Budget) raises PolyError -> DensePoly[ZZ]:
@@ -134,7 +135,90 @@ def _build_tree(factors: List[DensePoly[ModInt]], mut state: _HenselState, mut b
     state.exponent = 1
 
 
+comptime _FAST_DIVISION = 64
+"""Divisor and quotient lengths from which division multiplies by a power
+series inverse instead of eliminating one coefficient at a time."""
+comptime _FAST_DIVISION_BITS = 1000
+"""Measured: above this modulus size, transform products of these lengths
+lose to long division."""
+
+
+def _low_product(a: DensePoly[ZZ], b: DensePoly[ZZ], length: Int, mut budget: Budget) raises PolyError -> DensePoly[ZZ]:
+    """a b modulo x^length."""
+    if a.is_zero() or b.is_zero() or length <= 0:
+        return DensePoly[ZZ](a.variable, NoContext())
+    var values = _ntt_low_product(_view(a.coefficients), _view(b.coefficients), length, budget)
+    if values:
+        return DensePoly[ZZ].from_coefficients(a.variable, NoContext(), values.take(), budget)
+    return _low(a.mul(b, budget), length, budget)
+
+
+def _low(p: DensePoly[ZZ], length: Int, mut budget: Budget) raises PolyError -> DensePoly[ZZ]:
+    """p modulo x^length."""
+    var values = _slice(_view(p.coefficients), 0, min(len(p.coefficients), length), budget)
+    return DensePoly[ZZ].from_coefficients(p.variable, NoContext(), values^, budget)
+
+
+def _high(p: DensePoly[ZZ], lo: Int, hi: Int, mut budget: Budget) raises PolyError -> DensePoly[ZZ]:
+    """(p modulo x^hi) div x^lo."""
+    var top = min(len(p.coefficients), hi)
+    var values = _slice(_view(p.coefficients), min(lo, top), top, budget)
+    return DensePoly[ZZ].from_coefficients(p.variable, NoContext(), values^, budget)
+
+
+def _reverse(p: DensePoly[ZZ], length: Int, mut budget: Budget) raises PolyError -> DensePoly[ZZ]:
+    """x^(length - 1) p(1/x) for deg p < length."""
+    _allocation[ZZ](length, budget)
+    var values = List[ZZ](capacity=length)
+    for i in range(length):
+        budget.charge(1)
+        var j = length - 1 - i
+        values.append(_copy_coefficient(p.coefficients[j], budget) if j < len(p.coefficients) else ZZ.zero(NoContext()))
+    return DensePoly[ZZ].from_coefficients(p.variable, NoContext(), values^, budget)
+
+
+def _series_inverse(h: DensePoly[ZZ], length: Int, modulus: ZZ, mut budget: Budget) raises PolyError -> DensePoly[ZZ]:
+    """g with rev(h) g = 1 modulo x^length and the modulus, for monic h.
+
+    Newton's step from precision k to 2k: rev(h) g = 1 + x^k t, and
+    g - x^k (g t) is correct to x^(2k), so only g t modulo x^k is needed."""
+    var flipped = _reverse(h, h.degree() + 1, budget)
+    var g = _constant(h, ZZ.one(NoContext()), budget)
+    var precision = 1
+    while precision < length:
+        budget.charge(1)
+        var next = min(_sum(precision, precision), length)
+        var t = _truncate(_high(_low_product(_low(flipped, next, budget), g, next, budget), precision, next, budget), modulus, budget)
+        var step = _low_product(g, t, next - precision, budget)
+        _allocation[ZZ](next, budget)
+        var values = List[ZZ](capacity=next)
+        for i in range(next):
+            budget.charge(1)
+            if i < precision:
+                values.append(_copy_coefficient(g.coefficients[i], budget) if i < len(g.coefficients) else ZZ.zero(NoContext()))
+            else:
+                var j = i - precision
+                values.append(step.coefficients[j].neg(budget) if j < len(step.coefficients) else ZZ.zero(NoContext()))
+        g = _truncate(DensePoly[ZZ].from_coefficients(h.variable, NoContext(), values^, budget), modulus, budget)
+        precision = next
+    return g^
+
+
 def _divmod_monic(a: DensePoly[ZZ], h: DensePoly[ZZ], modulus: ZZ, mut budget: Budget) raises PolyError -> Tuple[DensePoly[ZZ], DensePoly[ZZ]]:
+    var n = h.degree()
+    var m = len(a.coefficients) - n
+    if n >= _FAST_DIVISION and m >= _FAST_DIVISION and modulus.value.magnitude_bit_length() <= _FAST_DIVISION_BITS:
+        # rev(q) = rev(a) / rev(h) modulo x^m, and the remainder is a - q h
+        # below x^n. Both are unique modulo the modulus, as long division's.
+        var inverse = _series_inverse(h, m, modulus, budget)
+        var head = _low(_reverse(a, len(a.coefficients), budget), m, budget)
+        var quotient = _truncate(_reverse(_low_product(head, inverse, m, budget), m, budget), modulus, budget)
+        var remainder = _truncate(_low(a, n, budget).sub(_low_product(quotient, h, n, budget), budget), modulus, budget)
+        return (quotient^, remainder^)
+    return _long_divmod_monic(a, h, modulus, budget)
+
+
+def _long_divmod_monic(a: DensePoly[ZZ], h: DensePoly[ZZ], modulus: ZZ, mut budget: Budget) raises PolyError -> Tuple[DensePoly[ZZ], DensePoly[ZZ]]:
     # Long division by a monic divisor over Z/modulus.
     var n = h.degree()
     var r = _slice(_view(a.coefficients), 0, len(a.coefficients), budget)
