@@ -2441,6 +2441,16 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
             for l in range(n):
                 work.unsafe_get(l) = x.unsafe_offset(l).unsafe_load()
             var found = euclid.fraction(work, basis.product, half)
+            # n_c = D r_c tends to be longer than the denominator's new factor:
+            # retry with room for a longer numerator.
+            var share = 4
+            while not found and share <= 8:
+                var den = basis.bits // share
+                for l in range(n):
+                    work.unsafe_get(l) = x.unsafe_offset(l).unsafe_load()
+                budget.charge(UInt64(_product(basis.limbs, basis.limbs)))
+                found = euclid.fraction(work, basis.product, basis.bits - 2 - den, den)
+                share *= 2
             counts[5] += _clock() - t0
             if not found:
                 return False
@@ -2542,8 +2552,12 @@ struct _Euclid(Movable):
         self.divisor = List[UInt64](length=self.n, fill=0)
         self.quotient = List[UInt64](length=self.n + 1, fill=0)
 
-    def fraction(mut self, x: List[UInt64], modulus: List[UInt64], bits: Int) -> Optional[Tuple[Integer, Integer]]:
-        """As `_euclid(x, modulus, bits)`, for 0 <= x < modulus, both given in limbs."""
+    def fraction(mut self, x: List[UInt64], modulus: List[UInt64], bits: Int, den_bits: Int = -1) -> Optional[Tuple[Integer, Integer]]:
+        """As `_euclid(x, modulus, bits)`, for 0 <= x < modulus, both given in limbs.
+
+        With `den_bits` nonnegative, the numerator stays below 2^bits and the
+        denominator below 2^den_bits instead.
+        """
         var n = self.n
         for l in range(n):
             self.r0.unsafe_get(l) = modulus[l] if l < len(modulus) else UInt64(0)
@@ -2597,7 +2611,7 @@ struct _Euclid(Movable):
             for l in range(n):
                 self.next1.unsafe_get(l) = self.t1.unsafe_get(l)
         var length = _bits_at(self.next1.unsafe_ptr(), n)
-        if length == 0 or length > bits:
+        if length == 0 or length > (den_bits if den_bits >= 0 else bits):
             return None
         var bytes = List[UInt8](length=8 * n, fill=0)
         for l in range(n):
