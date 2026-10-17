@@ -236,6 +236,9 @@ def write_report(folder):
     if records and records[0].get('family') == 'arith':
         from .arith import report
         return report(records, env, folder)
+    if records and records[0].get('family') == 'series':
+        from .series import report as series_report
+        return series_report(records, env, folder)
     present = {r['tool'] for r in records}
     tools = [t for t in TOOL_ORDER if t in present]
     time_lines, solved, totals = summary_table(records, tools, 'time_s', RATIO_FLOOR_S, 'Time')
