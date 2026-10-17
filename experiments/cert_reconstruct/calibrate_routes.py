@@ -58,7 +58,7 @@ def patch(src, out):
                 var c11 = counts[11]
                 var c12 = counts[12]
                 var t0 = Int(perf_counter_ns())
-                var kk = _modular_pair(lanes, matrix, pivot, coefficients, images, a, b, _FIRST_PRIMES, 0, mc, counts, budget)
+                var kk = _modular_pair(lanes, matrix, pivot, coefficients, images, a, b, _FIRST_PRIMES, 0, False, mc, counts, budget)
                 var mt = Int(perf_counter_ns()) - t0
                 var b1 = budget.remaining()
                 var tt = 0

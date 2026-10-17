@@ -15,7 +15,7 @@ from .evaluate import evaluate, evaluate_dense, substitute, derivative
 from .codec import to_kernel_bytes, from_kernel_bytes, MAX_KERNEL_BYTES
 from .division import divmod, pseudo_divmod, divide_exact, divide_by_list
 from .primes import prime, crt
-from .gcd import content, primitive_part, gcd, extended_gcd, coprimality_certificate
+from .gcd import content, primitive_part, gcd, gcd_value, extended_gcd, coprimality_certificate
 from .sparse_gcd import sparse_gcd, sparse_gcd_integer
 from .determinant import DeterminantStep, ProjectionResultantCertificate, projection_resultant, check_projection_resultant
 from .cad_projection import CADProjectionCertificate, cad_projection, check_cad_projection
@@ -24,7 +24,7 @@ from .cad_types import CADPolynomialLift, CADStackCertificate, CADCell, CADCerti
 from .cad import cad, check_cad, cad_cell, check_cad_cell
 from .cad_covering import cad_covering, check_cad_covering
 from .cylindrical_covering import CADConflict, CADConflictInterval, CylindricalCoveringCertificate, cylindrical_covering, check_cylindrical_covering
-from .resultant import resultant, subresultants
+from .resultant import resultant, resultant_value, subresultants
 from .fractions import RationalFunction
 from .squarefree import squarefree
 from .sparse_squarefree import SparseSquarefreeDecomposition, squarefree_multivariate, check_sparse_squarefree_product

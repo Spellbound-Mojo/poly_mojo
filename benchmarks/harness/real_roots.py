@@ -184,16 +184,18 @@ def read_flint_answer(text):
     return count, intervals
 
 
-def reference(case):
-    """Real roots of the case polynomial enclosed to width 2^-1100 by Arb (cached)."""
+def reference(case, bits=REFERENCE_BITS):
+    """Real roots of the case polynomial enclosed to width 2^-bits by Arb (cached)."""
     key = hashlib.sha256(' '.join(case['coefficients']).encode()).hexdigest()[:20]
+    if bits != REFERENCE_BITS:
+        key += f'-{bits}'
     path = CACHE / 'reference' / f'roots-{key}.txt'
     if not path.is_file():
         path.parent.mkdir(parents=True, exist_ok=True)
         work = path.parent / f'work-{key}'
         work.mkdir(exist_ok=True)
         write_input(work / 'input.txt', case)
-        subprocess.run([str(flint_binary()), 'input.txt', 'answer.txt', 'result.json', f'bits{REFERENCE_BITS}', '0', '1'],
+        subprocess.run([str(flint_binary()), 'input.txt', 'answer.txt', 'result.json', f'bits{bits}', '0', '1'],
                        cwd=work, check=True)
         os.replace(work / 'answer.txt', path)
         for f in work.iterdir():
@@ -203,8 +205,18 @@ def reference(case):
 
 
 def check(case, count, intervals):
-    """True when the count matches and each closed interval holds exactly one reference root."""
-    expected, balls = reference(case)
+    """True when the count matches and each closed interval holds exactly one reference root.
+
+    The reference is computed to 32 bits below the narrowest interval, so a
+    root inside an interval has its whole reference ball inside it too
+    (unless the interval is a point, which must then lie in the ball).
+    """
+    bits = REFERENCE_BITS
+    for low, high in intervals or ():
+        if high > low:
+            width = high - low
+            bits = max(bits, width.denominator.bit_length() - width.numerator.bit_length() + 32)
+    expected, balls = reference(case, -(-bits // 512) * 512 if bits > REFERENCE_BITS else bits)
     if count != expected:
         return False
     if intervals is None:

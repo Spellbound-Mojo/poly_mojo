@@ -10,6 +10,7 @@ from .dense import DensePoly, _slice, _trim
 from .sparse import SparsePoly, Term
 from .monomial import Monomial, MonomialOrder
 from .certificates import DivisionResult, ListDivision
+from ._packed_division import _packed_divide
 from ._sparse_ops import _subtract_multiple, _from_descending
 from ._reduction_stream import _ReductionStream
 
@@ -144,6 +145,10 @@ def divide_exact[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], mut bud
     f._same(g, budget)
     if g.is_zero():
         raise PolyError(PolyErrorKind.DOMAIN, "division by zero polynomial")
+    var applicable = False
+    var packed = _packed_divide(f, g, applicable, budget)
+    if applicable:
+        return packed^
     var others: List[SparsePoly[C]] = [g._copy(budget)]
     var order = _division_order(f, others, budget)
     var pending = f.reorder(order, budget)

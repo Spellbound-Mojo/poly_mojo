@@ -127,9 +127,13 @@ def _merge_roots(lifts: List[CADPolynomialLift], mut budget: Budget) raises Poly
 
 
 def _stack(projection: CADProjectionCertificate, parent: Int, level: Int, point: List[Tuple[Int64, RealAlgebraic]], dimension: Int, seed: Optional[RealAlgebraic], mut budget: Budget) raises PolyError -> CADStackCertificate:
+    var cache = _NormalizationCache()
+    return _stack_cached(projection, parent, level, point, dimension, seed, cache, budget)
+
+
+def _stack_cached(projection: CADProjectionCertificate, parent: Int, level: Int, point: List[Tuple[Int64, RealAlgebraic]], dimension: Int, seed: Optional[RealAlgebraic], mut cache: _NormalizationCache, mut budget: Budget) raises PolyError -> CADStackCertificate:
     var variable = projection.variables[level]
     var lifts = List[CADPolynomialLift]()
-    var cache = _NormalizationCache()
     for f in projection.levels[level]:
         budget.charge(1)
         var lift = CADPolynomialLift(None, None, None)

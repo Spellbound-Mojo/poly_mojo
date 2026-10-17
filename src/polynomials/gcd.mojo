@@ -221,6 +221,26 @@ def coprimality_certificate[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[
     return CoprimalityCertificate[C](nodes^, root.value())
 
 
+def gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budget: Budget) raises PolyError -> SparsePoly[C]:
+    """Compute the normalized gcd alone, without cofactors or evidence.
+
+    Parameters:
+        C: ZZ or a coefficient field.
+
+    Args:
+        f: The first polynomial.
+        h: The second polynomial in the same ring and order.
+        budget: The shared work allowance.
+
+    Returns:
+        The positive-leading ZZ or monic field gcd, equal to `gcd(f, h).gcd`.
+
+    Raises:
+        PolyError: DOMAIN for incompatible inputs, LIMIT or CAPACITY on work limits.
+    """
+    return _gcd_value(f, h, budget)
+
+
 def gcd[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budget: Budget, certify_maximal: Bool = False) raises PolyError -> GcdResult[C]:
     """Compute a normalized gcd, its cofactors, and optionally maximality evidence.
 
