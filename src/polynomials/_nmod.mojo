@@ -340,7 +340,7 @@ def _gcd(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) raises
     return _gcd_words(a.copy(), b.copy(), _EuclidField.of(f.p), budget)
 
 
-comptime _SPECTRAL = 256
+comptime _SPECTRAL = 128
 """Modulus degree from which reductions, modular products and compositions
 keep their fixed operands as transforms modulo one transform prime."""
 comptime _SPECTRAL_BOUND = UInt128(1) << 61
