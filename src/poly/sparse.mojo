@@ -1078,15 +1078,20 @@ def power[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable](value
         raise PolyError(PolyErrorKind.DOMAIN, "polynomial exponent must be nonnegative")
     comptime k = _Kind[C]
     var factor = _prepare[I, P, C](values, budget)
-    var result = Array[P, k](SparsePoly[_Ring[k]].constant(_Ring[k].one(factor._core[].ring), factor._core[].order, budget), budget)
-    var remaining = exponent
-    while remaining:
+    if exponent == 0:
+        return Array[P, k](SparsePoly[_Ring[k]].constant(_Ring[k].one(factor._core[].ring), factor._core[].order, budget), budget)
+    # From the leading bit down: square, then multiply by the base alone, so
+    # the last and largest product is a square.
+    var result = factor.copy()
+    var bit = 62
+    while not (exponent >> bit) & 1:
+        bit -= 1
+    while bit > 0:
         budget.charge(1)
-        if remaining & 1:
+        bit -= 1
+        result = Array[P, k](result._core[].mul(result._core[], budget), budget)
+        if (exponent >> bit) & 1:
             result = Array[P, k](result._core[].mul(factor._core[], budget), budget)
-        remaining >>= 1
-        if remaining:
-            factor = Array[P, k](factor._core[].mul(factor._core[], budget), budget)
     return result^
 
 

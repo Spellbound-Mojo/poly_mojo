@@ -46,7 +46,7 @@ struct _Packing(Copyable, Movable):
     var window: UInt64
     """The low range: radix[L] * ... * radix[n-1]."""
 
-    def __init__(out self, var radix: List[UInt64]):
+    def __init__(out self, var radix: List[UInt64], limit: Int = _WINDOW):
         self.n = len(radix)
         self.weight = List[UInt64](length=self.n, fill=1)
         var i = self.n - 2
@@ -55,7 +55,7 @@ struct _Packing(Copyable, Movable):
             i -= 1
         self.prefix_count = 0
         self.window = (self.weight[0] * radix[0]) if self.n else 1
-        while self.prefix_count < self.n and self.window > UInt64(_WINDOW):
+        while self.prefix_count < self.n and self.window > UInt64(limit):
             self.window = self.weight[self.prefix_count]
             self.prefix_count += 1
         self.radix = radix^
@@ -370,7 +370,8 @@ def _packed_product[C: CoefficientRing](a: SparsePoly[C], b: SparsePoly[C], mut 
     var radix = _radices(_maxima(a, n), _maxima(b, n))
     if not radix:
         return None
-    var packing = _Packing(radix.take())
+    # A window larger than eight slots per term pair would cost more to clear than to use.
+    var packing = _Packing(radix.take(), min(_WINDOW, max(1024, 8 * len(a.terms) * len(b.terms))))
     var left = _pack(a, packing, budget)
     var right = _pack(b, packing, budget)
     var groups_a = len(left.group_prefix)
