@@ -12,7 +12,7 @@ from .primes import prime, _residue, _symmetric
 from ._dense_ops import _copy, _constant, _monic, _derivative, _gcd
 from ._images import _integer_dense as _integer, _rational_dense as _rational, _mod_image
 from ._coefficient_ops import _quotient
-from ._hensel import _HenselState, _hensel, _hensel_resume, _truncate, _trial_divide
+from ._hensel import _HenselState, _hensel, _hensel_start, _hensel_extend, _hensel_resume, _truncate, _trial_divide
 from ._integer_ops import _content, _primitive, _divide_scalar
 from ._lattice_factor import _van_hoeij_lifted
 from ._gcd import _modular_primitive
@@ -189,7 +189,9 @@ def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], mut bud
 
 
 def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], allowed: List[Bool], mut budget: Budget) raises PolyError -> List[DensePoly[ZZ]]:
-    var lifting = _hensel(f, modular, _bound(f, budget), budget)
+    var state = _hensel_start(modular, budget)
+    _hensel_extend(f, modular, _bound(f, budget), state, budget)
+    var lifting = (state.lifted.copy(), _copy_coefficient(state.modulus, budget))
     var remaining = _copy(f, budget)
     var result = List[DensePoly[ZZ]]()
     var active_modular = List[DensePoly[ModInt]]()
@@ -210,8 +212,12 @@ def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], allowed
     if remaining.degree() > 0:
         var rest: List[DensePoly[ZZ]]
         if len(active_modular) >= 20:
-            var state = _hensel_resume(active_lifted^, _copy_coefficient(lifting[1], budget))
-            rest = _van_hoeij_lifted(remaining, active_modular, _bound(remaining, budget), state, budget)
+            if len(active_modular) == len(modular):
+                # Nothing peeled: keep the factor tree for further lifting.
+                rest = _van_hoeij_lifted(remaining, active_modular, _bound(remaining, budget), state, budget)
+            else:
+                var resumed = _hensel_resume(active_lifted^, _copy_coefficient(lifting[1], budget))
+                rest = _van_hoeij_lifted(remaining, active_modular, _bound(remaining, budget), resumed, budget)
         else:
             rest = _recombine(remaining, active_lifted, lifting[1], allowed, budget)
         for g in rest:

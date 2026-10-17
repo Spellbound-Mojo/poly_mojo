@@ -11,7 +11,7 @@ from ._coefficient_ops import _exact, _copy as _zcopy
 from ._dense_ops import _copy, _constant
 from ._hensel import _HenselState, _hensel_start, _hensel_extend, _truncate, _primitive, _trial_divide
 from .primes import _symmetric
-from ._lattice import _lll, _q
+from ._lattice import _lll, _lll_knapsack, _q
 from ._root_ops import _compare, _copy as _copy_q
 
 
@@ -120,6 +120,16 @@ def _van_hoeij_lifted(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconst
     ref lc = f.coefficients[f.degree()]
     var leading = lc.neg(budget) if lc.value.sign() < 0 else _zcopy(lc, budget)
     root_bound = root_bound.add(leading, budget)
+    # Gradual feeding: the reduced basis rows persist, and each round
+    # appends only new trace columns, each at its own precision
+    # cut_j * padding, so every new entry is about the padding in size. Rows whose exact Gram-Schmidt norm exceeds the bound
+    # for true indicators are dropped, which never loses one.
+    _allocation[List[ZZ]](count, budget)
+    var rows = List[List[ZZ]](length=count, fill=List[ZZ](length=count, fill=ZZ.zero(NoContext())))
+    for i in range(count):
+        rows[i][i] = ZZ.one(NoContext())
+    var done = 0
+    var data_columns = 0
     var traces_count = min(f.degree(), 2)
     var padding = _zcopy(p, budget)
     while True:
@@ -141,39 +151,70 @@ def _van_hoeij_lifted(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconst
             largest_cut = _zcopy(cut, budget)
             cuts.append(cut^)
         var target = largest_cut.mul(padding, budget)
-        if _greater(reconstruction_bound, target, budget):
-            target = _zcopy(reconstruction_bound, budget)
-        _hensel_extend(f, images, target, state, budget)
+        var lifting = _zcopy(target, budget)
+        if _greater(reconstruction_bound, lifting, budget):
+            lifting = _zcopy(reconstruction_bound, budget)
+        _hensel_extend(f, images, lifting, state, budget)
         ref lifted = state.lifted
         ref modulus = state.modulus
-        var dimension = _sum(count, traces_count)
-        _allocation[List[ZZ]](dimension, budget)
-        _allocation[ZZ](_product(dimension, dimension), budget)
-        var lattice = List[List[ZZ]](length=dimension, fill=List[ZZ](length=dimension, fill=ZZ.zero(NoContext())))
+        # columns[i][j] = (lc^(j+1) Tr_(j+1)(g_i) mod cut_j*padding - low) / cut_j.
+        var fresh = traces_count - done
+        _allocation[List[ZZ]](count, budget)
+        var columns = List[List[ZZ]](capacity=count)
         for i in range(count):
             budget.charge(1)
-            lattice[i][i] = ZZ.one(NoContext())
             var sums = _traces(lifted[i], traces_count, modulus, budget)
             var scale = ZZ.one(NoContext())
+            var row = List[ZZ](capacity=fresh)
             for j in range(traces_count):
                 budget.charge(1)
                 scale = ZZ(_symmetric(scale.mul(leading, budget).value, modulus.value, budget))
-                var trace = ZZ(_symmetric(sums[j + 1].mul(scale, budget).value, modulus.value, budget))
+                if j < done:
+                    continue
+                var precision = cuts[j].mul(padding, budget)
+                var trace = ZZ(_symmetric(sums[j + 1].mul(scale, budget).value, precision.value, budget))
                 var low = ZZ(_symmetric(trace.value, cuts[j].value, budget))
-                lattice[i][count + j] = _exact(trace.sub(low, budget), cuts[j], budget)
-        for j in range(traces_count):
+                row.append(_exact(trace.sub(low, budget), cuts[j], budget))
+            columns.append(row^)
+        var dimension = _sum(len(rows), fresh)
+        var old = len(rows[0])
+        var width = _sum(old, fresh)
+        _allocation[ZZ](_product(dimension, width), budget)
+        var lattice = List[List[ZZ]](length=dimension, fill=List[ZZ](length=width, fill=ZZ.zero(NoContext())))
+        for a in range(len(rows)):
             budget.charge(1)
-            lattice[count + j][count + j] = _exact(modulus, cuts[j], budget)
-        var reduced = _lll[False](lattice, budget)
+            for i in range(old):
+                lattice[a][i] = rows[a][i].copy()
+            for j in range(fresh):
+                budget.charge(1)
+                var total = ZZ.zero(NoContext())
+                for i in range(count):
+                    if not rows[a][i].is_zero():
+                        total = total.add(rows[a][i].mul(columns[i][j], budget), budget)
+                lattice[a][old + j] = ZZ(_symmetric(total.value, padding.value, budget))
+        for j in range(fresh):
+            budget.charge(1)
+            lattice[len(rows) + j][old + j] = _zcopy(padding, budget)
+        var reduced = _lll_knapsack(lattice, budget)
         # Each true factor's indicator has norm squared <= n+s*n^2/4.
         # The looser integer bound avoids rounding. Dropping only a suffix
         # of larger Gram-Schmidt norms retains every such short vector.
-        var bound_squared = _q(ZZ(Integer(_sum(count, _product(traces_count, _product(count, count))))), budget)
+        data_columns = _sum(data_columns, fresh)
+        var bound_squared = _q(ZZ(Integer(_sum(count, _product(data_columns, _product(count, count))))), budget)
         var retained = dimension
         while retained and _compare(reduced.norms[retained - 1], bound_squared, budget) > 0:
             budget.charge(1)
             retained -= 1
-        var partition = _projection_rref(reduced.basis, retained, count, budget)
+        if retained == 0:
+            raise PolyError(PolyErrorKind.DOMAIN, "lattice reduction lost every factor indicator")
+        _allocation[List[ZZ]](retained, budget)
+        var kept = List[List[ZZ]](capacity=retained)
+        for a in range(retained):
+            budget.charge(1)
+            kept.append(reduced.basis[a].copy())
+        rows = kept^
+        done = traces_count
+        var partition = _projection_rref(rows, len(rows), count, budget)
         if _partition(partition, count, budget):
             var remaining = _copy(f, budget)
             var factors = List[DensePoly[ZZ]]()
@@ -184,7 +225,7 @@ def _van_hoeij_lifted(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconst
                 for j in range(count):
                     budget.charge(1)
                     if not row[j].is_zero():
-                        candidate = _truncate(candidate.mul(lifted[j], budget), modulus, budget)
+                        candidate = _truncate(candidate.mul(lifted[j], budget), state.modulus, budget)
                 candidate = _primitive(candidate, budget)
                 var quotient = _trial_divide(remaining, candidate, budget)
                 if candidate.degree() < 1 or not quotient:
@@ -198,4 +239,6 @@ def _van_hoeij_lifted(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconst
         if traces_count < f.degree():
             traces_count = min(f.degree(), _product(2, traces_count))
         else:
+            # Every trace is in; feed them again with more precision.
             padding = padding.mul(p, budget)
+            done = 0
