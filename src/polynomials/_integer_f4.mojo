@@ -566,12 +566,21 @@ struct _Row(Movable):
             var negative = u > 0 and (entry.unsafe_offset(u - 1).unsafe_load() >> 63) != 0
             var carry = UInt64(0)
             var any = UInt64(0)
-            for l in range(u):
-                var e = entry.unsafe_offset(l).unsafe_load()
-                any |= e
-                var p = UInt128(f) * UInt128(e) + UInt128(carry)
-                entry.unsafe_offset(l).unsafe_store(UInt64(p & UInt128(UInt64.MAX)))
-                carry = UInt64(p >> 64)
+            comptime if _ADX:
+                # Almost every entry is nonzero in its low limb.
+                var l = 0
+                while l < u and entry.unsafe_offset(l).unsafe_load() == 0:
+                    l += 1
+                any = UInt64(Int(l < u))
+                if u > 0:
+                    carry = _adx_mul(entry, f, u)
+            else:
+                for l in range(u):
+                    var e = entry.unsafe_offset(l).unsafe_load()
+                    any |= e
+                    var p = UInt128(f) * UInt128(e) + UInt128(carry)
+                    entry.unsafe_offset(l).unsafe_store(UInt64(p & UInt128(UInt64.MAX)))
+                    carry = UInt64(p >> 64)
             if u < width:
                 # The sign limb B - 1 times f, plus the carry, is f B + carry - f.
                 entry.unsafe_offset(u).unsafe_store(carry - (f if negative else UInt64(0)))
@@ -813,6 +822,62 @@ def _adx_sub_mul(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer[m
         UInt64,
         constraints="=&r,r,r,r,r,~{rdi},~{rsi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{r11},~{memory},~{cc}",
     ](data, other, n, f)
+
+
+@always_inline
+def _adx_mul(data: Pointer[mut=True, UInt64, _], f: UInt64, n: Int) -> UInt64:
+    """data[0:n] *= f in place for n >= 1; return the high limb.
+
+    Each product's high word goes into the next limb by adcx, one carry
+    chain of single additions.
+    """
+    return inlined_assembly[
+        """
+        mov $1, %rdi
+        mov $2, %rcx
+        mov $3, %rdx
+        mov %rcx, %r11
+        shr $$2, %r11
+        and $$3, %rcx
+        xor %r8d, %r8d
+        jrcxz 3f
+        1:
+        mulx (%rdi), %r9, %r10
+        adcx %r8, %r9
+        mov %r9, (%rdi)
+        mov %r10, %r8
+        lea 8(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 3f
+        jmp 1b
+        3:
+        mov %r11, %rcx
+        jrcxz 4f
+        2:
+        mulx (%rdi), %r9, %r10
+        adcx %r8, %r9
+        mov %r9, (%rdi)
+        mulx 8(%rdi), %r9, %r8
+        adcx %r10, %r9
+        mov %r9, 8(%rdi)
+        mulx 16(%rdi), %r9, %r10
+        adcx %r8, %r9
+        mov %r9, 16(%rdi)
+        mulx 24(%rdi), %r9, %r8
+        adcx %r10, %r9
+        mov %r9, 24(%rdi)
+        lea 32(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 4f
+        jmp 2b
+        4:
+        mov $$0, %r9
+        adcx %r9, %r8
+        mov %r8, $0
+        """,
+        UInt64,
+        constraints="=&r,r,r,r,~{rdi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{r11},~{memory},~{cc}",
+    ](data, n, f)
 
 
 @always_inline
@@ -1814,8 +1879,11 @@ comptime _GIVE_UP = 4
 comptime _TIMED = 3
 """Long pairs a degree samples before comparing the routes' costs."""
 
-comptime _RATIO = 85
-"""Percent of the exact cost above which a degree leaves the modular route."""
+comptime _RATIO = 70
+"""Percent of the exact cost above which a degree leaves the modular route.
+
+Well below 100: the cost models are fitted on one machine, and the routes'
+relative speed differs between machines, so only a clear modular win counts."""
 
 comptime _LONG = 48
 """Primes from which a pair counts as long, and may be sampled (see `_pair_routes`)."""
@@ -1823,7 +1891,7 @@ comptime _LONG = 48
 comptime _EVERY = 32
 """After the first `_TIMED`, one long pair in this many is sampled, while the comparison is close."""
 
-comptime _CLEAR = 60
+comptime _CLEAR = 50
 """Percent of the exact cost below which the modular route wins clearly and sampling stops."""
 
 comptime _CERT_STATS = False
@@ -1841,15 +1909,18 @@ def _exact_cost(units: Int, terms: Int, columns: Int) -> Int:
     """The exact check's cost model, in hundredths of a nanosecond on the
     calibration machine: from its budget units, the row terms it loaded and
     the columns after the pair's leading one (fitted over cyclic-7/8,
-    katsura-9/10, eco-10/11 and noon-8 to a few percent)."""
-    return 79 * units + 1030 * terms + 165 * columns
+    katsura-9/10, eco-10/11 and noon-8 to about fifteen percent, with the
+    ADX row kernels; refit with experiments/cert_reconstruct/calibrate_routes.py)."""
+    return 53 * units + 1258 * terms + 166 * columns
 
 
 def _modular_cost(lane_units: Int, crt_units: Int, slots: Int) -> Int:
     """The modular route's cost model, in the units of `_exact_cost`: from the
     budget units of its lane sweeps and of its proofs, and the quotient slots
-    its attempts combine (fitted as `_exact_cost`, to about fifteen percent)."""
-    return 38 * lane_units + 232 * crt_units + 21000 * slots
+    its attempts combine. Fitted as `_exact_cost`, refitted after the limb
+    reconstruction of the proofs, to about twenty percent, and scaled up by a
+    fifth so that close calls go to the exact check."""
+    return 27 * lane_units + 106 * crt_units + 16760 * slots
 
 
 def _remainder_of(limbs: Pointer[mut=False, UInt64, _], n: Int, d: UInt64) -> UInt64:
