@@ -230,6 +230,9 @@ struct _Row(Movable):
     var low: List[UInt64]
     var high: List[UInt64]
     """With IFMA, a product's column sums."""
+    var even: List[UInt64]
+    var odd: List[UInt64]
+    """With IFMA, scratch for packing a product's columns into limbs."""
 
     def __init__(out self, ncols: Int):
         self.ncols = ncols
@@ -243,6 +246,8 @@ struct _Row(Movable):
         self.entry_digits = List[UInt64]()
         self.low = List[UInt64]()
         self.high = List[UInt64]()
+        self.even = List[UInt64]()
+        self.odd = List[UInt64]()
 
     def prepare(mut self, bits: Int, mut budget: Budget) raises PolyError:
         """Expect entries of about `bits` bits; the row becomes zero."""
@@ -486,13 +491,15 @@ struct _Row(Movable):
         if len(self.low) < room:
             self.low.resize(room, 0)
             self.high.resize(room, 0)
+            self.even.resize(2 * room, 0)
+            self.odd.resize(2 * room, 0)
         var data = self.data.unsafe_ptr().unsafe_offset(c * self.width)
         var f = self.factor_digits.unsafe_ptr().unsafe_offset(_PAD)
         var t = digits.unsafe_ptr().unsafe_offset(start)
         if nf <= count:
-            _ifma[subtract](data, u, f, nf, t, count, self.low.unsafe_ptr(), self.high.unsafe_ptr())
+            _ifma[subtract](data, u, f, nf, t, count, self.low.unsafe_ptr(), self.high.unsafe_ptr(), self.even.unsafe_ptr(), self.odd.unsafe_ptr())
         else:
-            _ifma[subtract](data, u, t, count, f, nf, self.low.unsafe_ptr(), self.high.unsafe_ptr())
+            _ifma[subtract](data, u, t, count, f, nf, self.low.unsafe_ptr(), self.high.unsafe_ptr(), self.even.unsafe_ptr(), self.odd.unsafe_ptr())
 
     def scale(mut self, first: Int, factor: List[UInt64], bits: Int):
         """Multiply every entry from column `first` on by the positive factor of `bits` bits; the bound must allow it."""
@@ -536,12 +543,14 @@ struct _Row(Movable):
                     if len(self.low) < nf + ne + _PAD:
                         self.low.resize(nf + ne + _PAD, 0)
                         self.high.resize(nf + ne + _PAD, 0)
+                        self.even.resize(2 * (nf + ne + _PAD), 0)
+                        self.odd.resize(2 * (nf + ne + _PAD), 0)
                     var f = self.factor_digits.unsafe_ptr().unsafe_offset(_PAD)
                     var e = self.entry_digits.unsafe_ptr().unsafe_offset(_PAD)
                     if nf <= ne:
-                        _ifma[False](scratch, n, f, nf, e, ne, self.low.unsafe_ptr(), self.high.unsafe_ptr())
+                        _ifma[False](scratch, n, f, nf, e, ne, self.low.unsafe_ptr(), self.high.unsafe_ptr(), self.even.unsafe_ptr(), self.odd.unsafe_ptr())
                     else:
-                        _ifma[False](scratch, n, e, ne, f, nf, self.low.unsafe_ptr(), self.high.unsafe_ptr())
+                        _ifma[False](scratch, n, e, ne, f, nf, self.low.unsafe_ptr(), self.high.unsafe_ptr(), self.even.unsafe_ptr(), self.odd.unsafe_ptr())
                     done = True
             if not done:
                 _accumulate[False](scratch, n, factor.unsafe_ptr(), len(factor), entry, u)
@@ -1143,14 +1152,15 @@ def _append_digits(limbs: Pointer[mut=False, UInt64, _], n: Int, mut digits: Lis
         digits.append(UInt64(buffer & UInt128(_DIGIT)))
 
 
-def _ifma[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Pointer[mut=False, UInt64, _], da: Int, b: Pointer[mut=False, UInt64, _], db: Int, low: Pointer[mut=True, UInt64, _], high: Pointer[mut=True, UInt64, _]):
+def _ifma[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Pointer[mut=False, UInt64, _], da: Int, b: Pointer[mut=False, UInt64, _], db: Int, low: Pointer[mut=True, UInt64, _], high: Pointer[mut=True, UInt64, _], even: Pointer[mut=True, UInt64, _], odd: Pointer[mut=True, UInt64, _]):
     """data += A * B, or -=, over `width` limbs for digit strings a[0:da] and b[0:db], da <= db.
 
     b must have `_PAD` zero digits on each side. Each block of eight output
     columns accumulates the low and the high halves of its 52-bit products in
     64-bit lanes, which hold 4096 of them; long products take four blocks per
-    pass for independent accumulators. The columns are then carried into
-    52-bit digits, packed into limbs, and added to the entry.
+    pass for independent accumulators. The columns are then packed into
+    limbs and added to the entry by `_add_columns`, with `even` and `odd`
+    as its scratch of 2 * (52 (da + db) / 64 + 2) limbs each.
     """
     var columns = da + db
     if columns < 96:
@@ -1199,48 +1209,79 @@ def _ifma[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Poi
             high.unsafe_offset(j0 + 24).unsafe_store[width=8](h3)
     # Column j holds low[j] + high[j - 1] in units of 2^(52 j); the product
     # fits in `columns` digits, so nothing carries past the last column.
-    var carry = UInt128(0)
-    var buffer = UInt128(0)
-    var bits = 0
-    var limb = 0
-    var chain = UInt64(0)
-    var previous = UInt64(0)
-    for j in range(columns + 1):
-        if j < columns:
-            var t = UInt128(low.unsafe_offset(j).unsafe_load()) + UInt128(previous) + carry
-            previous = high.unsafe_offset(j).unsafe_load()
-            carry = t >> 52
-            buffer |= (t & UInt128(_DIGIT)) << UInt128(bits)
-            bits += 52
-            if bits < 64:
-                continue
-        elif bits == 0:
-            break
-        # A whole limb of the product, or the last partial one.
-        if limb < width:
-            var e = data.unsafe_offset(limb).unsafe_load()
-            var p = UInt64(buffer & UInt128(UInt64.MAX))
-            comptime if subtract:
-                var d = e - p
-                var next = UInt64(1) if e < p else UInt64(0)
-                var total = d - chain
-                next += UInt64(1) if d < chain else UInt64(0)
-                data.unsafe_offset(limb).unsafe_store(total)
-                chain = next
+    _add_columns[subtract](data, width, columns, low, high, even, odd)
+
+
+@always_inline
+def _add_columns[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, columns: Int, low: Pointer[mut=True, UInt64, _], high: Pointer[mut=True, UInt64, _], even: Pointer[mut=True, UInt64, _], odd: Pointer[mut=True, UInt64, _]):
+    """data += the sum of (low[j] + high[j - 1]) 2^(52 j) over j < columns, or -=, over `width` limbs.
+
+    A column's value is below 2^65. Its bits above 52 move to the next
+    column, which leaves each column w_j below 2^54 with no carry chain
+    between columns. The even columns' w_j then sit 104 bits apart and do
+    not overlap, nor do the odd ones', so each parity packs into limbs by
+    plain stores, the low and the high piece of a column into separate
+    halves of `even` (`odd`), 2 * (52 columns / 64 + 2) limbs each, so that
+    no store waits on another. The two limb strings are added at the end.
+    """
+    var nl = (52 * columns) // 64 + 2
+    var elo = even
+    var ehi = even.unsafe_offset(nl)
+    var olo = odd
+    var ohi = odd.unsafe_offset(nl)
+    for l in range(2 * nl):
+        even.unsafe_offset(l).unsafe_store(0)
+        odd.unsafe_offset(l).unsafe_store(0)
+    var lo1 = UInt64(0)
+    var hi1 = UInt64(0)
+    var hi2 = UInt64(0)
+    var j = 0
+    while j < columns:
+        comptime for parity in range(2):
+            var lo0 = low.unsafe_offset(j + parity).unsafe_load()
+            var w = (lo0 & _DIGIT) + (hi1 & _DIGIT) + (lo1 >> 52) + (hi2 >> 52)
+            hi2 = hi1
+            hi1 = high.unsafe_offset(j + parity).unsafe_load()
+            lo1 = lo0
+            var pos = 52 * (j + parity)
+            var at = pos >> 6
+            var x = UInt128(w) << UInt128(pos & 63)
+            comptime if parity == 0:
+                elo.unsafe_offset(at).unsafe_store(UInt64(x & UInt128(UInt64.MAX)))
+                ehi.unsafe_offset(at + 1).unsafe_store(UInt64(x >> 64))
             else:
-                var sum = e + p
-                var next = UInt64(1) if sum < e else UInt64(0)
-                var total = sum + chain
-                next += UInt64(1) if total < sum else UInt64(0)
-                data.unsafe_offset(limb).unsafe_store(total)
-                chain = next
-        limb += 1
-        buffer >>= 64
-        bits = max(bits - 64, 0)
+                olo.unsafe_offset(at).unsafe_store(UInt64(x & UInt128(UInt64.MAX)))
+                ohi.unsafe_offset(at + 1).unsafe_store(UInt64(x >> 64))
+        j += 2
+    var m = min(nl, width)
+    var c1 = UInt64(0)
+    var c2 = UInt64(0)
+    for l in range(m):
+        var e = elo.unsafe_offset(l).unsafe_load() | ehi.unsafe_offset(l).unsafe_load()
+        var t = e + (olo.unsafe_offset(l).unsafe_load() | ohi.unsafe_offset(l).unsafe_load())
+        var k = UInt64(1) if t < e else UInt64(0)
+        t += c1
+        k += UInt64(1) if t < c1 else UInt64(0)
+        c1 = k
+        var d = data.unsafe_offset(l).unsafe_load()
+        comptime if subtract:
+            var r = d - t
+            var o = UInt64(1) if d < t else UInt64(0)
+            var r2 = r - c2
+            o += UInt64(1) if r < c2 else UInt64(0)
+            data.unsafe_offset(l).unsafe_store(r2)
+            c2 = o
+        else:
+            var r = d + t
+            var o = UInt64(1) if r < d else UInt64(0)
+            var r2 = r + c2
+            o += UInt64(1) if r2 < c2 else UInt64(0)
+            data.unsafe_offset(l).unsafe_store(r2)
+            c2 = o
     comptime if subtract:
-        _borrow(data, width, limb, UInt128(chain))
+        _borrow(data, width, m, UInt128(c1) + UInt128(c2))
     else:
-        _carry(data, width, limb, UInt128(chain))
+        _carry(data, width, m, UInt128(c1) + UInt128(c2))
 
 
 def _subtract_limbs(x: Pointer[mut=True, UInt64, _], nx: Int, y: Pointer[mut=False, UInt64, _], ny: Int) -> UInt64:
