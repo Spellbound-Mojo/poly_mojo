@@ -16,7 +16,7 @@ from .coefficients import CoefficientRing, ZZ
 from .sparse import SparsePoly, Term
 from .monomial import Monomial
 from .primes import prime, _residue
-from ._nmod import _Field, _gcd_words
+from ._nmod_euclid import _Field, _gcd_words
 
 
 def _integer_gcd(a: Int, b: Int) -> Int:

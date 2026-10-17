@@ -1,6 +1,6 @@
 """Multi-modular univariate gcds and resultants over the integers.
 
-Images come from the word-size field kernels in _nmod. Coefficients are
+Images come from the word-size field kernels in _nmod_euclid. Coefficients are
 reconstructed incrementally in symmetric representation: a new prime leaves
 a coefficient unchanged exactly when its residue already agrees, so a prime
 that changes nothing marks a stable candidate. The gcd is accepted only after
@@ -12,7 +12,7 @@ from .coefficients import ZZ, NoContext
 from ._coefficient_ops import _gcd_coefficient, _quotient, _exact
 from .dense import DensePoly
 from .primes import prime, _residue
-from ._nmod import _Field, _gcd_words, _resultant_words, _trim_words
+from ._nmod_euclid import _Field, _gcd_words, _resultant_words, _trim_words
 
 
 struct _Reconstruction(Movable):

@@ -7,7 +7,7 @@ from .errors import Budget, PolyError, PolyErrorKind, _allocation
 from .evaluate import _derivative_dense as _derivative
 from .division import _dense_divide
 from ._euclidean import _extended
-from ._nmod import _Field, _gcd_words
+from ._nmod_euclid import _Field, _gcd_words
 
 
 def _words(f: DensePoly[ModInt], field: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:

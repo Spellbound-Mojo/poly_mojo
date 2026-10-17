@@ -19,7 +19,7 @@ from .coefficients import CoefficientRing, ZZ, ModInt, NoContext
 from .sparse import SparsePoly, Term
 from .monomial import Monomial
 from .primes import prime, _residue
-from ._nmod import _Field, _resultant_words, _trim_words
+from ._nmod_euclid import _Field, _resultant_words, _trim_words
 from ._univariate_modular import _Reconstruction
 
 # Specialization grids above this many points use the subresultant PRS.

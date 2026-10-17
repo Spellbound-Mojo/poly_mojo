@@ -4,7 +4,7 @@ from .coefficients import CoefficientRing, ZZ, ModInt
 from .sparse import SparsePoly
 from .dense import DensePoly
 from ._views import _variables, _constant
-from ._nmod import _Field, _resultant_words
+from ._nmod_euclid import _Field, _resultant_words
 from ._univariate_modular import _modular_resultant
 from ._multivariate_resultant import _integer_resultant, _field_resultant
 from .certificates import ResultantResult
