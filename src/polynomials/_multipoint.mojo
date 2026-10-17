@@ -13,7 +13,7 @@ from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size,
 from ._nmod import _Field, _dot, _mulm, _addm, _subm, _negm, _to, _invm, _mul, _schoolbook, _trim, _reversed, _slice, _sub, _add, _divmod_classic
 from ._ntt import _modular_product
 
-comptime _TRANSFORM = 192
+comptime _TRANSFORM = 384
 """Shorter operand length from which products use transforms instead of Karatsuba."""
 comptime _NEWTON = 64
 """Divisor degree and quotient length from which remainders use a Newton inverse."""
@@ -136,12 +136,43 @@ def _horner(r: List[UInt64], x: UInt64, f: _Field) -> UInt64:
     return value
 
 
+def _middle(a: List[UInt64], node: List[UInt64], skip: Int, keep: Int, f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
+    """Coefficients skip ... skip + keep - 1 of rev(node) * a, zero-padded to length keep."""
+    var product = _mullow_fast(_reversed(node, len(node), budget), a, skip + keep, f, budget)
+    _allocation[UInt64](keep, budget)
+    var result = List[UInt64](length=keep, fill=0)
+    for k in range(keep):
+        if skip + k < len(product):
+            result[k] = product[skip + k]
+    return result^
+
+
 def _evaluate(tree: _Tree, poly: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
-    """Values at every tree point, by remainders down to blocks of 2^_LEAF_LEVEL points."""
+    """Values at every tree point by a scaled remainder tree, down to blocks of 2^_LEAF_LEVEL points.
+
+    A node v of degree d keeps A_v, the first d coefficients in 1/x of
+    (poly mod M_v) / M_v. A child u with sibling w of degree e has
+    A_u[k] = sum_i M_w[i] A_v[k + i], a middle product, so each node costs one
+    product and no division. At a block, poly mod M_v = M_v * A_v truncated.
+    """
     var count = len(tree.points)
     var top = len(tree.levels) - 1
     var stop = min(_LEAF_LEVEL, top)
-    var current: List[List[UInt64]] = [_remainder(poly, tree.root(), f, budget)]
+    var root = tree.root()
+    var n = len(root) - 1
+    var reduced = _remainder(poly, root, f, budget) if len(poly) > n else poly.copy()
+    _allocation[UInt64](count, budget)
+    var values = List[UInt64](capacity=count)
+    if top <= stop:
+        _charge_size(_product(count, len(reduced) + 1), budget)
+        for i in range(count):
+            values.append(_horner(reduced, tree.points[i], f))
+        return values^
+    # With t = 1/x, poly / M_root = t * rev(poly) / rev(M_root), as series in t.
+    var inverse = _inverse_series(_slice(_reversed(root, n + 1, budget), 0, n, budget), n, f, budget)
+    var first = _mullow_fast(_reversed(reduced, n, budget), inverse, n, f, budget)
+    first.resize(n, 0)
+    var current: List[List[UInt64]] = [first^]
     var level = top
     while level > stop:
         level -= 1
@@ -151,19 +182,27 @@ def _evaluate(tree: _Tree, poly: List[UInt64], f: _Field, mut budget: Budget) ra
         for j in range(len(current)):
             budget.charge(1)
             if 2 * j + 1 < len(nodes):
-                next.append(_remainder(current[j], nodes[2 * j], f, budget))
-                next.append(_remainder(current[j], nodes[2 * j + 1], f, budget))
+                var left = len(nodes[2 * j]) - 1
+                var right = len(nodes[2 * j + 1]) - 1
+                next.append(_middle(current[j], nodes[2 * j + 1], right, left, f, budget))
+                next.append(_middle(current[j], nodes[2 * j], left, right, f, budget))
             else:
                 next.append(current[j].copy())
         current = next^
-    _allocation[UInt64](count, budget)
-    var values = List[UInt64](capacity=count)
-    var block = 1 << stop
+    ref blocks = tree.levels[stop]
+    var size = 1 << stop
     for j in range(len(current)):
-        var end = min(count, (j + 1) * block)
-        _charge_size(_product(end - j * block, len(current[j]) + 1), budget)
-        for i in range(j * block, end):
-            values.append(_horner(current[j], tree.points[i], f))
+        ref m = blocks[j]
+        ref a = current[j]
+        var d = len(m) - 1
+        var end = min(count, (j + 1) * size)
+        _charge_size(_product(d + end - j * size, d + 1), budget)
+        # remainder[k] = sum over i of M[k + 1 + i] * A[i].
+        var remainder = List[UInt64](capacity=d)
+        for k in range(d):
+            remainder.append(_dot(m.unsafe_ptr().unsafe_offset(k + 1), a.unsafe_ptr(), d - k, f))
+        for i in range(j * size, end):
+            values.append(_horner(remainder, tree.points[i], f))
     return values^
 
 
