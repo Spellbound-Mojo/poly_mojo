@@ -13,7 +13,10 @@ from .coefficients import ModInt, Modulus
 from ._nmod import _Field, _field, _dot, _mulm, _addm, _subm, _negm, _to, _from, _invm, _reversed
 from ._multipoint import _mullow_fast, _redc_all, _TRANSFORM
 from ._ntt import _modular_range
+from ._nmod import _slice
 
+comptime _SETUP = 64
+"""Work charged for preparing a native field, before any series work."""
 comptime _DIRECT = 32
 """Orders below which inverses and exponentials use the quadratic recurrences."""
 
@@ -29,7 +32,9 @@ def _middle(a: List[UInt64], b: List[UInt64], lo: Int, hi: Int, f: _Field, mut b
         for i in range(lo, min(hi, len(low))):
             result.append(low[i])
     else:
-        result = _modular_range(a, b, lo, hi, f.p, budget)
+        # A cyclic transform of length >= hi needs operands no longer than hi;
+        # coefficients from hi on cannot reach the requested range.
+        result = _modular_range(_slice(a, 0, hi, budget), _slice(b, 0, hi, budget), lo, hi, f.p, budget)
         _redc_all(result, f)
     result.resize(hi - lo, 0)
     return result^
@@ -175,6 +180,12 @@ def _native_series(coefficients: List[ModInt], ring: Modulus, order: Int, operat
     if (operation == 0 and constant == 0) or (operation == 1 and constant != 1) or (operation == 2 and constant != 0):
         return None
     var f = _field(ring.value)
+    # Field setup and the Newton schedule are charged before any work, like
+    # the generic routines: a constant plus order * log2(order).
+    var steps = 1
+    while (1 << steps) < order:
+        steps += 1
+    _charge_size(_product(order, steps) + _SETUP, budget)
     _allocation[UInt64](len(coefficients), budget)
     var a = List[UInt64](capacity=min(len(coefficients), order))
     for i in range(min(len(coefficients), order)):
