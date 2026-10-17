@@ -4,8 +4,9 @@ from .coefficient_buffer import _CoefficientView, _view
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
 from ._coefficient_ops import _copy
 from ._toolkit_exact import _ExactOps, _use_newton
-from ._toolkit_ops import _mul_values
-from ._series_ops import _log_values, _exp_values, _series_constant
+from ._toolkit_ops import _mul_values, _derivative_values
+from ._series_ops import _log_values, _exp_values, _series_constant, _newton_divide
+from ._ntt import _ntt_middle_product
 
 
 def _exact_log[C: CoefficientField](a: _CoefficientView[C, _], length: Int, context: C.Context, mut budget: Budget) raises PolyError -> List[C]:
@@ -21,29 +22,58 @@ def _exact_exp[C: CoefficientField](a: _CoefficientView[C, _], length: Int, cont
     return _newton_exp(_view(a), length, context, budget)
 
 
+def _middle_values[C: CoefficientField](a: List[C], b: List[C], lo: Int, hi: Int, context: C.Context, mut budget: Budget) raises PolyError -> List[C]:
+    """Coefficients lo ... hi - 1 of a * b, zero-padded: one cyclic transform where the kernel applies."""
+    var middle = _ntt_middle_product(_view(a), _view(b), lo, hi, budget)
+    if middle:
+        return middle.take()
+    var low = _mul_values[_ExactOps[C]](_view(a), _view(b), hi, context, budget)
+    _allocation[C](hi - lo, budget)
+    var result = List[C](capacity=hi - lo)
+    for i in range(lo, hi):
+        result.append(_copy(low[i], budget) if i < len(low) else C.zero(context))
+    return result^
+
+
 def _newton_exp[C: CoefficientField](a: _CoefficientView[C, _], length: Int, context: C.Context, mut budget: Budget) raises PolyError -> List[C]:
     if length < 1:
         raise PolyError(PolyErrorKind.DOMAIN, "exponential needs a known constant coefficient")
     _series_constant[_ExactOps[C]](_view(a), 0, context, budget)
     var known = min(length, 16)
-    var result = _exp_values[_ExactOps[C]](_view(a), known, context, budget)
+    var g = _exp_values[_ExactOps[C]](_view(a), known, context, budget)
+    # h = 1 / g is carried along: extended by one Newton step per doubling and
+    # corrected after g changes, so log g needs no fresh inverse.
+    var h = _newton_divide[_ExactOps[C]](_view([C.one(context)]), _view(g), known, context, budget)
     while known < length:
         var next = _sum(known, min(known, length - known))
-        # g_new = g * (1 + a - log(g)). The error starts at x^known,
-        # so only its high block and a truncated product are needed.
-        # _exact_log checks every required integer divisor, including when
-        # the numerator vanishes in a field of positive characteristic.
-        var logarithm = _exact_log(_view(result), next, context, budget)
-        _allocation[C](next - known, budget)
-        var high = List[C](capacity=next - known)
+        var width = next - known
+        # 1. h <- h + h (1 - g h) to precision next.
+        var e = _middle_values(g, h, known, next, context, budget)
+        var t = _mul_values[_ExactOps[C]](_view(h), _view(e), width, context, budget)
+        _allocation[C](width, budget)
+        h.reserve(next)
+        for i in range(width):
+            h.append(t[i].neg(budget) if i < len(t) else C.zero(context))
+        # 2. (log g)' = g' h; only coefficients known ... next - 1 of log g are new.
+        # Every divisor k is inverted, even under a zero numerator, so a
+        # characteristic obstruction is reported as before.
+        var derivative = _derivative_values[_ExactOps[C]](_view(g), context, budget)
+        var slope = _middle_values(derivative, h, known - 1, next - 1, context, budget)
+        _allocation[C](width, budget)
+        var high = List[C](capacity=width)
         for k in range(known, next):
+            var divisor = _ExactOps[C].integer(k, context, budget).inverse(budget)
             var value = _copy(a[k], budget) if k < len(a) else C.zero(context)
-            high.append(value.sub(logarithm[k], budget))
-        var correction = _mul_values[_ExactOps[C]](_view(result), _view(high), next - known, context, budget)
-        _allocation[C](next - known, budget)
-        result.reserve(next)
-        for k in range(next - known):
+            high.append(value.sub(slope[k - known].mul(divisor, budget), budget))
+        # 3. g <- g (1 + x^known high).
+        var correction = _mul_values[_ExactOps[C]](_view(g), _view(high), width, context, budget)
+        g.reserve(next)
+        for i in range(width):
             budget.charge(1)
-            result.append(_copy(correction[k], budget) if k < len(correction) else C.zero(context))
+            g.append(_copy(correction[i], budget) if i < len(correction) else C.zero(context))
+        # 4. 1 / g_new = h (1 - x^known high) modulo x^next.
+        var shift = _mul_values[_ExactOps[C]](_view(h), _view(high), width, context, budget)
+        for i in range(min(width, len(shift))):
+            h[known + i] = h[known + i].sub(shift[i], budget)
         known = next
-    return result^
+    return g^
