@@ -18,6 +18,8 @@ comptime _KARATSUBA_SMALL = 1024
 comptime _SMALL = UInt64(1) << 28
 """Primes below this bound keep products under 2^56, so 64-bit SIMD lanes
 accumulate 256 of them exactly before a reduction."""
+comptime _TINY = UInt64(1) << 24
+"""Primes below this bound let the eight SIMD lanes of a dot product be summed before one reduction."""
 comptime _TRANSFORM = 512
 """Shorter operand length at which products switch from Karatsuba to number-theoretic transforms."""
 comptime _TRANSFORM_ONE = 384
@@ -124,8 +126,12 @@ def _dot(a: Pointer[mut=False, UInt64, _], b: Pointer[mut=False, UInt64, _], n: 
                 var y = b.unsafe_offset(i).unsafe_load[width=8]()
                 acc += (x & mask) * (y & mask)
                 i += 8
-            comptime for lane in range(8):
-                total = _addm(total, _redc(UInt128(acc[lane]), f), f)
+            if f.p < _TINY:
+                # Lanes hold at most 256 products below 2^48: their sum fits a word.
+                total = _addm(total, _redc(UInt128(acc.reduce_add()), f), f)
+            else:
+                comptime for lane in range(8):
+                    total = _addm(total, _redc(UInt128(acc[lane]), f), f)
     while i < n:
         var stop = min(n, i + f.batch)
         var acc = UInt128(0)
