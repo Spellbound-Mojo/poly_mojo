@@ -242,7 +242,7 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
             if not oracle:
                 oracle = _root_oracle(exact.value(), chain.polynomials[len(chain.polynomials) - 1], budget)
             var enclosure = enclosed.take() if enclosed else _enclosure(oracle.value(), cell.interval.real_low, cell.interval.real_high, budget)
-            var cut = _oracle_split(oracle.value(), enclosure, cell.interval.real_low, cell.interval.real_high, degree, budget)
+            var cut = _oracle_split(oracle.value(), enclosure, cell.interval.real_low, cell.interval.real_high, degree, options.absolute_bits, budget)
             var below = cut[1] < 0
             var lower = NumericBox.real_interval(cell.interval.real_low, cut[0], budget)
             var upper = NumericBox.real_interval(cut[0], cell.interval.real_high, budget)

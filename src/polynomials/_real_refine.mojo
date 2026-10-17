@@ -276,25 +276,37 @@ def _qir_step(oracle: _RootOracle, mut enclosure: _Enclosure, mut budget: Budget
     return _side(oracle, enclosure, QQ(below^), budget) >= 0
 
 
-def _oracle_split(oracle: _RootOracle, mut enclosure: _Enclosure, low: QQ, high: QQ, degree: Int, mut budget: Budget) raises PolyError -> Tuple[QQ, Int]:
+def _oracle_split(oracle: _RootOracle, mut enclosure: _Enclosure, low: QQ, high: QQ, degree: Int, absolute_bits: Int, mut budget: Budget) raises PolyError -> Tuple[QQ, Int]:
     """The cover's split point for a single-root cell and the side of its root.
 
     The candidates and their order are those of the Sturm path: the first
     k/(k+1) point of the cell that is not a root of f, and the only root of f
-    in the cell is the enclosed root. The enclosure is tightened to below the
-    cell width / 2**32 only when a candidate falls inside it.
+    in the cell is the enclosed root. When a candidate falls inside the
+    enclosure and the cell still needs more than a few halvings for an
+    absolute target of 2^-absolute_bits (or any target when absolute_bits is
+    zero), the enclosure is tightened by QIR to below the cell width / 2^guard,
+    guard = min(32, needed + 2); otherwise one sign evaluation decides.
     """
-    var width = high.sub(low, budget)
+    var width = Optional[QQ]()
     for k in range(1, degree + 2):
         var middle: QQ
         var dyadic = _dyadic_midpoint(low, high) if k == 1 else Optional[QQ]()
         if dyadic:
             middle = dyadic.take()
         else:
+            if not width:
+                width = high.sub(low, budget)
             var fraction = QQ(Rational(k)).mul(QQ(Rational(k + 1)).inverse(budget), budget)
-            middle = low.add(width.mul(fraction, budget), budget)
+            middle = low.add(width.value().mul(fraction, budget), budget)
         if _compare_enclosure(enclosure, middle.value) == 2:
-            _tighten(oracle, enclosure, width, 32, budget)
+            if not width:
+                width = high.sub(low, budget)
+            var needed = 64
+            if absolute_bits > 0:
+                ref span = width.value().value
+                needed = max(0, _bits(span.numerator()) - _bits(span.denominator()) + 1 + absolute_bits)
+            if needed > 4:
+                _tighten(oracle, enclosure, width.value(), min(32, needed + 2), budget)
         var side = _side(oracle, enclosure, middle, budget)
         if side != 0:
             return (middle^, side)
