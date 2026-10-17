@@ -2842,8 +2842,12 @@ def _fraction(x: Integer, modulus: Integer, bits: Int) raises PolyError -> Optio
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
 
 
-def _euclid(x: Integer, modulus: Integer, bits: Int) raises -> Optional[Tuple[Integer, Integer]]:
-    """As `_fraction`, with Lehmer steps while the remainders are long (as `_reconstruct` in `_rational_groebner`)."""
+def _euclid(x: Integer, modulus: Integer, bits: Int, den_bits: Int = -1) raises -> Optional[Tuple[Integer, Integer]]:
+    """As `_fraction`, with Lehmer steps while the remainders are long (as `_reconstruct` in `_rational_groebner`).
+
+    With `den_bits` nonnegative the denominator is held below 2^den_bits
+    instead of 2^bits, as in `_Euclid.fraction`.
+    """
     var bound = Integer(1) << Integer(bits)
     var r0 = modulus.copy()
     var r1 = x.copy()
@@ -2889,7 +2893,7 @@ def _euclid(x: Integer, modulus: Integer, bits: Int) raises -> Optional[Tuple[In
         r1 = qr[1].copy()
         t0 = t1^
         t1 = t2^
-    if t1.sign() == 0 or t1.magnitude_bit_length() > bits:
+    if t1.sign() == 0 or t1.magnitude_bit_length() > (den_bits if den_bits >= 0 else bits):
         return None
     if t1.sign() < 0:
         return (Integer(0) - r1, Integer(0) - t1)

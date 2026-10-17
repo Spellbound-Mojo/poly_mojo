@@ -257,6 +257,21 @@ def check_fractions(mut c: Checker, mut work: Budget) raises:
         if same and fast:
             same = fast.value()[0] == slow.value()[0] and fast.value()[1] == slow.value()[1]
         c.check(same, "limb reconstruction at step " + String(step))
+        # Unbalanced bounds, as a retried certificate fraction asks: a long
+        # numerator and a short denominator.
+        var den_bits = rng.below(bits + 1)
+        var num_bits = max(0, size - 2 - den_bits)
+        var fast_u = euclid.fraction(x_limbs, limbs_of_modulus, num_bits, den_bits)
+        var slow_u = _euclid(x, modulus, num_bits, den_bits)
+        var same_u = Bool(fast_u) == Bool(slow_u)
+        if same_u and fast_u:
+            ref a = fast_u.value()[0]
+            ref b = fast_u.value()[1]
+            same_u = a == slow_u.value()[0] and b == slow_u.value()[1]
+            # The fraction is x modulo the modulus, within both bounds.
+            same_u = same_u and div_rem_euclid(a - b * x, modulus)[1].sign() == 0
+            same_u = same_u and a.magnitude_bit_length() <= num_bits and b.sign() > 0 and b.magnitude_bit_length() <= den_bits
+        c.check(same_u, "unbalanced limb reconstruction at step " + String(step))
 
 
 def check_rescale(mut c: Checker) raises:
