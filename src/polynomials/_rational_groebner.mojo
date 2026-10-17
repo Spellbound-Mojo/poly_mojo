@@ -445,6 +445,54 @@ def _residues(value: Integer, primes: List[UInt64], count: Int, mut residues: Li
         b += 1
 
 
+struct _Prefix(Movable):
+    """The lift of numerators from a prefix of the primes, with the two checking primes after it.
+
+    A candidate is taken only when it has at most `capacity` bits, 66 fewer
+    than the prefix's product, and agrees with the checking primes.
+    """
+    var lift: _Lift
+    var blocks: Int
+    """The prefix's blocks; 0 when there is no prefix."""
+    var capacity: Int
+    var exhausted: Bool
+    """Whether the capacity asked for would take every block, so no prefix can serve."""
+    var half: Integer
+    var checks: List[_Check]
+    var checked: List[Int]
+    """The checking primes' indices."""
+    var shifts: List[UInt64]
+    """The prefix's product modulo each checking prime."""
+
+    def __init__(out self, primes: List[UInt64], capacity: Int, mut budget: Budget) raises PolyError:
+        """The shortest prefix for numerators of `capacity` bits, or none when it would take every block."""
+        var total = (len(primes) + _BATCH - 1) // _BATCH
+        var blocks = 0
+        var bits = 0
+        while blocks < total and bits < capacity + 66:
+            # Every prime is above 2^30.
+            bits += 30 * (_end(primes, blocks) - blocks * _BATCH)
+            blocks += 1
+        self.blocks = blocks if capacity > 0 and blocks < total else 0
+        self.capacity = bits - 66 if self.blocks > 0 else 0
+        self.exhausted = capacity > 0 and self.blocks == 0
+        self.lift = _Lift(primes, self.blocks, budget)
+        try:
+            self.half = self.lift.modulus // 2
+        except e:
+            raise PolyError(PolyErrorKind.CAPACITY, String(e))
+        self.checks = List[_Check]()
+        self.checked = List[Int]()
+        self.shifts = List[UInt64]()
+        if self.blocks > 0:
+            var limbs = List[UInt64]()
+            _magnitude(self.lift.modulus, limbs)
+            for i in range(len(primes) - 1, max(self.lift.primes, len(primes) - 2) - 1, -1):
+                self.checks.append(_Check(primes[i], len(limbs), budget))
+                self.checked.append(i)
+                self.shifts.append(self.checks[len(self.checks) - 1].residue(limbs))
+
+
 struct _Images[W: Int](Movable):
     """Monic modular bases that share their leading monomials, and their CRT.
 
@@ -453,9 +501,10 @@ struct _Images[W: Int](Movable):
     (`_Lift`) only for the coefficients it needs: in full for a few probes
     and wherever a denominator shows, and otherwise, for a coefficient c of
     an element whose denominator so far is d, the numerator c d alone. It is
-    below the reconstruction bound, so it needs only the residues of c d
-    modulo a prefix of the primes whose product exceeds twice the bound,
-    checked against two primes outside the prefix.
+    about as large as the numerators the full lifts have shown, so it needs
+    only the residues of c d modulo a prefix of the primes whose product
+    exceeds those by 2^66 (`_Prefix`), checked against two primes outside
+    the prefix; one that does not fit takes a full lift and grows the prefix.
     """
     var kind: UInt8
     var leads: List[_Packed[Self.W]]
@@ -704,30 +753,10 @@ struct _Images[W: Int](Movable):
             if not _reconstruct(full.value(gathered, budget), full.modulus, bound, budget):
                 self.probe = (pe, pk)
                 return None
-        # The prefix for numerators, with the checking primes after it.
-        var prefix_blocks = 0
-        var bits = 0
-        while prefix_blocks < blocks and bits < bound.magnitude_bit_length() + 66:
-            # Every prime is above 2^30.
-            bits += 30 * (_end(self.primes, prefix_blocks) - prefix_blocks * _BATCH)
-            prefix_blocks += 1
-        var use_prefix = prefix_blocks < blocks
-        var prefix = _Lift(self.primes, prefix_blocks if use_prefix else 0, budget)
-        var prefix_half: Integer
-        try:
-            prefix_half = prefix.modulus // 2
-        except e:
-            raise PolyError(PolyErrorKind.CAPACITY, String(e))
-        var checks = List[_Check]()
-        var checked = List[Int]()
-        var shifts = List[UInt64]()
+        # The prefix for numerators, sized by the largest numerator a full
+        # lift has given so far, and grown when one does not fit.
+        var prefix = _Prefix(self.primes, 0, budget)
         var limbs = List[UInt64]()
-        if use_prefix:
-            _magnitude(prefix.modulus, limbs)
-            for i in range(len(self.primes) - 1, max(prefix.primes, len(self.primes) - 2) - 1, -1):
-                checks.append(_Check(self.primes[i], len(limbs), budget))
-                checked.append(i)
-                shifts.append(checks[len(checks) - 1].residue(limbs))
         var scales = List[UInt64]()
         var result = List[List[_Term[ZZ, Self.W]]](capacity=len(self.leads))
         for e in range(len(self.leads)):
@@ -743,34 +772,34 @@ struct _Images[W: Int](Movable):
             for k in range(len(self.monomials[e])):
                 budget.charge(1)
                 var numerator = Optional[Integer](None)
-                if use_prefix:
-                    # The numerator from the prefix, if it is within the bound
-                    # and agrees with the checking primes.
-                    self._gather(e, k, prefix_blocks, scales, gathered)
-                    var candidate = prefix.value(gathered, budget)
-                    var negative = candidate > prefix_half
+                if prefix.blocks > 0:
+                    # The numerator from the prefix, if it is within the
+                    # prefix's capacity and agrees with the checking primes.
+                    self._gather(e, k, prefix.blocks, scales, gathered)
+                    var candidate = prefix.lift.value(gathered, budget)
+                    var negative = candidate > prefix.half
                     limbs.clear()
                     _magnitude(candidate, limbs)
                     var agrees = True
-                    for c in range(len(checks)):
-                        var i = checked[c]
+                    for c in range(len(prefix.checks)):
+                        var i = prefix.checked[c]
                         var p = self.primes[i]
                         var r = UInt64(self.residues[e][i // _BATCH][(i % _BATCH) * len(self.monomials[e]) + k])
                         if len(scales):
                             r = UInt64((UInt128(r) * UInt128(scales[i])) % UInt128(p))
-                        var got = checks[c].residue(limbs)
+                        var got = prefix.checks[c].residue(limbs)
                         if negative:
-                            got = (got + p - shifts[c]) % p
+                            got = (got + p - prefix.shifts[c]) % p
                         if got != r:
                             agrees = False
                             break
                     if agrees:
                         try:
                             if negative:
-                                candidate -= prefix.modulus
+                                candidate -= prefix.lift.modulus
                         except err:
                             raise PolyError(PolyErrorKind.CAPACITY, String(err))
-                        if abs(candidate) <= bound:
+                        if candidate.magnitude_bit_length() <= prefix.capacity and abs(candidate) <= bound:
                             numerator = Optional(candidate^)
                 if not numerator:
                     # The coefficient times d modulo M, lifted from the
@@ -799,6 +828,11 @@ struct _Images[W: Int](Movable):
                         changes.append(k)
                         denominators.append(denominator.copy())
                         _residues(denominator, self.primes, len(self.primes), scales, budget)
+                    # Later numerators are about this large: a prefix with a
+                    # block to spare covers them.
+                    var size = exact.magnitude_bit_length()
+                    if not prefix.exhausted and size > prefix.capacity and prefix.capacity < bound.magnitude_bit_length():
+                        prefix = _Prefix(self.primes, min(size + 30 * _BATCH, bound.magnitude_bit_length()), budget)
                     numerator = Optional(exact^)
                 numerators.append(numerator.take())
             # Over the final denominator: numerators before a change lack the
