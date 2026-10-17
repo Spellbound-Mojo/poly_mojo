@@ -13,7 +13,7 @@ from ._common import Values, _check_batch, _FieldKind, _Element, _OwnedElement, 
 from polynomials import CoefficientRing
 from ._common import _CoreKind
 from ._interop import _sparse_copy, _variables, _Shape
-from polynomials import gcd as _gcd, gcd_value as _gcd_value, content as _content, primitive_part as _primitive_part, resultant as _resultant, subresultants as _subresultants, divide_exact as _divide_exact
+from polynomials import gcd as _gcd, gcd_value as _gcd_value, resultant_value as _resultant_value, content as _content, primitive_part as _primitive_part, resultant as _resultant, subresultants as _subresultants, divide_exact as _divide_exact
 from ._interop import _take_sparse
 from polynomials import QQi, factor_multivariate_gaussian, factor_multivariate_finite_field, SparseSquarefreeDecomposition, squarefree_multivariate
 from polynomials import compose_dense
@@ -1851,8 +1851,8 @@ def resultant[A: Iterable, B: Iterable, P: Copyable & Deinitable, C: Copyable & 
     comptime k = _Join[_Kind[C], _Kind[D]]
     _axis[P](axis)
     var pair = _pair[k, A, B, P, C, D](a, b, budget)
-    var result = _resultant(pair[0]._core[], pair[1]._core[], Int64(axis), budget)
-    return Array[P, k](_take_sparse(result.resultant), budget)
+    var value = _resultant_value(pair[0]._core[], pair[1]._core[], Int64(axis), budget)
+    return Array[P, k](_take_sparse(value), budget)
 
 def resultant[A: Iterable, B: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable, D: Copyable & Deinitable](a: A, b: B, *, max_steps: UInt64 = UInt64.MAX, axis: Int = 0) raises PolyError -> Array[P, _Join[_Kind[C], _Kind[D]]] where _Element[A] == Tuple[P, C] and _Element[B] == Tuple[P, D]:
     """Eliminate the variable using the Sylvester sign convention.

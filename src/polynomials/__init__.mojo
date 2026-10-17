@@ -24,7 +24,7 @@ from .cad_types import CADPolynomialLift, CADStackCertificate, CADCell, CADCerti
 from .cad import cad, check_cad, cad_cell, check_cad_cell
 from .cad_covering import cad_covering, check_cad_covering
 from .cylindrical_covering import CADConflict, CADConflictInterval, CylindricalCoveringCertificate, cylindrical_covering, check_cylindrical_covering
-from .resultant import resultant, subresultants
+from .resultant import resultant, resultant_value, subresultants
 from .fractions import RationalFunction
 from .squarefree import squarefree
 from .sparse_squarefree import SparseSquarefreeDecomposition, squarefree_multivariate, check_sparse_squarefree_product
