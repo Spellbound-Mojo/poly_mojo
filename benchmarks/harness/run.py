@@ -31,6 +31,7 @@ import time
 import traceback
 
 from . import generate, measure, tools
+from . import gcd as gcd_family
 from .polys import canonical_basis, digest
 
 HERE = Path(__file__).resolve().parent.parent
@@ -38,6 +39,7 @@ FAMILY_TOOLS = {
     'groebner': ['polymojo', 'polymojo-certified', 'polymojo-uncertified', 'sympy-buchberger', 'sympy-f5b', 'sympy-buchberger-flint',
                  'singular-std', 'singular-slimgb', 'singular-modstd', 'msolve'],
     'streaming': ['polymojo-decompose', 'polymojo-materialized', 'polymojo-streaming'],
+    'gcd': gcd_family.FAMILY_TOOLS,
 }
 
 
@@ -209,8 +211,9 @@ def main():
     parser.add_argument('--keep', action='store_true', help='Keep work directories')
     args = parser.parse_args()
 
-    selected = [tools.TOOLS[name] for name in (args.tools.split(',') if args.tools else FAMILY_TOOLS[args.family])]
-    generate.main([])
+    registry = gcd_family.TOOLS if args.family == 'gcd' else tools.TOOLS
+    selected = [registry[name] for name in (args.tools.split(',') if args.tools else FAMILY_TOOLS[args.family])]
+    generate.main(['--family', args.family])
     cases = [c for c in generate.load(args.family) if re.search(args.cases, c['id'])]
     builds = tools.prebuild(selected, cases, args.build_jobs)
     if args.build_only:

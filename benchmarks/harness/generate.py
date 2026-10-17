@@ -266,9 +266,15 @@ def generators(case):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.parse_args(argv)
-    print(f"groebner: {write(groebner_cases(), 'groebner')} cases")
-    print(f"streaming: {write(streaming_cases(), 'streaming')} cases")
+    parser.add_argument('--family', help='Write only this family (default: all)')
+    family = parser.parse_args(argv).family
+    if family in (None, 'groebner'):
+        print(f"groebner: {write(groebner_cases(), 'groebner')} cases")
+    if family in (None, 'streaming'):
+        print(f"streaming: {write(streaming_cases(), 'streaming')} cases")
+    if family in (None, 'gcd'):
+        from .gcd import gcd_cases
+        print(f"gcd: {write(gcd_cases(), 'gcd')} cases")
 
 
 if __name__ == '__main__':
