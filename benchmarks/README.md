@@ -223,6 +223,12 @@ back ends), Yices 2 (MCSAT with libpoly, built with `--enable-mcsat`), and the
 CAD tools through existential quantifier elimination. `cad.solve` accepts a
 conjunction, so SMT-LIB instances with Boolean structure stay out of the suite.
 
+Harness: `python -m harness.cad generate|run|report` (module
+`harness/cad.py`, driver `drivers/poly_mojo/cad.mojo`, classic problems from
+`harness/data/cad_example_bank_qepcad.txt`). QEPCAD B comes from a Tarski build
+named by `$QEPCAD_HOME`, Z3 from the interpreter named by `$Z3_PYTHON`; absent
+tools report `unsupported`.
+
 Check: satisfiable or unsatisfiable must agree; a satisfying point is
 substituted exactly and its signs checked independently. For full CAD, every
 tool's sample points are sign-checked and its cell count is reported. Cell
@@ -535,6 +541,7 @@ pixi run test            # check the generators against SymbolicData
 pixi run bench -- --family groebner --timeout 120 --single-above 1
 pixi run bench -- --family groebner --timeout 600 --single-above 1   # retry the timeouts
 pixi run bench -- --family streaming --processes 1
+pixi run bench -- --family gcd --timeout 60   # gcds, resultants, discriminants (harness/gcd.py)
 pixi run report          # or: pixi run report -- results/<host>/<date>
 ```
 

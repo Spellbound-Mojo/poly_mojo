@@ -11,6 +11,8 @@ from ._dense_ops import _gcd as _field_gcd
 from ._views import _is_unit
 from ._tower import _split, _one, _zero, _constant, _variables, _exact_poly
 from ._prs import _prs
+from ._univariate_modular import _GcdSearch, _next_gcd_candidate, _univariate_gcd
+from ._multivariate_gcd import _deflation, _deflates, _scaled, _image_coprime
 from .primes import prime, _residue, _merge_residue, _symmetric
 
 
@@ -52,40 +54,12 @@ def _modular_primitive(f: SparsePoly[ZZ], h: SparsePoly[ZZ], variable: Int64, mu
     var fd = DensePoly[ZZ].from_sparse(f, budget, variable=variable)
     var hd = DensePoly[ZZ].from_sparse(h, budget, variable=variable)
     var gamma = _gcd_coefficient(fd.coefficients[len(fd.coefficients) - 1], hd.coefficients[len(hd.coefficients) - 1], budget)
-    var best = min(fd.degree(), hd.degree()) + 1
-    var reconstructed = List[Integer]()
-    var modulus = Integer(1)
-    var index = 0
+    var state = _GcdSearch(gamma^, min(fd.degree(), hd.degree()) + 1, budget)
     while True:
         budget.charge(1)
-        var p = prime(index, budget)
-        index = _sum(index, 1)
-        # Both degrees must survive reduction, as required by G-5's proof.
-        # Testing only gamma would incorrectly admit a drop in one input.
-        if _residue(fd.coefficients[len(fd.coefficients) - 1].value, p, budget) == 0 or _residue(hd.coefficients[len(hd.coefficients) - 1].value, p, budget) == 0:
-            continue
-        var ctx = Modulus(_prime_value=p)
-        var image = _field_gcd(_mod_image(fd, ctx, budget), _mod_image(hd, ctx, budget), budget)
-        if image.degree() > best:
-            continue
-        if image.degree() < best:
-            best = image.degree()
-            _allocation[Integer](best + 1, budget)
-            reconstructed = List[Integer](length=best + 1, fill=Integer(0))
-            modulus = Integer(1)
-        image = image.scale(ModInt(_residue(gamma.value, p, budget), ctx), budget)
-        for i in range(best + 1):
-            budget.charge(1)
-            reconstructed[i] = _merge_residue(reconstructed[i], modulus, image.coefficients[i].value, p, budget)
-        modulus = ZZ(modulus.copy()).mul(ZZ(Integer(Int(p))), budget).value
-        _allocation[ZZ](best + 1, budget)
-        var coefficients = List[ZZ](capacity=best + 1)
-        for i in range(best + 1):
-            budget.charge(1)
-            coefficients.append(ZZ(_symmetric(reconstructed[i], modulus, budget)))
-        var dense = DensePoly[ZZ].from_coefficients(variable, NoContext(), coefficients^, budget)
-        if dense.degree() != best:
-            continue
+        var dense = _next_gcd_candidate(fd, hd, state, budget)
+        if dense.degree() == 0:
+            return _one(f, budget)
         var candidate = _primitive_zz(dense.to_sparse(f.order, budget), budget)
         if divide_exact(f, candidate, budget) and divide_exact(h, candidate, budget):
             return candidate^
@@ -122,15 +96,24 @@ def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budge
         elif C == ModInt:
             var result = _field_gcd(DensePoly[ModInt].from_sparse(rebind[SparsePoly[ModInt]](f), budget, variable=variable), DensePoly[ModInt].from_sparse(rebind[SparsePoly[ModInt]](h), budget, variable=variable), budget)
             return rebind_var[SparsePoly[C]](result.to_sparse(f.order, budget))
+    comptime if C == ZZ:
+        if len(variables) == 1 and max(f.degree_in(variable, budget), h.degree_in(variable, budget)) >= _MODULAR_THRESHOLD:
+            var fd = DensePoly[ZZ].from_sparse(rebind[SparsePoly[ZZ]](f), budget, variable=variable)
+            var hd = DensePoly[ZZ].from_sparse(rebind[SparsePoly[ZZ]](h), budget, variable=variable)
+            return rebind_var[SparsePoly[C]](_univariate_gcd(fd, hd, budget).to_sparse(f.order, budget))
+    comptime if C == ZZ:
+        if len(variables) > 1:
+            var exponents = _deflation(f, h, variables, budget)
+            if _deflates(exponents):
+                var deflated = _gcd_value(_scaled(f, variables, exponents, False, budget), _scaled(h, variables, exponents, False, budget), budget)
+                return _normalized(_scaled(deflated, variables, exponents, True, budget), budget)
+            if _image_coprime(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variable, variables, budget):
+                return _normalized(_gcd_value(_content(f, variable, budget), _content(h, variable, budget), budget), budget)
     var cf = _content(f, variable, budget)
     var ch = _content(h, variable, budget)
     var common = _gcd_value(cf, ch, budget)
     var pf = _exact_poly(f, cf, budget)
     var ph = _exact_poly(h, ch, budget)
-    comptime if C == ZZ:
-        if len(variables) == 1 and max(pf.degree_in(variable, budget), ph.degree_in(variable, budget)) >= _MODULAR_THRESHOLD:
-            var primitive = _modular_primitive(rebind[SparsePoly[ZZ]](pf), rebind[SparsePoly[ZZ]](ph), variable, budget)
-            return _normalized(common.mul(rebind[SparsePoly[C]](primitive), budget), budget)
     var sequence = _prs(pf, ph, variable, False, budget, history=False)
     var last = _zero(f, budget)
     if len(sequence):

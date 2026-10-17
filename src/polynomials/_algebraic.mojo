@@ -20,22 +20,37 @@ from .coefficients import QQ, NoContext
 from .dense import DensePoly
 from .certificates import SturmSequence, RootCountCertificate, Factorization, _dense_equal
 from ._dense_ops import _copy as _copy_poly, _gcd, _exact
-from ._root_ops import _compare as _compare_q, _copy as _copy_q, _midpoint, _variations
-from .evaluate import evaluate_dense
+from ._root_ops import _compare as _compare_q, _copy as _copy_q, _midpoint, _variations, _sign_at
 from .roots import sturm_sequence, isolate_real_roots
 from .factor import factor
 from .algebraic_types import RealAlgebraic as _Real, AlgebraicComparisonCertificate as _Comparison, _copy_real, _copy_sequence, _rational
+from .algebraic_arithmetic import AlgebraicArithmeticCertificate
 
 
 struct _NormalizationCache(Movable):
     var polynomials: List[DensePoly[QQ]]
     var factorizations: List[Factorization[QQ]]
     var sequences: List[SturmSequence]
+    # Arithmetic results are a function of the operation and the exact operand
+    # witnesses, so a repeated step reuses its certificate unchanged.
+    var operations: List[Int]
+    var operands: List[Tuple[_Real, _Real]]
+    var results: List[AlgebraicArithmeticCertificate]
 
     def __init__(out self):
         self.polynomials = List[DensePoly[QQ]]()
         self.factorizations = List[Factorization[QQ]]()
         self.sequences = List[SturmSequence]()
+        self.operations = List[Int]()
+        self.operands = List[Tuple[_Real, _Real]]()
+        self.results = List[AlgebraicArithmeticCertificate]()
+
+
+def _same_witness(a: _Real, b: _Real, mut budget: Budget) raises PolyError -> Bool:
+    budget.charge(1)
+    if a.rational != b.rational or a.polynomial.degree() != b.polynomial.degree():
+        return False
+    return a.low == b.low and a.high == b.high and _dense_equal(a.polynomial, b.polynomial, budget)
 
 
 def _sturm_index(f: DensePoly[QQ], mut sequences: List[SturmSequence], mut budget: Budget) raises PolyError -> Int:
@@ -52,7 +67,7 @@ def _sturm_index(f: DensePoly[QQ], mut sequences: List[SturmSequence], mut budge
 def _count_cached(f: DensePoly[QQ], low: QQ, high: QQ, mut sequences: List[SturmSequence], mut budget: Budget) raises PolyError -> Int:
     # Every interval is checked independently. Only the exact polynomial's
     # owned Sturm sequence is reused; returned witnesses receive budgeted copies.
-    if _compare_q(low, high, budget) >= 0 or evaluate_dense(f, low, budget).is_zero() or evaluate_dense(f, high, budget).is_zero():
+    if _compare_q(low, high, budget) >= 0 or _sign_at(f, low, budget) == 0 or _sign_at(f, high, budget) == 0:
         raise PolyError(PolyErrorKind.DOMAIN, "root count requires ordered nonroot endpoints")
     var index = _sturm_index(f, sequences, budget)
     return _variations(sequences[index].polynomials, low, budget) - _variations(sequences[index].polynomials, high, budget)
@@ -69,7 +84,7 @@ def _root_cached(f: DensePoly[QQ], low: QQ, high: QQ, mut cache: _NormalizationC
         raise PolyError(PolyErrorKind.DOMAIN, "an algebraic root needs a nonconstant polynomial")
     var ordering = _compare_q(low, high, budget)
     if ordering == 0:
-        if not evaluate_dense(f, low, budget).is_zero():
+        if not _sign_at(f, low, budget) == 0:
             raise PolyError(PolyErrorKind.DOMAIN, "the rational point is not a root")
         return _rational(low, budget)
     if ordering > 0 or _count_cached(f, low, high, cache.sequences, budget) != 1:
@@ -105,7 +120,7 @@ def _refine(mut a: _Real, mut budget: Budget) raises PolyError:
     if a.rational:
         return
     var middle = _midpoint(a.low, a.high, budget)
-    if evaluate_dense(a.polynomial, middle, budget).is_zero():
+    if _sign_at(a.polynomial, middle, budget) == 0:
         # Keep the defining polynomial: refinement witnesses must remain
         # bound to their input, even for a nonminimal caller-built value.
         a.low = _midpoint(a.low, middle, budget)
@@ -128,7 +143,7 @@ def _interval_relation(a: _Real, b: _Real, mut budget: Budget) raises PolyError 
 
 def _resolve_overlap(mut left: _Real, mut right: _Real, mut common: DensePoly[QQ], mut shared: Optional[RootCountCertificate], mut budget: Budget) raises PolyError -> Int:
     if left.rational or right.rational:
-        if evaluate_dense(right.polynomial if left.rational else left.polynomial, left.low if left.rational else right.low, budget).is_zero():
+        if _sign_at(right.polynomial if left.rational else left.polynomial, left.low if left.rational else right.low, budget) == 0:
             return 0
     else:
         common = _gcd(left.polynomial, right.polynomial, budget)

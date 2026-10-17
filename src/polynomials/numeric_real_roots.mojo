@@ -4,10 +4,9 @@ from .coefficients import QQ, CoefficientRing, NoContext
 from .dense import DensePoly
 from .root_stream import RootStreamReceipt
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _sum
-from .evaluate import evaluate_dense
-from .roots import sturm_sequence, sign_changes
-from .certificates import SturmSequence, _check_root_count_parts
-from ._root_ops import _compare, _midpoint, _chain_variations
+from .roots import sturm_sequence, sign_changes, _sturm_chain
+from .certificates import SturmSequence, _check_root_count_parts, _check_root_count_chain, _IntegerChain, _integer_variations
+from ._root_ops import _compare, _midpoint, _chain_variations, _sign_at
 from .numeric_domains import NumericDomain, BallDomain
 from .numeric_dense import NumericDensePoly
 from .numeric_bounds import NumericBox, numeric_bounds, _box_real, _box_zero, _box_sub, _box_div_real, _box_center, _box_valid
@@ -142,9 +141,9 @@ def _family_cell(coefficients: List[NumericBox], derivative: List[NumericBox], i
         bits = _next_precision(bits, options.max_precision)
 
 
-def _real_cell(coefficients: List[NumericBox], derivative: List[NumericBox], exact: Optional[DensePoly[QQ]], sequence: Optional[SturmSequence], interval: NumericBox, options: NumericOptions, mut budget: Budget) raises PolyError -> RealRootCell:
+def _real_cell(coefficients: List[NumericBox], derivative: List[NumericBox], exact: Optional[DensePoly[QQ]], sequence: Optional[SturmSequence], interval: NumericBox, options: NumericOptions, mut budget: Budget, integer: _IntegerChain = _IntegerChain()) raises PolyError -> RealRootCell:
     if exact:
-        var count = _chain_variations(sequence.value().polynomials, sequence.value().quotients, interval.real_low, budget) - _chain_variations(sequence.value().polynomials, sequence.value().quotients, interval.real_high, budget)
+        var count = _integer_variations(integer, sequence.value(), interval.real_low, budget) - _integer_variations(integer, sequence.value(), interval.real_high, budget)
         return RealRootCell(interval.copy(), count, 0, List[EnclosureEvaluation[BallDomain]]())
     return _family_cell(coefficients, derivative, interval, options, budget)
 
@@ -154,7 +153,7 @@ def _real_split(coefficients: List[NumericBox], interval: NumericBox, exact: Opt
     for k in range(1, degree + 2):
         var fraction = QQ(Rational(k)).mul(QQ(Rational(k + 1)).inverse(budget), budget)
         var middle = interval.real_low.add(width.mul(fraction, budget), budget)
-        if (exact and not evaluate_dense(exact.value(), middle, budget).is_zero()) or (not exact and not _box_zero(_exact_box_evaluate(coefficients, NumericBox.point(middle, QQ(Rational(0)), budget), budget), budget)):
+        if (exact and _sign_at(exact.value(), middle, budget) != 0) or (not exact and not _box_zero(_exact_box_evaluate(coefficients, NumericBox.point(middle, QQ(Rational(0)), budget), budget), budget)):
             return middle^
     return _midpoint(interval.real_low, interval.real_high, budget)
 
@@ -189,8 +188,9 @@ def _real_roots(coefficients: List[NumericBox], options: NumericOptions, mut bud
         _require_success(NumericOutcome.UNCERTAIN_DEGREE, complete_only)
         return RealRootResult(NumericOutcome.UNCERTAIN_DEGREE, False, False, False, List[RealRootCell](), None)
     var sequence = Optional[SturmSequence]()
+    var integer = _IntegerChain()
     if exact:
-        sequence = sturm_sequence(exact.value(), budget)
+        sequence = _sturm_chain(exact.value(), integer, budget)
     var bound = _root_bound(coefficients, degree.value(), budget)
     if not exact and _family_count_changes(coefficients, bound, budget):
         _require_success(NumericOutcome.INPUT_UNCERTAINTY, complete_only)
@@ -198,19 +198,19 @@ def _real_roots(coefficients: List[NumericBox], options: NumericOptions, mut bud
     var interval = NumericBox.real_interval(bound.neg(budget), bound, budget)
     var derivative = _derivative_boxes(coefficients, budget)
     _allocation[RealRootCell](1, budget)
-    var pending: List[RealRootCell] = [_real_cell(coefficients, derivative, exact, sequence, interval, options, budget)]
-    return _refine_real_cells(coefficients, derivative, exact, sequence^, pending^, degree.value(), options, budget, complete_only)
+    var pending: List[RealRootCell] = [_real_cell(coefficients, derivative, exact, sequence, interval, options, budget, integer)]
+    return _refine_real_cells(coefficients, derivative, exact, sequence^, pending^, degree.value(), options, budget, complete_only, integer)
 
 
-def _refine_real_cells(coefficients: List[NumericBox], derivative: List[NumericBox], exact: Optional[DensePoly[QQ]], var sequence: Optional[SturmSequence], var pending: List[RealRootCell], degree: Int, options: NumericOptions, mut budget: Budget, complete_only: Bool) raises PolyError -> RealRootResult:
+def _refine_real_cells(coefficients: List[NumericBox], derivative: List[NumericBox], exact: Optional[DensePoly[QQ]], var sequence: Optional[SturmSequence], var pending: List[RealRootCell], degree: Int, options: NumericOptions, mut budget: Budget, complete_only: Bool, integer: _IntegerChain = _IntegerChain()) raises PolyError -> RealRootResult:
     var sink = _RealCollector(List[RealRootCell]())
-    var receipt = _refine_real_cells_to(coefficients, derivative, exact, sequence, pending^, degree, options, budget, complete_only, sink)
+    var receipt = _refine_real_cells_to(coefficients, derivative, exact, sequence, pending^, degree, options, budget, complete_only, sink, integer)
     var completed = List[RealRootCell]()
     swap(completed, sink.cells)
     return RealRootResult(receipt.outcome, receipt.complete, receipt.accurate, receipt.isolated, completed^, sequence^)
 
 
-def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], derivative: List[NumericBox], exact: Optional[DensePoly[QQ]], sequence: Optional[SturmSequence], var pending: List[RealRootCell], degree: Int, options: NumericOptions, mut budget: Budget, complete_only: Bool, mut sink: S) raises PolyError -> RootStreamReceipt:
+def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], derivative: List[NumericBox], exact: Optional[DensePoly[QQ]], sequence: Optional[SturmSequence], var pending: List[RealRootCell], degree: Int, options: NumericOptions, mut budget: Budget, complete_only: Bool, mut sink: S, integer: _IntegerChain = _IntegerChain()) raises PolyError -> RootStreamReceipt:
     var items = 0
     var splits = 0
     var complete = True
@@ -242,7 +242,6 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
             if not oracle:
                 oracle = _root_oracle(exact.value(), chain.polynomials[len(chain.polynomials) - 1], budget)
             var enclosure = enclosed.take() if enclosed else _enclosure(oracle.value(), cell.interval.real_low, cell.interval.real_high, budget)
-            _tighten(oracle.value(), enclosure, cell.interval.real_high.sub(cell.interval.real_low, budget), 32, budget)
             var cut = _oracle_split(oracle.value(), enclosure, cell.interval.real_low, cell.interval.real_high, degree, budget)
             var below = cut[1] < 0
             var lower = NumericBox.real_interval(cell.interval.real_low, cut[0], budget)
@@ -265,9 +264,9 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
         _allocation[RealRootCell](2, budget)
         if exact:
             ref chain = sequence.value()
-            var low = known[0] if known[0] >= 0 else _chain_variations(chain.polynomials, chain.quotients, cell.interval.real_low, budget)
-            var high = known[1] if known[1] >= 0 else _chain_variations(chain.polynomials, chain.quotients, cell.interval.real_high, budget)
-            var middle = _chain_variations(chain.polynomials, chain.quotients, split, budget)
+            var low = known[0] if known[0] >= 0 else _integer_variations(integer, chain, cell.interval.real_low, budget)
+            var high = known[1] if known[1] >= 0 else _integer_variations(integer, chain, cell.interval.real_high, budget)
+            var middle = _integer_variations(integer, chain, split, budget)
             pending.append(RealRootCell(right^, middle - high, 0, List[EnclosureEvaluation[BallDomain]]()))
             pending.append(RealRootCell(left^, low - middle, 0, List[EnclosureEvaluation[BallDomain]]()))
             variations.append((middle, high))
@@ -308,6 +307,7 @@ def _check_real(coefficients: List[NumericBox], result: RealRootResult, options:
     if result.cells[0].interval.real_low != bound.neg(budget) or result.cells[len(result.cells) - 1].interval.real_high != bound:
         return False
     var previous_variations = 0
+    var chain = _IntegerChain()
     if exact:
         var total = 0
         for cell in result.cells:
@@ -316,9 +316,9 @@ def _check_real(coefficients: List[NumericBox], result: RealRootResult, options:
             total = _sum(total, cell.count)
             budget.charge(1)
         var left = bound.neg(budget)
-        if not _check_root_count_parts(exact.value(), result.sequence.value(), left, bound, total, budget):
+        if not _check_root_count_chain(exact.value(), result.sequence.value(), left, bound, total, chain, budget):
             return False
-        previous_variations = _chain_variations(result.sequence.value().polynomials, result.sequence.value().quotients, left, budget)
+        previous_variations = _integer_variations(chain, result.sequence.value(), left, budget)
     var derivative = _derivative_boxes(coefficients, budget)
     var complete = True
     var accurate = True
@@ -329,7 +329,7 @@ def _check_real(coefficients: List[NumericBox], result: RealRootResult, options:
             return False
         if i and result.cells[i - 1].interval.real_high != cell.interval.real_low:
             return False
-        var next_variations = _check_real_cell(coefficients, derivative, exact, result.sequence, cell, previous_variations, budget)
+        var next_variations = _check_real_cell(coefficients, derivative, exact, result.sequence, cell, previous_variations, budget, chain)
         if not next_variations:
             return False
         previous_variations = next_variations.value()
@@ -432,8 +432,9 @@ def _real_roots_to[S: RealRootSink](coefficients: List[NumericBox], options: Num
         _require_success(NumericOutcome.UNCERTAIN_DEGREE, complete_only)
         return RootStreamReceipt(NumericOutcome.UNCERTAIN_DEGREE, False, False, False, 0)
     var sequence = Optional[SturmSequence]()
+    var integer = _IntegerChain()
     if exact:
-        sequence = sturm_sequence(exact.value(), budget)
+        sequence = _sturm_chain(exact.value(), integer, budget)
     var bound = _root_bound(coefficients, degree.value(), budget)
     if not exact and _family_count_changes(coefficients, bound, budget):
         _require_success(NumericOutcome.INPUT_UNCERTAINTY, complete_only)
@@ -441,9 +442,9 @@ def _real_roots_to[S: RealRootSink](coefficients: List[NumericBox], options: Num
     var interval = NumericBox.real_interval(bound.neg(budget), bound, budget)
     var derivative = _derivative_boxes(coefficients, budget)
     _allocation[RealRootCell](1, budget)
-    var pending: List[RealRootCell] = [_real_cell(coefficients, derivative, exact, sequence, interval, options, budget)]
+    var pending: List[RealRootCell] = [_real_cell(coefficients, derivative, exact, sequence, interval, options, budget, integer)]
     sink.begin(sequence, budget)
-    return _refine_real_cells_to(coefficients, derivative, exact, sequence, pending^, degree.value(), options, budget, complete_only, sink)
+    return _refine_real_cells_to(coefficients, derivative, exact, sequence, pending^, degree.value(), options, budget, complete_only, sink, integer)
 
 
 def real_roots_exact_to[C: CoefficientRing, S: RealRootSink](poly: DensePoly[C], options: NumericOptions, mut sink: S, mut budget: Budget, *, complete_only: Bool = False) raises PolyError -> RootStreamReceipt:
@@ -492,11 +493,11 @@ def real_roots_numeric_to[D: NumericDomain, S: RealRootSink](poly: NumericDenseP
     return _real_roots_to(_numeric_dense_boxes(poly, budget), options, budget, complete_only, sink)
 
 
-def _check_real_cell(coefficients: List[NumericBox], derivative: List[NumericBox], exact: Optional[DensePoly[QQ]], sequence: Optional[SturmSequence], cell: RealRootCell, previous_variations: Int, mut budget: Budget) raises PolyError -> Optional[Int]:
+def _check_real_cell(coefficients: List[NumericBox], derivative: List[NumericBox], exact: Optional[DensePoly[QQ]], sequence: Optional[SturmSequence], cell: RealRootCell, previous_variations: Int, mut budget: Budget, chain: _IntegerChain = _IntegerChain()) raises PolyError -> Optional[Int]:
     if exact:
-        if cell.method != 0 or len(cell.evaluations) or evaluate_dense(exact.value(), cell.interval.real_high, budget).is_zero():
+        if cell.method != 0 or len(cell.evaluations) or _sign_at(exact.value(), cell.interval.real_high, budget) == 0:
             return None
-        var next_variations = _chain_variations(sequence.value().polynomials, sequence.value().quotients, cell.interval.real_high, budget)
+        var next_variations = _integer_variations(chain, sequence.value(), cell.interval.real_high, budget)
         if cell.count != previous_variations - next_variations:
             return None
         return next_variations

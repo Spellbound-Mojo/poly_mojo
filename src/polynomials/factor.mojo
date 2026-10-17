@@ -1,18 +1,18 @@
 """Univariate integer and rational factorization by Hensel–Zassenhaus (Z-6)."""
 from apn_mojo import Integer
-from .coefficients import CoefficientRing, ZZ, QQ, ModInt, Modulus, NoContext, _pow
+from .coefficients import CoefficientRing, ZZ, QQ, ModInt, Modulus, NoContext, _pow, _prime
 from .dense import DensePoly
 from ._subsets import _Recombination
 from ._coefficient_ops import _copy as _copy_coefficient
-from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
+from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum, _charge_size
 from .certificates import Factorization
 from .squarefree import squarefree
 from .finite_field import factor_mod_p
-from .primes import prime, _residue
+from .primes import prime, _residue, _symmetric
 from ._dense_ops import _copy, _constant, _monic, _derivative, _gcd
 from ._images import _integer_dense as _integer, _rational_dense as _rational, _mod_image
 from ._coefficient_ops import _quotient
-from ._hensel import _HenselState, _hensel, _truncate, _trial_divide
+from ._hensel import _HenselState, _hensel, _hensel_start, _hensel_extend, _hensel_resume, _truncate, _trial_divide
 from ._integer_ops import _content, _primitive, _divide_scalar
 from ._lattice_factor import _van_hoeij_lifted
 from ._gcd import _modular_primitive
@@ -33,7 +33,26 @@ def _bound(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> ZZ:
     return norm.mul(power, budget).mul(f.coefficients[f.degree()], budget)
 
 
-def _recombine(f: DensePoly[ZZ], lifted: List[DensePoly[ZZ]], modulus: ZZ, mut budget: Budget) raises PolyError -> List[DensePoly[ZZ]]:
+def _subset_degrees(degrees: List[Int], total: Int, mut budget: Budget) raises PolyError -> List[Bool]:
+    """Which degrees 0..total are sums of a subset of the modular factor degrees."""
+    _allocation[Bool](_sum(total, 1), budget)
+    var reachable = List[Bool](length=total + 1, fill=False)
+    reachable[0] = True
+    var top = 0
+    for d in degrees:
+        _charge_size(_sum(top, 1), budget)
+        var i = top
+        while i >= 0:
+            if reachable[i] and i + d <= total:
+                reachable[i + d] = True
+            i -= 1
+        top = min(total, top + d)
+    return reachable^
+
+
+def _recombine(f: DensePoly[ZZ], lifted: List[DensePoly[ZZ]], modulus: ZZ, allowed: List[Bool], mut budget: Budget) raises PolyError -> List[DensePoly[ZZ]]:
+    # `allowed[d]` is False for degrees that no factor of f can have, because
+    # some prime's factor degrees cannot sum to d.
     var search = _Recombination(len(lifted), budget)
     var remaining = _copy(f, budget)
     var result = List[DensePoly[ZZ]]()
@@ -49,7 +68,24 @@ def _recombine(f: DensePoly[ZZ], lifted: List[DensePoly[ZZ]], modulus: ZZ, mut b
         for i in search.selection.indices:
             budget.charge(1)
             chosen[i] = not complement
-        var candidate = _constant(remaining, remaining.coefficients[remaining.degree()], budget)
+        var chosen_degree = remaining.degree() - degree if complement else degree
+        if chosen_degree < len(allowed) and not allowed[chosen_degree]:
+            search.advance(budget)
+            continue
+        # A true factor h with cofactor q reconstructs as lc(q) * h exactly, so
+        # its constant term lc(q) * h(0) divides lc(f) * f(0). Test that first.
+        var lead = _copy_coefficient(remaining.coefficients[remaining.degree()], budget)
+        if not remaining.coefficients[0].is_zero():
+            var trailing = _copy_coefficient(lead, budget)
+            for i in range(len(search.active)):
+                budget.charge(1)
+                if chosen[i]:
+                    trailing = ZZ(_symmetric(trailing.mul(lifted[search.active[i]].coefficients[0], budget).value, modulus.value, budget))
+            var target = lead.mul(remaining.coefficients[0], budget)
+            if trailing.is_zero() or not _quotient(target, trailing, budget):
+                search.advance(budget)
+                continue
+        var candidate = _constant(remaining, lead, budget)
         for i in range(len(search.active)):
             budget.charge(1)
             if chosen[i]:
@@ -79,35 +115,83 @@ def _recombine(f: DensePoly[ZZ], lifted: List[DensePoly[ZZ]], modulus: ZZ, mut b
     return result^
 
 
+comptime _PRIME_TRIALS = 3
+"""Good primes whose modular factorizations are compared before lifting."""
+
+
+def _next_small_prime(previous: UInt64, mut budget: Budget) raises PolyError -> UInt64:
+    """The largest prime below `previous`; starting from 2^28 this walks the
+    descending primes whose residue products take the SIMD path, and
+    quadratic lifting makes their size irrelevant."""
+    var candidate = previous - 1
+    if candidate % 2 == 0:
+        candidate -= 1
+    while True:
+        budget.charge(1)
+        if candidate < 3:
+            raise PolyError(PolyErrorKind.CAPACITY, "small prime sequence exhausted")
+        if _prime(candidate, budget):
+            return candidate
+        candidate -= 2
+
+
 def _squarefree_factors(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> List[DensePoly[ZZ]]:
     if f.degree() <= 1:
         _allocation[DensePoly[ZZ]](1, budget)
         return [_copy(f, budget)]
-    var index = 0
-    while True:
+    # Factor modulo several good primes. Each one's factor degrees bound the
+    # degrees of true factors; lifting uses the prime with fewest factors.
+    var p = UInt64(1) << 28
+    var trials = 0
+    _allocation[Bool](_sum(f.degree(), 1), budget)
+    var allowed = List[Bool](length=f.degree() + 1, fill=True)
+    var best = List[DensePoly[ModInt]]()
+    while trials < _PRIME_TRIALS:
         budget.charge(1)
-        var p = prime(index, budget)
-        index = _sum(index, 1)
+        p = _next_small_prime(p, budget)
         if _residue(f.coefficients[f.degree()].value, p, budget) == 0:
             continue
         var ctx = Modulus(_prime_value=p)
         var image = _monic(_mod_image(f, ctx, budget), budget)
         if _gcd(image, _derivative(image, budget), budget).degree() > 0:
             continue
+        trials += 1
         var modular = factor_mod_p(image, budget, seed=0)
         if len(modular) == 1:
             _allocation[DensePoly[ZZ]](1, budget)
             return [_copy(f, budget)]
-        # Measured crossover: exact LLL loses on 8/16-way splitting but
-        # wins at 20. Peel singleton groups before paying for the lattice.
-        if len(modular) >= 20:
-            return _large_recombine(f, modular, budget)
-        var lifting = _hensel(f, modular, _bound(f, budget), budget)
-        return _recombine(f, lifting[0], lifting[1], budget)
+        _allocation[Int](len(modular), budget)
+        var degrees = List[Int](capacity=len(modular))
+        for g in modular:
+            degrees.append(g.degree())
+        var reachable = _subset_degrees(degrees, f.degree(), budget)
+        var proper = False
+        for d in range(f.degree() + 1):
+            allowed[d] = allowed[d] and reachable[d]
+            if d > 0 and d < f.degree() and allowed[d]:
+                proper = True
+        if not proper:
+            _allocation[DensePoly[ZZ]](1, budget)
+            return [_copy(f, budget)]
+        if len(best) == 0 or len(modular) < len(best):
+            best = modular^
+    # Measured crossover: exact LLL loses on 8/16-way splitting but
+    # wins at 20. Peel singleton groups before paying for the lattice.
+    if len(best) >= 20:
+        return _large_recombine(f, best, allowed, budget)
+    var lifting = _hensel(f, best, _bound(f, budget), budget)
+    return _recombine(f, lifting[0], lifting[1], allowed, budget)
 
 
 def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], mut budget: Budget) raises PolyError -> List[DensePoly[ZZ]]:
-    var lifting = _hensel(f, modular, _bound(f, budget), budget)
+    _allocation[Bool](_sum(f.degree(), 1), budget)
+    return _large_recombine(f, modular, List[Bool](length=f.degree() + 1, fill=True), budget)
+
+
+def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], allowed: List[Bool], mut budget: Budget) raises PolyError -> List[DensePoly[ZZ]]:
+    var state = _hensel_start(modular, budget)
+    _hensel_extend(f, modular, _bound(f, budget), state, budget)
+    var lifting = (state.lifted.copy(), _copy_coefficient(state.modulus, budget))
     var remaining = _copy(f, budget)
     var result = List[DensePoly[ZZ]]()
     var active_modular = List[DensePoly[ModInt]]()
@@ -128,10 +212,14 @@ def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], mut bud
     if remaining.degree() > 0:
         var rest: List[DensePoly[ZZ]]
         if len(active_modular) >= 20:
-            var state = _HenselState(active_lifted^, _copy_coefficient(lifting[1], budget), List[DensePoly[ModInt]]())
-            rest = _van_hoeij_lifted(remaining, active_modular, _bound(remaining, budget), state, budget)
+            if len(active_modular) == len(modular):
+                # Nothing peeled: keep the factor tree for further lifting.
+                rest = _van_hoeij_lifted(remaining, active_modular, _bound(remaining, budget), state, budget)
+            else:
+                var resumed = _hensel_resume(active_lifted^, _copy_coefficient(lifting[1], budget))
+                rest = _van_hoeij_lifted(remaining, active_modular, _bound(remaining, budget), resumed, budget)
         else:
-            rest = _recombine(remaining, active_lifted, lifting[1], budget)
+            rest = _recombine(remaining, active_lifted, lifting[1], allowed, budget)
         for g in rest:
             budget.charge(1)
             _allocation[DensePoly[ZZ]](1, budget)
@@ -171,9 +259,10 @@ def _sort[C: CoefficientRing](mut factors: List[Tuple[DensePoly[C], Int]], templ
 def _modular_squarefree(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Bool:
     # A prime that keeps the degree and leaves f coprime to f' proves f
     # squarefree over QQ: a repeated primitive factor would survive reduction.
-    for index in range(2):
+    var p = UInt64(1) << 28
+    for _ in range(2):
         budget.charge(1)
-        var p = prime(index, budget)
+        p = _next_small_prime(p, budget)
         if _residue(f.coefficients[f.degree()].value, p, budget) == 0:
             continue
         var field = _nmod._field(p)

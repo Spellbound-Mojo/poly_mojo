@@ -1,7 +1,7 @@
 """Exact LLL invariants and independently planted lattice recombination cases."""
 from apn_mojo import Integer, Rational
 from polynomials import Budget, PolyErrorKind, ZZ, QQ, NoContext, DensePoly, Modulus, factor_mod_p, factor_integer, check_factorization
-from polynomials._lattice import _lll, _q, _orthogonal
+from polynomials._lattice import _lll, _lll_knapsack, _q, _orthogonal
 from polynomials._lattice_factor import _van_hoeij
 from polynomials._hensel import _hensel, _hensel_start, _hensel_extend
 from polynomials._gcd import _mod_image
@@ -42,6 +42,18 @@ def main() raises:
         c.check(False, "dependent untracked lattice accepted")
     except e:
         c.check(e.kind == PolyErrorKind.DOMAIN, "untracked LLL rejects a rank-deficient matrix")
+    # Floating steering, exact answers: the knapsack reduction returns a basis
+    # whose norms equal an independent exact Gram-Schmidt pass.
+    var knapsack: List[List[ZZ]] = [[ZZ(Integer(1)), ZZ(Integer(0)), ZZ(Integer(0)), ZZ(Integer(123456789))], [ZZ(Integer(0)), ZZ(Integer(1)), ZZ(Integer(0)), ZZ(Integer(987654321))], [ZZ(Integer(0)), ZZ(Integer(0)), ZZ(Integer(1)), ZZ(Integer(555555555))], [ZZ(Integer(0)), ZZ(Integer(0)), ZZ(Integer(0)), ZZ(Integer(1000000007))]]
+    var steered = _lll_knapsack(knapsack, work)
+    var exact_check = _orthogonal(steered.basis, work)
+    var same_norms = True
+    var volume = QQ.one(NoContext())
+    for i in range(4):
+        same_norms = same_norms and steered.norms[i] == exact_check.norms[i]
+        volume = volume.mul(steered.norms[i], work)
+    c.check(same_norms, "knapsack LLL norms are exact")
+    c.check(volume == _q(ZZ(Integer(1000000007).copy()), work).mul(_q(ZZ(Integer(1000000007)), work), work), "knapsack LLL keeps the lattice determinant")
     var recomputed = _orthogonal(result.basis, work)
     for i in range(3):
         c.check(result.norms[i] == recomputed.norms[i], "incremental exact Gram-Schmidt norm")

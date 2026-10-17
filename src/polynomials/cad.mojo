@@ -11,8 +11,9 @@ from .algebraic_types import RealAlgebraic, AlgebraicComparisonCertificate, _rat
 from .algebraic_specialization import AlgebraicPolynomialEvaluation
 from .cad_projection import cad_projection, check_cad_projection
 from .cad_types import CADCell, CADStackCertificate, CADCertificate, CADCellCertificate
-from ._cad_common import _cell, _coordinates, _signs, _check_signs
-from ._cad_lifting import _stack, _check_stack, _position
+from ._cad_common import _cell, _coordinates, _signs, _signs_cached, _check_signs
+from ._cad_lifting import _stack, _stack_cached, _check_stack, _position
+from ._algebraic import _NormalizationCache
 from ._cad_fiber_common import _validate_fixed, _selection
 
 
@@ -41,18 +42,25 @@ def _cad(inputs: List[SparsePoly[QQ]], variables: List[Int64], fixed: List[RealA
     var cells: List[CADCell] = [_cell(-1, -1, 0, _rational(QQ.zero(NoContext()), budget), budget)]
     var stacks = List[CADStackCertificate]()
     var parent = 0
+    # Sibling cells share every coordinate but the last, and the breadth-first
+    # order keeps them adjacent; one cache serves each sibling group.
+    var cache = _NormalizationCache()
+    var group = -2
     while parent < len(cells):
         budget.charge(1)
         var point = _coordinates(cells, parent, variables, budget)
         var level = cells[parent].level + 1
+        if cells[parent].parent != group:
+            group = cells[parent].parent
+            cache = _NormalizationCache()
         if level == len(variables):
             var evaluations = List[AlgebraicPolynomialEvaluation]()
             var signs = List[AlgebraicComparisonCertificate]()
-            _signs(inputs, point[0], evaluations, signs, budget)
+            _signs_cached(inputs, point[0], evaluations, signs, cache, budget)
             cells[parent].evaluations = evaluations^
             cells[parent].signs = signs^
         else:
-            var stack = _stack(projection, parent, level, point[0], point[1], None, budget)
+            var stack = _stack_cached(projection, parent, level, point[0], point[1], None, cache, budget)
             var selected = _selection(stack, fixed, budget)
             _allocation[CADCell](selected[1] - selected[0], budget)
             for i in range(selected[0], selected[1]):
