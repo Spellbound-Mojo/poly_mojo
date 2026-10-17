@@ -13,7 +13,7 @@ from polynomials._dense_ops import _gcd as _field_gcd
 from polynomials.division import divide_exact
 from support.gen import polynomial
 from polynomials.certificates import check_common_divisor, check_bezout, check_coprimality
-from polynomials._univariate_modular import _divides_both, _Words
+from polynomials._univariate_modular import _divides_both, _dense_divides, _Words
 from polynomials._ntt import _PRIMES
 
 def generated[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
@@ -137,7 +137,7 @@ def transform_division_cases(mut c: Checker) raises:
         product = product * Integer(Int(primes[i]))
     var constants: List[Integer] = [Integer(1), Integer(-1), product^]
     for bits in [0, 70, 300]:
-        for degree in [31, 45, 90]:
+        for degree in [4, 6, 17, 31, 45, 90]:
             var g = dense_random[ZZ](NoContext(), degree, rng, work, bits)
             var f = g.mul(dense_random[ZZ](NoContext(), degree // 2 + 3, rng, work, bits), work)
             var h = g.mul(dense_random[ZZ](NoContext(), degree + 5, rng, work, bits), work)
@@ -146,6 +146,28 @@ def transform_division_cases(mut c: Checker) raises:
                 var shifted = f.add(DensePoly[ZZ].from_coefficients(0, NoContext(), [ZZ(constant.copy())], work), work)
                 c.check(not _divides_both(shifted, _Words(shifted, work), h, _Words(h, work), g, work), "transform division rejects a multiple plus a constant")
                 c.check(not _divides_both(f, _Words(f, work), shifted, _Words(shifted, work), g, work), "transform division rejects a second dividend off by a constant")
+
+
+def small_division_cases(mut c: Checker) raises:
+    """The gcd's divisibility check agrees with integer long division on short divisors, near-misses and content mismatches."""
+    var work = Budget()
+    var rng = SplitMix64(9157)
+    for round in range(12):
+        var bits = 20 + 40 * (round % 4)
+        var g = dense_random[ZZ](NoContext(), 2 + round % 6, rng, work, bits=bits)
+        var f = g.mul(dense_random[ZZ](NoContext(), 3 + round % 5, rng, work, bits=bits + 30), work)
+        var h = g.mul(dense_random[ZZ](NoContext(), 4 + round % 3, rng, work, bits=bits), work)
+        var fw = _Words(f, work)
+        var hw = _Words(h, work)
+        c.check(_divides_both(f, fw, h, hw, g, work), "divisibility check accepts exact multiples")
+        var one = DensePoly[ZZ].from_coefficients(0, NoContext(), [ZZ.one(NoContext())], work)
+        var shifted = f.add(one, work)
+        c.check(_divides_both(shifted, _Words(shifted, work), h, hw, g, work) == _dense_divides(shifted, g, work), "divisibility check matches long division off a multiple")
+        # 3 g q is not a multiple of 2 g over the integers, though it is modulo every odd prime.
+        var scaled = f.scale(ZZ(Integer(3)), work)
+        var doubled = g.scale(ZZ(Integer(2)), work)
+        var expected = _dense_divides(scaled, doubled, work) and _dense_divides(h, doubled, work)
+        c.check(_divides_both(scaled, _Words(scaled, work), h, hw, doubled, work) == expected, "divisibility check matches long division with a content mismatch")
 
 
 def multi_prime_cases(mut c: Checker) raises:
@@ -352,6 +374,7 @@ def main() raises:
     modular_cases(c)
     word_field_cases(c)
     transform_division_cases(c)
+    small_division_cases(c)
     multi_prime_cases(c)
     division_cases[ZZ](NoContext(), c)
     division_cases[QQ](NoContext(), c)

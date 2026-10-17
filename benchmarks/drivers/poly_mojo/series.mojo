@@ -13,6 +13,7 @@ hexadecimal integer or `numerator/denominator` per line.
 | series inv | `series.reciprocal(a)` |
 | series log, exp, revert | `series.log(a)`, `series.exp(a)`, `series.revert(a)` |
 | series compose | `series.compose(a, b)` |
+| series sqrt, pow | `series.sqrt(a)`, `series.power(a, exponent)` |
 | multipoint | `dense.evaluate_many(f, points)` |
 | interp | `dense.interpolate(points, values)` |
 | evalq | `dense.evaluate(f, Rational(a, b))` |
@@ -165,7 +166,7 @@ def write_values(values: List[String], path: String) raises:
 
 
 # Kind 1 is QQ and kind 3 is GF(p) (poly._common).
-def series_op(op: String, a: series.Array[1], b: series.Array[1]) raises -> series.Array[1]:
+def series_op(op: String, a: series.Array[1], b: series.Array[1], exponent: Int) raises -> series.Array[1]:
     if op == "mul":
         return series.multiply(a, b)
     if op == "inv":
@@ -178,10 +179,14 @@ def series_op(op: String, a: series.Array[1], b: series.Array[1]) raises -> seri
         return series.compose(a, b)
     if op == "revert":
         return series.revert(a)
+    if op == "sqrt":
+        return series.sqrt(a)
+    if op == "pow":
+        return series.power(a, exponent)
     raise Error("unsupported series operation " + op)
 
 
-def series_op(op: String, a: series.Array[3], b: series.Array[3]) raises -> series.Array[3]:
+def series_op(op: String, a: series.Array[3], b: series.Array[3], exponent: Int) raises -> series.Array[3]:
     if op == "mul":
         return series.multiply(a, b)
     if op == "inv":
@@ -194,6 +199,10 @@ def series_op(op: String, a: series.Array[3], b: series.Array[3]) raises -> seri
         return series.compose(a, b)
     if op == "revert":
         return series.revert(a)
+    if op == "sqrt":
+        return series.sqrt(a)
+    if op == "pow":
+        return series.power(a, exponent)
     raise Error("unsupported series operation " + op)
 
 
@@ -201,10 +210,10 @@ def run_series_qq(input: Input, args: List[String]) raises:
     var a = series.asarray(integers(input.operands[0]), order=input.n)
     var b = series.asarray(integers(input.operands[1 if len(input.operands) > 1 else 0]), order=input.n)
     var timer = Timer()
-    var r = series_op(input.op, a, b)
+    var r = series_op(input.op, a, b, input.exponent)
     timer.lap()
     while timer.more(atof(args[4]), Int(args[5])):
-        _ = series_op(input.op, a, b)
+        _ = series_op(input.op, a, b, input.exponent)
         timer.lap()
     timer.write(args[3])
     var out = List[String](capacity=len(r))
@@ -218,10 +227,10 @@ def run_series_gf(input: Input, args: List[String]) raises:
     var a = series.asarray(residues(input.operands[0], p), order=input.n)
     var b = series.asarray(residues(input.operands[1 if len(input.operands) > 1 else 0], p), order=input.n)
     var timer = Timer()
-    var r = series_op(input.op, a, b)
+    var r = series_op(input.op, a, b, input.exponent)
     timer.lap()
     while timer.more(atof(args[4]), Int(args[5])):
-        _ = series_op(input.op, a, b)
+        _ = series_op(input.op, a, b, input.exponent)
         timer.lap()
     timer.write(args[3])
     var out = List[String](capacity=len(r))

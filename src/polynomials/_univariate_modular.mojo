@@ -123,12 +123,23 @@ struct _Words(Movable):
             w = field.mul(w, step)
         _allocation[UInt64](len(self.negative), budget)
         var out = List[UInt64](capacity=len(self.negative))
+        var pw = self.words.unsafe_ptr()
+        var pp = powers.unsafe_ptr()
         for i in range(len(self.negative)):
-            var total = UInt128(0)
             var base = self.offsets[i]
-            for j in range(self.offsets[i + 1] - base):
-                total += UInt128(self.words[base + j]) * UInt128(powers[j])
-            var r = field.reduce(total)
+            var count = self.offsets[i + 1] - base
+            var word = pw.unsafe_offset(base)
+            # Two independent sums; together still below count 2^32 p <= p 2^64.
+            var even = UInt128(0)
+            var odd = UInt128(0)
+            var j = 0
+            while j + 1 < count:
+                even += UInt128(word.unsafe_offset(j).unsafe_load()) * UInt128(pp.unsafe_offset(j).unsafe_load())
+                odd += UInt128(word.unsafe_offset(j + 1).unsafe_load()) * UInt128(pp.unsafe_offset(j + 1).unsafe_load())
+                j += 2
+            if j < count:
+                even += UInt128(word.unsafe_offset(j).unsafe_load()) * UInt128(pp.unsafe_offset(j).unsafe_load())
+            var r = field.reduce(even + odd)
             out.append((field.p - r if r else r) if self.negative[i] else r)
         return out^
 
@@ -437,7 +448,9 @@ def _transform_divides(f: DensePoly[ZZ], fw: _Words, h: DensePoly[ZZ], hw: _Word
 
 def _divides_both(f: DensePoly[ZZ], fw: _Words, h: DensePoly[ZZ], hw: _Words, g: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Bool:
     """Whether g divides both f and h, of degree at least deg g: by transform primes when they decide, else by long division."""
-    if g.degree() >= 31:
+    # Long division wins only for short divisors of wide coefficients.
+    var wide = max(_bits_zz(_view(f.coefficients)), _bits_zz(_view(h.coefficients))) > 640
+    if g.degree() >= 31 or (g.degree() >= 4 and not wide):
         var fast = _transform_divides(f, fw, h, hw, g, budget)
         if fast:
             return fast.value()
