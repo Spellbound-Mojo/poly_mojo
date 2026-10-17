@@ -570,12 +570,21 @@ struct _Row(Movable):
             var negative = u > 0 and (entry.unsafe_offset(u - 1).unsafe_load() >> 63) != 0
             var carry = UInt64(0)
             var any = UInt64(0)
-            for l in range(u):
-                var e = entry.unsafe_offset(l).unsafe_load()
-                any |= e
-                var p = UInt128(f) * UInt128(e) + UInt128(carry)
-                entry.unsafe_offset(l).unsafe_store(UInt64(p & UInt128(UInt64.MAX)))
-                carry = UInt64(p >> 64)
+            comptime if _ADX:
+                # Almost every entry is nonzero in its low limb.
+                var l = 0
+                while l < u and entry.unsafe_offset(l).unsafe_load() == 0:
+                    l += 1
+                any = UInt64(Int(l < u))
+                if u > 0:
+                    carry = _adx_mul(entry, f, u)
+            else:
+                for l in range(u):
+                    var e = entry.unsafe_offset(l).unsafe_load()
+                    any |= e
+                    var p = UInt128(f) * UInt128(e) + UInt128(carry)
+                    entry.unsafe_offset(l).unsafe_store(UInt64(p & UInt128(UInt64.MAX)))
+                    carry = UInt64(p >> 64)
             if u < width:
                 # The sign limb B - 1 times f, plus the carry, is f B + carry - f.
                 entry.unsafe_offset(u).unsafe_store(carry - (f if negative else UInt64(0)))
@@ -817,6 +826,62 @@ def _adx_sub_mul(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer[m
         UInt64,
         constraints="=&r,r,r,r,r,~{rdi},~{rsi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{r11},~{memory},~{cc}",
     ](data, other, n, f)
+
+
+@always_inline
+def _adx_mul(data: Pointer[mut=True, UInt64, _], f: UInt64, n: Int) -> UInt64:
+    """data[0:n] *= f in place for n >= 1; return the high limb.
+
+    Each product's high word goes into the next limb by adcx, one carry
+    chain of single additions.
+    """
+    return inlined_assembly[
+        """
+        mov $1, %rdi
+        mov $2, %rcx
+        mov $3, %rdx
+        mov %rcx, %r11
+        shr $$2, %r11
+        and $$3, %rcx
+        xor %r8d, %r8d
+        jrcxz 3f
+        1:
+        mulx (%rdi), %r9, %r10
+        adcx %r8, %r9
+        mov %r9, (%rdi)
+        mov %r10, %r8
+        lea 8(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 3f
+        jmp 1b
+        3:
+        mov %r11, %rcx
+        jrcxz 4f
+        2:
+        mulx (%rdi), %r9, %r10
+        adcx %r8, %r9
+        mov %r9, (%rdi)
+        mulx 8(%rdi), %r9, %r8
+        adcx %r10, %r9
+        mov %r9, 8(%rdi)
+        mulx 16(%rdi), %r9, %r10
+        adcx %r8, %r9
+        mov %r9, 16(%rdi)
+        mulx 24(%rdi), %r9, %r8
+        adcx %r10, %r9
+        mov %r9, 24(%rdi)
+        lea 32(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 4f
+        jmp 2b
+        4:
+        mov $$0, %r9
+        adcx %r9, %r8
+        mov %r8, $0
+        """,
+        UInt64,
+        constraints="=&r,r,r,r,~{rdi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{r11},~{memory},~{cc}",
+    ](data, n, f)
 
 
 @always_inline
