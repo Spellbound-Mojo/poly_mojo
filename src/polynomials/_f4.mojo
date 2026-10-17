@@ -520,9 +520,17 @@ struct _Matrix[W: Int](Movable):
             var u = self.columns.monomials[c]
             if u.degree != degree:
                 degree = u.degree
-                limit = 0
-                while limit < count and leads[limit].degree <= degree:
-                    limit += 1
+                # Columns come in discovery order, so the degree changes
+                # often: bisect rather than scan the leads from the start.
+                var low = 0
+                var high = count
+                while low < high:
+                    var middle = (low + high) // 2
+                    if leads.unsafe_get(middle).degree <= degree:
+                        low = middle + 1
+                    else:
+                        high = middle
+                limit = low
             var exponents = u.exponents()
             var outside = ~_divisibility_mask[Self.W, B](exponents, thresholds)
             var found = -1
