@@ -3,7 +3,7 @@ from apn_mojo import Rational, ExactComplex
 from polynomials import *
 from support.check import Checker
 from polynomials._toolkit_exact import _exact_product
-from polynomials._ntt import _ntt_middle_product, _ks_range, _zz_range
+from polynomials._ntt import _ntt_middle_product, _ks_range, _zz_range, _transform_quotient, _shoup_quotient, _PRIMES, _PRIME_COUNT
 from polynomials.coefficient_buffer import _view
 from apn_mojo import Integer
 
@@ -91,8 +91,26 @@ def segmented(mut check: Checker) raises:
         check.check(Bool(square) and square.value() == _zz_range(_view(a), _view(a), 0, 2 * sizes[0] - 1, work).value(), "segmented square")
 
 
+def transform_quotients(mut check: Checker):
+    """The division-free Shoup quotient of the twiddle tables matches the 128-bit division for every transform prime."""
+    var primes = materialize[_PRIMES]()
+    var valid = True
+    for i in range(_PRIME_COUNT):
+        var q = primes[i]
+        var reciprocal = UInt64((UInt128(1) << 125) // UInt128(q))
+        var x = UInt64(i + 1)
+        for k in range(200):
+            x = x * 6364136223846793005 + 1442695040888963407
+            var y = (x >> 2) % q
+            if k < 4:
+                y = [UInt64(0), UInt64(1), q - 1, q - 2][k]
+            valid = valid and _transform_quotient(y, q, reciprocal) == _shoup_quotient(y, q)
+    check.check(valid, "transform quotients")
+
+
 def main() raises:
     var check = Checker("toolkit_products")
+    transform_quotients(check)
     segmented(check)
     var work = Budget()
     transform_products[ZZ](NoContext(), 8, check)

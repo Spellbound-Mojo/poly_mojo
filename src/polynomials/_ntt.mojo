@@ -144,6 +144,21 @@ def _shoup(x: UInt64, w: UInt64, w_quotient: UInt64, q: UInt64) -> UInt64:
 
 
 @always_inline
+def _transform_quotient(x: UInt64, q: UInt64, reciprocal: UInt64) -> UInt64:
+    """floor(x * 2^64 / q) for x < q and 2^61 < q < 2^62, given reciprocal = floor(2^125 / q).
+
+    The estimate x * reciprocal / 2^61 falls short by less than two; the
+    remainder corrects it without a 128-bit division.
+    """
+    var estimate = UInt64((UInt128(x) * UInt128(reciprocal)) >> 61)
+    var remainder = (UInt128(x) << 64) - UInt128(estimate) * UInt128(q)
+    while remainder >= UInt128(q):
+        estimate += 1
+        remainder -= UInt128(q)
+    return estimate
+
+
+@always_inline
 def _reduce_2q(x: UInt64, q: UInt64) -> UInt64:
     return x - q if x >= q else x
 
@@ -192,33 +207,34 @@ struct _Tables(Movable):
         if n < 2:
             return
         # The last stage holds w^j, j < n/2, for w of order n; every other stage
-        # takes a stride of it. Shoup quotients cost a 128-bit division each, so
-        # only these n/2 are divided: w^-j = q - w^(n/2 - j), and the quotient of
-        # q - x is 2^64 - 1 - the quotient of x.
+        # takes a stride of it. Only these n/2 need Shoup quotients, without
+        # division: w^-j = q - w^(n/2 - j), and the quotient of q - x is
+        # 2^64 - 1 - the quotient of x.
         var half = n // 2
         var log = 0
         while (1 << log) < n:
             log += 1
         var w = _power(root, UInt64(1) << UInt64(_MAX_LOG - log), q)
         var step = _shoup_quotient(w, q)
+        var reciprocal = UInt64((UInt128(1) << 125) // UInt128(q))
         var x = UInt64(1)
         for j in range(half):
-            self.forward[half + j] = x
-            self.forward_quotients[half + j] = _shoup_quotient(x, q)
+            self.forward.unsafe_get(half + j) = x
+            self.forward_quotients.unsafe_get(half + j) = _transform_quotient(x, q, reciprocal)
             x = _reduce_2q(_shoup(x, w, step, q), q)
-        self.inverse[half] = 1
-        self.inverse_quotients[half] = self.forward_quotients[half]
+        self.inverse.unsafe_get(half) = 1
+        self.inverse_quotients.unsafe_get(half) = self.forward_quotients.unsafe_get(half)
         for j in range(1, half):
-            self.inverse[half + j] = q - self.forward[n - j]
-            self.inverse_quotients[half + j] = UInt64.MAX - self.forward_quotients[n - j]
+            self.inverse.unsafe_get(half + j) = q - self.forward.unsafe_get(n - j)
+            self.inverse_quotients.unsafe_get(half + j) = UInt64.MAX - self.forward_quotients.unsafe_get(n - j)
         var m = half // 2
         var stride = 2
         while m >= 1:
             for j in range(m):
-                self.forward[m + j] = self.forward[half + j * stride]
-                self.forward_quotients[m + j] = self.forward_quotients[half + j * stride]
-                self.inverse[m + j] = self.inverse[half + j * stride]
-                self.inverse_quotients[m + j] = self.inverse_quotients[half + j * stride]
+                self.forward.unsafe_get(m + j) = self.forward.unsafe_get(half + j * stride)
+                self.forward_quotients.unsafe_get(m + j) = self.forward_quotients.unsafe_get(half + j * stride)
+                self.inverse.unsafe_get(m + j) = self.inverse.unsafe_get(half + j * stride)
+                self.inverse_quotients.unsafe_get(m + j) = self.inverse_quotients.unsafe_get(half + j * stride)
             m //= 2
             stride *= 2
 
