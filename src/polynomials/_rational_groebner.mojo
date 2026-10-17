@@ -71,7 +71,7 @@ from .sparse import SparsePoly, Term
 from .primes import _residue
 from ._images import _denominator, _scaled_integer
 from ._packed_groebner import _Buckets, _Engine, _Packed, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
-from ._f4 import _Columns, _LANES, _LaneBases, _Matrix, _Store, _Trace, _f4_learn, _f4_replay_bases, _lane_basis, _raw_hash
+from ._f4 import _Columns, _LANES, _LaneBases, _Matrix, _Step, _Store, _Trace, _f4_learn, _f4_replay_bases, _lane_basis, _raw_hash
 from ._integer_f4 import _add_mul_1, _divide, _magnitude, _pairs_reduce_to_zero, _reduced_tails, _remainder, _sub_mul_1
 
 comptime _PRIME_LIMIT = 4096
@@ -491,12 +491,12 @@ struct _Images[W: Int](Movable):
                 return False
         return True
 
-    def matches_supports(self, supports: List[List[_Packed[Self.W]]]) -> Bool:
-        """As `matches` for a replayed basis on the supports, by decreasing monomial."""
-        if len(supports) != len(self.leads):
+    def matches_supports(self, step: _Step[Self.W]) -> Bool:
+        """As `matches` for a replayed basis on the supports of the final matrix `step`."""
+        if len(step.supports) != len(self.leads):
             return False
-        for i in range(len(supports)):
-            if not _equal(supports[i][0], self.leads[i]):
+        for i in range(len(step.supports)):
+            if not _equal(step.monomial(i, 0), self.leads[i]):
                 return False
         return True
 
@@ -631,27 +631,26 @@ struct _Images[W: Int](Movable):
         self.primes.append(p)
         self.count += 1
 
-    def add_lane(mut self, supports: List[List[_Packed[Self.W]]], generation: Int, bases: _LaneBases, lane: Int, p: UInt64, mut budget: Budget) raises PolyError:
-        """Add one lane of a replayed batch, on the supports of the run of the given generation.
+    def add_lane(mut self, step: _Step[Self.W], generation: Int, bases: _LaneBases, lane: Int, p: UInt64, mut budget: Budget) raises PolyError:
+        """Add one lane of a replayed batch, on the supports of the final matrix `step` of the run of the given generation.
 
         An element whose monomials are found to be the supports' keeps that
         generation, so later lanes of the run take their residues directly.
         """
         if self.count == 0:
             var leads = List[_Packed[Self.W]]()
-            for support in supports:
-                leads.append(support[0])
+            for r in range(len(step.supports)):
+                leads.append(step.monomial(r, 0))
             self._start(leads)
         var slot = self.count % _BATCH
-        for e in range(len(supports)):
-            ref support = supports[e]
-            var m = len(support)
+        for e in range(len(step.supports)):
+            var m = len(step.supports[e])
             if self.verified[e] != generation:
                 var same = m == len(self.monomials[e])
                 if same:
                     budget.charge(UInt64(m))
                     for k in range(m):
-                        if not _equal(self._monomial(e, m - 1 - k), support[k]):
+                        if not _equal(self._monomial(e, m - 1 - k), step.monomial(e, k)):
                             same = False
                             break
                 if same:
@@ -659,7 +658,7 @@ struct _Images[W: Int](Movable):
                 else:
                     var monomials = List[_Packed[Self.W]](capacity=m)
                     for k in range(m - 1, -1, -1):
-                        monomials.append(support[k])
+                        monomials.append(step.monomial(e, k))
                     self._cover(e, monomials, budget)
             self._block(e, slot, budget)
             var n = len(self.monomials[e])
@@ -673,7 +672,7 @@ struct _Images[W: Int](Movable):
             # The supports' monomials are among the element's, which increase.
             var i = 0
             for k in range(m - 1, -1, -1):
-                while not _equal(self._monomial(e, i), support[k]):
+                while not _equal(self._monomial(e, i), step.monomial(e, k)):
                     budget.charge(1)
                     i += 1
                 block[slot * n + i] = values[_LANES * k + lane]
@@ -1081,7 +1080,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
             generation += 1
             ahead = _LaneBases()
             ahead_primes = List[UInt64]()
-        if images.count > 0 and not (images.matches_supports(trace.steps[len(trace.steps) - 1].monomials) if lane >= 0 else images.matches(basis)):
+        if images.count > 0 and not (images.matches_supports(trace.steps[len(trace.steps) - 1]) if lane >= 0 else images.matches(basis)):
             mismatches += 1
             if mismatches < _MISMATCH_LIMIT:
                 continue
@@ -1115,7 +1114,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
                 ahead_primes = List[UInt64]()
             candidate = None
         if lane >= 0:
-            images.add_lane(trace.steps[len(trace.steps) - 1].monomials, generation, ahead, lane, p, budget)
+            images.add_lane(trace.steps[len(trace.steps) - 1], generation, ahead, lane, p, budget)
         else:
             images.add(basis, p, budget)
         var count = images.count
