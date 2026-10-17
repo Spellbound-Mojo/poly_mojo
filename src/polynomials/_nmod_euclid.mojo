@@ -112,21 +112,63 @@ def _scale_words(mut a: List[UInt64], c: UInt64, field: _Field):
         a[i] = field.mul(a[i], c)
 
 
-def _reduce_monic(mut a: List[UInt64], b: List[UInt64], field: _Field, mut budget: Budget) raises PolyError:
-    """Replace a by a mod b for monic b, trimmed."""
+def _reduce(mut a: List[UInt64], b: List[UInt64], field: _Field, mut budget: Budget) raises PolyError -> Int:
+    """Replace a by lc(b)^e (a mod b), trimmed, for b of positive length, and return e.
+
+    A remainder step of one or two quotient terms (the usual case) takes no
+    inverse: e is the number of terms, and lc^2 a - (q1 x + q0) b or
+    lc a - q0 b eliminates them, each coefficient's products summing below
+    3p^2 < p 2^64 for one Montgomery reduction. Longer quotients use 1/lc(b),
+    two terms per pass, with e = 0.
+    """
     var db = len(b) - 1
     if len(a) <= db:
-        return
-    _charge_size((len(a) - db) * len(b), budget)
-    for k in range(len(a) - 1, db - 1, -1):
-        var q = a[k]
-        if q == 0:
-            continue
-        var base = k - db
+        return 0
+    var terms = len(a) - db
+    _charge_size(terms * len(b), budget)
+    if db == 0:
+        a.clear()
+        return 0
+    var p = field.p
+    var lc = b[db]
+    var k = len(a) - 1
+    if terms == 2:
+        var top = a[k]
+        var n1 = field.mul(lc, top)
+        var n0 = field.sub(field.mul(lc, a[k - 1]), field.mul(top, b[db - 1]))
+        var m1 = UInt128(p - n1 if n1 else 0)
+        var m0 = UInt128(p - n0 if n0 else 0)
+        var square = UInt128(field.mul(lc, lc))
+        a[0] = field.reduce(UInt128(a[0]) * square + m0 * UInt128(b[0]))
+        for i in range(1, db):
+            a[i] = field.reduce(UInt128(a[i]) * square + m1 * UInt128(b[i - 1]) + m0 * UInt128(b[i]))
+    elif terms == 1:
+        var m = UInt128(p - a[k] if a[k] else 0)
+        var scale = UInt128(lc)
         for i in range(db):
-            a[base + i] = field.sub(a[base + i], field.mul(q, b[i]))
+            a[i] = field.reduce(UInt128(a[i]) * scale + m * UInt128(b[i]))
+    else:
+        terms = 0
+        var inverse = field.inverse(lc)
+        while k > db:
+            var q1 = field.mul(a[k], inverse)
+            var q0 = field.mul(field.sub(a[k - 1], field.mul(q1, b[db - 1])), inverse)
+            var n1 = UInt128(p - q1 if q1 else 0)
+            var n0 = UInt128(p - q0 if q0 else 0)
+            var base = k - 1 - db
+            a[base] = field.add(a[base], field.reduce(n0 * UInt128(b[0])))
+            for i in range(1, db):
+                a[base + i] = field.add(a[base + i], field.reduce(n1 * UInt128(b[i - 1]) + n0 * UInt128(b[i])))
+            k -= 2
+        if k == db:
+            var q = field.mul(a[k], inverse)
+            if q:
+                var n = UInt128(p - q)
+                for i in range(db):
+                    a[i] = field.add(a[i], field.reduce(n * UInt128(b[i])))
     a.resize(db, 0)
     _trim_words(a)
+    return terms
 
 
 def _make_monic(mut a: List[UInt64], field: _Field) raises PolyError -> UInt64:
@@ -145,8 +187,7 @@ def _gcd_words(var a: List[UInt64], var b: List[UInt64], field: _Field, mut budg
         swap(a, b)
     while len(b):
         budget.charge(1)
-        _ = _make_monic(b, field)
-        _reduce_monic(a, b, field, budget)
+        _ = _reduce(a, b, field, budget)
         swap(a, b)
     if len(a):
         _ = _make_monic(a, field)
@@ -167,20 +208,26 @@ def _resultant_words(var a: List[UInt64], var b: List[UInt64], field: _Field, mu
         swap(m, n)
         if (m & 1) and (n & 1):
             result = field.sub(0, result)
+    # Pseudo-remainders leave a denominator, inverted once at the end.
+    var denominator = field.enter(1)
     while n > 0:
         budget.charge(1)
-        var lc = _make_monic(b, field)
-        _reduce_monic(a, b, field, budget)
+        var lc = b[n]
+        var e = _reduce(a, b, field, budget)
         if not len(a):
             return 0
         var k = len(a) - 1
-        # res(A, B) = (-1)^(mn) lc(B)^(m - k) res(B, A mod B), with B made monic:
-        # res(A, B) = lc(B)^m res(A, B/lc(B)) and res(A, B') = (-1)^(mn) res(B', R).
-        result = field.mul(result, field.power(lc, m))
+        # res(A, B) = (-1)^(mn) res(B, A), res(B, A) = lc(B)^(m - k) res(B, A mod B),
+        # and the remainder came back as lc^e (A mod B), so
+        # res(B, A mod B) = res(B, lc^e (A mod B)) / lc^(e n).
+        result = field.mul(result, field.power(lc, m - k))
+        if e:
+            denominator = field.mul(denominator, field.power(lc, e * n))
         if (m & 1) and (n & 1):
             result = field.sub(0, result)
         swap(a, b)
         m = n
         n = k
     # b is a nonzero constant: res(A, c) = c^deg(A).
-    return field.mul(result, field.power(b[0], m))
+    result = field.mul(result, field.power(b[0], m))
+    return field.mul(result, field.inverse(denominator))
