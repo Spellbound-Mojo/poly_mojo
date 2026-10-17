@@ -35,7 +35,7 @@ certified, and setting h = 1 then gives the basis of the input ideal.
    (d) every element is monic and no tail monomial is divisible by a leading
        monomial, so G is the reduced basis of J.
    Correctness never depends on a prime being lucky; bad primes cost time.
-   If reconstruction needs more than `_PRIME_LIMIT` primes or certification
+   If reconstruction needs more primes than `_prime_limit` allows or certification
    fails `_CERTIFY_LIMIT` times, J is computed exactly instead: the packed
    engine runs fraction-free Buchberger on the homogenized inputs, degree by
    degree, which avoids most of the coefficient growth an inhomogeneous
@@ -75,7 +75,21 @@ from ._f4 import _Columns, _LANES, _LaneBases, _Matrix, _Step, _Store, _Trace, _
 from ._integer_f4 import _add_mul_1, _divide, _magnitude, _pairs_reduce_to_zero, _reduced_tails, _remainder, _sub_mul_1
 
 comptime _PRIME_LIMIT = 4096
-"""Primes tried before giving up on reconstruction."""
+"""Primes tried before giving up on reconstruction, whatever the images' size."""
+comptime _PRIME_CEILING = 32768
+"""Primes tried before giving up on reconstruction, at most."""
+comptime _RESIDUE_LIMIT = 1 << 30
+"""Residues the images may hold, across their coefficients and primes, beyond `_PRIME_LIMIT` primes."""
+
+
+def _prime_limit(coefficients: Int) -> Int:
+    """Primes to try before giving up, for images with this many coefficients.
+
+    Large coefficients need many primes, and the images keep a residue per
+    coefficient and prime: past `_PRIME_LIMIT` primes, the limit is what
+    keeps them within `_RESIDUE_LIMIT` residues, up to `_PRIME_CEILING`.
+    """
+    return max(_PRIME_LIMIT, min(_PRIME_CEILING, _RESIDUE_LIMIT // max(1, coefficients)))
 comptime _CERTIFY_LIMIT = 4
 """Certification attempts before giving up."""
 comptime _MISMATCH_LIMIT = 3
@@ -573,6 +587,13 @@ struct _Images[W: Int](Movable):
         self.residues = List[List[List[UInt32]]]()
         self.count = 0
         self.probe = (0, 0)
+
+    def coefficients(self) -> Int:
+        """The coefficients of all elements so far."""
+        var total = 0
+        for e in range(len(self.monomials)):
+            total += len(self.monomials[e])
+        return total
 
     def matches(self, basis: List[List[_Term[ModInt, Self.W]]]) -> Bool:
         if len(basis) != len(self.leads):
@@ -1133,12 +1154,14 @@ def _images_of[W: Int](inputs: List[List[_Term[ZZ, W]]], ring: Modulus, mut budg
     return reduced^
 
 
-def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify: Bool, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ZZ, W]]]]:
+def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify: Bool, mut exhausted: Bool, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ZZ, W]]]]:
     """The certified reduced basis of homogeneous inputs, or None when reconstruction gives up.
 
     Without `certify`, the first candidate that agrees with the next image is
-    returned uncertified.
+    returned uncertified. `exhausted` tells whether it gave up only because
+    the primes ran out.
     """
+    exhausted = False
     var images = _Images[W](kind)
     var candidate = Optional[_Candidate[W]](None)
     var mismatches = 0
@@ -1156,7 +1179,10 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
     var ahead = _LaneBases()
     var ahead_primes = List[UInt64]()
     var p = (UInt64(1) << 31) + 1
-    for _ in range(_PRIME_LIMIT):
+    var tried = 0
+    var limit = _PRIME_LIMIT
+    while tried < limit:
+        tried += 1
         budget.charge(1)
         p = _next_prime(p, budget)
         if not _admissible(inputs, p, budget):
@@ -1228,6 +1254,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
             images.add_lane(trace.steps[len(trace.steps) - 1], generation, ahead, lane, p, budget)
         else:
             images.add(basis, p, budget)
+        limit = _prime_limit(images.coefficients())
         var count = images.count
         if count >= attempt:
             candidate = images.reconstruct(certify, budget)
@@ -1235,6 +1262,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
             # more: a failed attempt costs at least one reconstruction of a
             # coefficient as large as the modulus.
             attempt = 2 * count if count < 8 else count + max(8, count // 8)
+    exhausted = True
     return None
 
 
@@ -1259,10 +1287,11 @@ def _rational_basis[W: Int](generators: List[SparsePoly[QQ]], order: MonomialOrd
         inputs.append(integral^)
     if len(inputs) == 0:
         return List[SparsePoly[QQ]]()
+    var exhausted = False
     if not homogeneous and not certify and not exact:
         # Uncertified, the affine basis is reconstructed directly: the proof
         # needs J, but the basis of J is often many times larger.
-        var affine = _multimodular[W](inputs, kind, False, budget)
+        var affine = _multimodular[W](inputs, kind, False, exhausted, budget)
         if affine:
             return _finish(affine.take(), True, n, order, budget)
     if not homogeneous:
@@ -1275,9 +1304,11 @@ def _rational_basis[W: Int](generators: List[SparsePoly[QQ]], order: MonomialOrd
                 var exponents = inputs[f][k].monomial.exponents()
                 exponents[n] = UInt32(degree - inputs[f][k].monomial.degree)
                 inputs[f][k].monomial = _packed(exponents)
-    # By certified reconstruction, and exactly if that gives up.
-    if not exact:
-        var modular = _multimodular[W](inputs, kind, certify, budget)
+    # By certified reconstruction, and exactly if that gives up. When the
+    # affine reconstruction ran out of primes, the homogenized one, whose
+    # basis is usually larger, is not tried with the same primes.
+    if not exact and not exhausted:
+        var modular = _multimodular[W](inputs, kind, certify, exhausted, budget)
         if modular:
             return _finish(modular.take(), homogeneous, n, order, budget)
     return _finish(_exact[W](inputs, kind, budget), homogeneous, n, order, budget)
