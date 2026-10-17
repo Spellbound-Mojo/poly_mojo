@@ -1135,7 +1135,7 @@ def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _
     return fresh^
 
 
-def _interreduce[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _Store[W], prime: UInt64, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
+def _interreduce[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], var store: _Store[W], prime: UInt64, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
     """The reduced basis from the active elements, by one matrix, in decreasing leading-monomial order.
 
     Every active element is a row, and symbolic preprocessing adds a reducer
@@ -1175,6 +1175,17 @@ def _interreduce[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], st
         for c in range(ncols):
             step.columns.append(matrix.columns.monomials[order[c]])
         trace.steps.append(step^)
+    # The output needs only the reduced rows and the column monomials: the
+    # elements, their stored terms, and the matrix's rows and index go first.
+    store = _Store[W]()
+    engine.polys = List[List[_Term[ModInt, W]]]()
+    matrix.entries = List[Int32]()
+    matrix.starts = List[Int]()
+    matrix.sources = List[Int]()
+    matrix.columns.keys = List[SIMD[DType.uint8, W]]()
+    matrix.columns.covered = List[Bool]()
+    matrix.columns.slots = List[UInt64]()
+    pivot = List[Int]()
     var basis = List[List[_Term[ModInt, W]]](capacity=basis_rows)
     for r in range(basis_rows):
         var n = found.starts[r + 1] - found.starts[r]
@@ -1211,7 +1222,7 @@ def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], 
         engine.heapify_pairs(budget)
     store.extend(engine, budget)
     store.release(engine)
-    return _interreduce[W, record](engine, store, prime, ring, trace, budget)
+    return _interreduce[W, record](engine, store^, prime, ring, trace, budget)
 
 
 def _f4_packed[W: Int](var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
