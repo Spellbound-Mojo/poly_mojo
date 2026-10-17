@@ -191,8 +191,8 @@ def _variables_of(f: SparsePoly[ZZ], g: SparsePoly[ZZ], mut budget: Budget) rais
 
 
 def _small_for_heuristic(f: SparsePoly[ZZ], g: SparsePoly[ZZ], variables: List[Int64]) -> Bool:
-    """Whether to run GCDHEU before sparse Brown: four or more variables and few terms."""
-    return len(variables) >= 4 and len(f.terms) + len(g.terms) < _SMALL_TERMS
+    """Whether to run GCDHEU before sparse Brown: three or more variables and few terms."""
+    return len(variables) >= 3 and len(f.terms) + len(g.terms) < _SMALL_TERMS
 
 
 def _heuristic(f: SparsePoly[ZZ], g: SparsePoly[ZZ], mut budget: Budget) raises PolyError -> Optional[SparsePoly[ZZ]]:

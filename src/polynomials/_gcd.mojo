@@ -151,7 +151,7 @@ def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budge
                 var brown = _brown_gcd(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variables, budget)
                 if brown:
                     return _normalized(rebind_var[SparsePoly[C]](brown.take()), budget)
-            # Small dense inputs in four or more variables run GCDHEU first.
+            # Small dense inputs in three or more variables run GCDHEU first.
             var heuristic_first = dense and heuristic and not high and _small_for_heuristic(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variables)
             if dense and heuristic and heuristic_first:
                 use_heuristic = False
