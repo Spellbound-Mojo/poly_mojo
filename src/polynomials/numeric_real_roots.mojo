@@ -13,7 +13,7 @@ from .numeric_bounds import NumericBox, numeric_bounds, _box_real, _box_zero, _b
 from .numeric_evaluate import EnclosureEvaluation, _evaluate_program, _check_program, _enclosure_context, _exact_dense_boxes, _numeric_dense_boxes
 from ._numeric_program import _NumericProgram, _dense_program
 from .numeric_options import NumericOptions, NumericOutcome, _accurate, _next_precision
-from ._real_refine import _RootOracle, _Enclosure, _root_oracle, _enclosure, _tighten, _oracle_split
+from ._real_refine import _RootOracle, _Enclosure, _root_oracle, _enclosure, _tighten, _oracle_split, _isolate_all, _locate, _ranged_split
 from ._numeric_roots import _root_degree, _root_bound, _derivative_boxes, _rational_polynomial, _strict_inside, _require_success, _exact_box_evaluate
 
 
@@ -223,11 +223,19 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
     # root, inherited by the child that keeps it, decides it (_real_refine).
     var enclosures = List[Optional[_Enclosure]](length=len(pending), fill=None)
     var oracle = Optional[_RootOracle]()
+    # With a fresh integer chain, every real root is enclosed once at small
+    # dyadic points (_isolate_all), and a cell holding several roots tracks
+    # the index range of its roots: its split needs comparisons and at most
+    # one sign evaluation instead of a chain evaluation at a large point.
+    var ranges = List[Tuple[Int, Int]](length=len(pending), fill=(-1, -1))
+    var roots = List[_Enclosure]()
+    var isolated_all = False
     while len(pending):
         budget.charge(1)
         var cell = pending.pop()
         var known = variations.pop()
         var enclosed = enclosures.pop()
+        var span = ranges.pop()
         var enough = cell.count == 0 or (cell.count > 0 and _accurate(cell.interval, options, budget) and (not options.require_isolation or cell.count == 1))
         if enough or splits == options.max_subdivisions:
             complete = complete and cell.count >= 0
@@ -251,12 +259,38 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
             pending.append(RealRootCell(lower^, 1 if below else 0, 0, List[EnclosureEvaluation[BallDomain]]()))
             variations.append((-1, -1))
             variations.append((-1, -1))
+            ranges.append((-1, -1))
+            ranges.append((-1, -1))
             if below:
                 enclosures.append(None)
                 enclosures.append(enclosure^)
             else:
                 enclosures.append(enclosure^)
                 enclosures.append(None)
+            continue
+        if exact and integer.bounded:
+            ref chain = sequence.value()
+            if not oracle:
+                oracle = _root_oracle(exact.value(), chain.polynomials[len(chain.polynomials) - 1], budget)
+            if not isolated_all:
+                roots = _isolate_all(oracle.value(), integer, chain, budget)
+                isolated_all = True
+            if span[0] < 0:
+                span = (_locate(oracle.value(), roots, 0, len(roots), cell.interval.real_low, budget)[0], _locate(oracle.value(), roots, 0, len(roots), cell.interval.real_high, budget)[0])
+            if span[1] - span[0] != cell.count:
+                raise PolyError(PolyErrorKind.DOMAIN, "root enclosures disagree with the Sturm count")
+            var cut = _ranged_split(oracle.value(), roots, span[0], span[1], cell.interval.real_low, cell.interval.real_high, degree, budget)
+            var lower = NumericBox.real_interval(cell.interval.real_low, cut[0], budget)
+            var upper = NumericBox.real_interval(cut[0], cell.interval.real_high, budget)
+            _allocation[RealRootCell](2, budget)
+            pending.append(RealRootCell(upper^, span[1] - cut[1], 0, List[EnclosureEvaluation[BallDomain]]()))
+            pending.append(RealRootCell(lower^, cut[1] - span[0], 0, List[EnclosureEvaluation[BallDomain]]()))
+            variations.append((-1, -1))
+            variations.append((-1, -1))
+            ranges.append((cut[1], span[1]))
+            ranges.append((span[0], cut[1]))
+            enclosures.append(Optional[_Enclosure](roots[cut[1]].copy()) if span[1] - cut[1] == 1 else None)
+            enclosures.append(Optional[_Enclosure](roots[span[0]].copy()) if cut[1] - span[0] == 1 else None)
             continue
         var split = _real_split(coefficients, cell.interval, exact, degree, budget)
         var left = NumericBox.real_interval(cell.interval.real_low, split, budget)
@@ -273,6 +307,8 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
             variations.append((low, middle))
             enclosures.append(None)
             enclosures.append(None)
+            ranges.append((-1, -1))
+            ranges.append((-1, -1))
             continue
         var right_cell = _real_cell(coefficients, derivative, exact, sequence, right, options, budget)
         var left_cell = _real_cell(coefficients, derivative, exact, sequence, left, options, budget)
@@ -290,6 +326,8 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
         variations.append((-1, -1))
         enclosures.append(None)
         enclosures.append(None)
+        ranges.append((-1, -1))
+        ranges.append((-1, -1))
     var outcome = NumericOutcome.SUCCESS if complete and accurate and (isolated or not options.require_isolation) else NumericOutcome.SUBDIVISION_LIMIT
     _require_success(outcome, complete_only)
     return RootStreamReceipt(outcome, complete, accurate, isolated, items)

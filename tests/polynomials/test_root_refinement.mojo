@@ -4,6 +4,13 @@ from polynomials import Budget, QQ, NoContext, DensePoly, NumericOptions, PolyEr
 from support.check import Checker
 
 
+def as_list(f: DensePoly[QQ]) -> List[QQ]:
+    var values = List[QQ]()
+    for v in f.coefficients:
+        values.append(v.copy())
+    return values^
+
+
 def deep_refinement(mut c: Checker) raises:
     # Single-root cells split by an enclosure of their root; every count must
     # still be the Sturm count of its cell, including repeated roots, dyadic
@@ -18,6 +25,15 @@ def deep_refinement(mut c: Checker) raises:
     var p1 = Rational(5, 3) * (Rational(-1) - close) + close
     var p2 = Rational(5, 3) - Rational(1) - close
     cases.append([QQ(p0^), QQ(p1^), QQ(p2^), QQ(Rational(1))])
+    # prod_{i=1..12} (x - i): integer roots on the dyadic bisection grid.
+    var wilkinson = DensePoly[QQ].from_coefficients(0, NoContext(), [QQ(Rational(1))], work)
+    for i in range(1, 13):
+        wilkinson = wilkinson.mul(DensePoly[QQ].from_coefficients(0, NoContext(), [QQ(Rational(-i)), QQ(Rational(1))], work), work)
+    cases.append(as_list(wilkinson))
+    # T_9^2: nine double roots clustered towards +-1, and a root at 0.
+    var t9 = DensePoly[QQ].from_coefficients(0, NoContext(), [QQ(Rational(0)), QQ(Rational(9)), QQ(Rational(0)), QQ(Rational(-120)), QQ(Rational(0)), QQ(Rational(432)), QQ(Rational(0)), QQ(Rational(-576)), QQ(Rational(0)), QQ(Rational(256))], work)
+    cases.append(as_list(t9.mul(t9, work)))
+    var distinct: List[Int] = [4, 3, 12, 9]
     for k in range(len(cases)):
         var f = DensePoly[QQ].from_coefficients(0, NoContext(), cases[k].copy(), work)
         var coarse = NumericOptions(absolute_bits=1, max_subdivisions=1 << 20)
@@ -31,7 +47,11 @@ def deep_refinement(mut c: Checker) raises:
             var count = sign_changes(sequence, cell.interval.real_low, work) - sign_changes(sequence, cell.interval.real_high, work)
             c.check(count == cell.count, String("deep refinement cell count is its Sturm count ", k))
             counted += cell.count
-        c.check(counted == (4 if k == 0 else 3), String("every distinct root covered ", k))
+        c.check(counted == distinct[k], String("every distinct root covered ", k))
+        # The coarse cover itself splits cells with several roots.
+        for cell in cover.cells:
+            var count = sign_changes(sequence, cell.interval.real_low, work) - sign_changes(sequence, cell.interval.real_high, work)
+            c.check(count == cell.count, String("coarse cell count is its Sturm count ", k))
 
 
 def main() raises:
