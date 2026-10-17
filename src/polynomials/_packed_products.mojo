@@ -34,6 +34,8 @@ comptime _WINDOW = 1 << 18
 """The largest dense accumulation window, in slots."""
 comptime _POWER_GATE = 1
 """The power recurrence runs when its heap steps stay below this many times the products of the last square."""
+comptime _POWER_SPREAD = UInt64(2)
+"""The largest base exponent for which the power recurrence runs."""
 comptime _KEY_LIMIT = UInt64(1) << 62
 """Keys stay below this, so prefix and window arithmetic never wraps."""
 
@@ -875,6 +877,12 @@ def _packed_power[C: CoefficientRing](f: SparsePoly[C], k: Int, mut budget: Budg
         return None
     var n = len(f.order.variables)
     var top = _maxima(f, n)
+    # Bases with a wide exponent spread (Monagan and Pearce's u^5) give sparse
+    # windows that repeated squaring fills cheaply; the recurrence measured
+    # faster only for exponents of at most _POWER_SPREAD.
+    for e in top:
+        if e > _POWER_SPREAD:
+            return None
     if Float64(t - 1) * _term_estimate(t, k, top) >= Float64(_POWER_GATE) * _term_estimate(t, k // 2, top) ** 2 / 2:
         return None
     return _power_recurrence(f, k, budget)

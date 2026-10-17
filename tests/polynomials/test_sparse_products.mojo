@@ -176,8 +176,11 @@ def powers(mut c: Checker) raises:
                 taken += 1
             var got = f.pow(UInt64(k), work)
             c.check(got == expected, String("power, base ", b, ", exponent ", k))
-    c.check(taken >= 4, "large powers of few-term bases take the recurrence")
+    c.check(taken >= 3, "large powers of few-term bases take the recurrence")
     c.check(not _packed_power(bases[0], 2, work), "squares use the product kernel")
+    var spread = few_terms([(1, 0, 0, 0), (1, 1, 0, 0), (2, 0, 2, 0), (5, 0, 0, 5)], order, work)
+    c.check(not _packed_power(spread, 12, work), "wide exponent spreads keep repeated squaring")
+    c.check(Bool(_power_recurrence(spread, 12, work)), "the recurrence itself still applies")
 
 
 def main() raises:
