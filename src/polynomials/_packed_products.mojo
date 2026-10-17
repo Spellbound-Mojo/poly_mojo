@@ -192,16 +192,32 @@ struct _Accumulator(Movable):
             self.highs.unsafe_get(slot) += extension + UInt64(Int(new < old))
 
     def add_integer[wide: Bool](mut self, slot: Int, value: Integer) raises PolyError:
-        """Add a ZZ coefficient below 2^127 in magnitude."""
+        """Add a ZZ coefficient below 2^127 in magnitude, or below 2^190 in a wide slot."""
         self.touch(slot)
+        var bits = value.magnitude_bit_length()
+        if bits <= 63:
+            var word: Int64
+            try:
+                word = value.to_native_exact[DType.int64]()
+            except e:
+                raise PolyError(PolyErrorKind.CAPACITY, String(e))
+            self._add[wide](slot, UInt128(Int128(word)), UInt64(0) - UInt64(Int(word < 0)))
+            return
         var bytes = value.to_bytes()
-        if len(bytes) > 16:
+        if len(bytes) > (24 if wide else 16):
             raise PolyError(PolyErrorKind.CAPACITY, "packed accumulator coefficient overflow")
-        var magnitude = UInt128(0)
+        var low = UInt128(0)
+        var high = UInt64(0)
         for i in range(len(bytes)):
-            magnitude |= UInt128(bytes[i]) << UInt128(8 * i)
-        var negative = value.sign() < 0
-        self._add[wide](slot, UInt128(0) - magnitude if negative else magnitude, UInt64(0) - UInt64(Int(negative)))
+            if i < 16:
+                low |= UInt128(bytes[i]) << UInt128(8 * i)
+            else:
+                high |= UInt64(bytes[i]) << UInt64(8 * (i - 16))
+        if value.sign() < 0:
+            # 192-bit two's complement negation.
+            low = ~low + 1
+            high = ~high + UInt64(Int(low == 0))
+        self._add[wide](slot, low, high)
 
     @always_inline
     def add_modular[track: Bool](mut self, slot: Int, a: UInt64, b: UInt64, p: UInt64):
@@ -557,7 +573,7 @@ def _packed_divide[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], mut b
             return None
     for term in f.terms:
         comptime if C == ZZ:
-            if rebind[ZZ](term.coefficient).value.magnitude_bit_length() > 127:
+            if rebind[ZZ](term.coefficient).value.magnitude_bit_length() > 189:
                 return None
     var n = len(f.order.variables)
     var top_f = _maxima(f, n)

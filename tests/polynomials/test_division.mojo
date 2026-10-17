@@ -137,6 +137,23 @@ def fast_division[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
     comptime if C == ZZ:
         a = a.scale(rebind_var[C](ZZ(Integer(1) << 70)), work)
     agrees(a.mul(b, work), b, c, "wide quotient coefficients")
+    comptime if C == ZZ:
+        # Dividend coefficients of about 134 bits: 1024 colliding products of 62-bit coefficients.
+        var square = List[Term[C]]()
+        for i in range(32):
+            for j in range(32):
+                var pairs = List[Tuple[Int64, UInt32]]()
+                if i:
+                    pairs.append((Int64(0), UInt32(i)))
+                if j:
+                    pairs.append((Int64(1), UInt32(j)))
+                square.append(Term[C](Monomial(pairs^, work), word[C](ctx, Int64((1 << 62) - 1))))
+        var u = SparsePoly[C].from_terms(square^, order, ctx, work)
+        var v = u.add(SparsePoly[C].variable(1, order, ctx, work), work)
+        var wide_product = u.mul(v, work)
+        var wide_q = divide_exact(wide_product, v, work)
+        c.check(Bool(wide_q) and wide_q.value() == u, "fast quotient of a dividend wider than 127 bits")
+        c.check(not divide_exact(wide_product.add(SparsePoly[C].variable(0, order, ctx, work), work), v, work), "fast refusal with a wide dividend")
     var dense = MonomialOrder(MonomialOrder.LEX, [Int64(0)], work)
     var big_a = block[C](ctx, dense, rng, 1, 150, 1, 63, work)
     var big_b = block[C](ctx, dense, rng, 1, 90, 1, 63, work)
