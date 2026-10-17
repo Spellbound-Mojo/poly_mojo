@@ -16,6 +16,7 @@ from .coefficient_buffer import _CoefficientView, _view
 from .coefficients import CoefficientRing, ZZ, QQ, ModInt, _mod_mul
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product, _sum
 from apn_mojo import Integer, Rational, lcm
+from ._fntt import _fconvolve, _FPRIMES, _FPRIME_BITS
 
 comptime _PRIME_COUNT = 48
 comptime _PRIMES: Array[UInt64, _PRIME_COUNT] = [
@@ -342,8 +343,30 @@ struct _Garner(Movable):
     """The primes q_0 ... q_(k-1)."""
 
 
-def _garner(k: Int) -> _Garner:
-    var primes = materialize[_PRIMES]()
+def _moduli[F: Bool](k: Int) -> List[UInt64]:
+    """The first k primes of the integer table, or of the float table when F."""
+    var moduli = List[UInt64](capacity=k)
+    comptime if F:
+        var primes = materialize[_FPRIMES]()
+        for i in range(k):
+            moduli.append(primes[i])
+    else:
+        var primes = materialize[_PRIMES]()
+        for i in range(k):
+            moduli.append(primes[i])
+    return moduli^
+
+
+def _modular_convolve[F: Bool](var a: List[UInt64], var b: List[UInt64], count: Int, square: Bool, index: Int, n: Int) -> List[UInt64]:
+    """_convolve modulo prime `index` of the integer table, or _fconvolve of the float table when F."""
+    comptime if F:
+        return _fconvolve(a, b, count, square, index, n)
+    else:
+        return _convolve(a^, b^, count, square, index, n)
+
+
+def _garner[F: Bool = False](k: Int) -> _Garner:
+    var primes = _moduli[F](k)
     var prefix_inverse = List[UInt64](length=k, fill=0)
     var prefix_quotient = List[UInt64](length=k, fill=0)
     var residue = List[UInt64](length=k * k, fill=0)
@@ -359,10 +382,7 @@ def _garner(k: Int) -> _Garner:
         var inverse = _power(prefix, q - 2, q)
         prefix_inverse[i] = inverse
         prefix_quotient[i] = _shoup_quotient(inverse, q)
-    var moduli = List[UInt64](capacity=k)
-    for i in range(k):
-        moduli.append(primes[i])
-    return _Garner(k, prefix_inverse^, prefix_quotient^, residue^, residue_quotient^, moduli^)
+    return _Garner(k, prefix_inverse^, prefix_quotient^, residue^, residue_quotient^, primes^)
 
 
 def _digits(g: _Garner, residues: List[List[UInt64]], index: Int, mut digits: List[UInt64]):
@@ -382,9 +402,9 @@ def _digits(g: _Garner, residues: List[List[UInt64]], index: Int, mut digits: Li
         digits[i] = _reduce_2q(_shoup(difference, g.prefix_inverse[i], g.prefix_inverse_quotient[i], q), q)
 
 
-def _radix_limbs(k: Int) -> List[UInt64]:
+def _radix_limbs[F: Bool = False](k: Int) -> List[UInt64]:
     """The product q_0 ... q_(k-1) in 64-bit limbs, least significant first."""
-    var primes = materialize[_PRIMES]()
+    var primes = _moduli[F](k)
     var limbs: List[UInt64] = [1]
     for i in range(k):
         _scale_add(limbs, primes[i], 0)
@@ -465,9 +485,9 @@ def _magnitude(value: Integer, mut limbs: List[UInt64]):
         limbs.append(limb)
 
 
-def _residues_zz[C: CoefficientRing](values: _CoefficientView[C, _], k: Int, n: Int, mut budget: Budget) raises PolyError -> List[List[UInt64]]:
+def _residues_zz[C: CoefficientRing, F: Bool = False](values: _CoefficientView[C, _], k: Int, n: Int, mut budget: Budget) raises PolyError -> List[List[UInt64]]:
     """Each coefficient modulo each of the first k primes, as residues below q, padded to n."""
-    var primes = materialize[_PRIMES]()
+    var primes = _moduli[F](k)
     var limbs = List[UInt64]()
     var offsets = List[Int](capacity=len(values) + 1)
     var negative = List[Bool](capacity=len(values))
@@ -534,27 +554,44 @@ def _bit_length(n: Int) -> Int:
 
 
 def _ntt_zz[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _], square: Bool, mut budget: Budget) raises PolyError -> Optional[List[C]]:
-    """The exact product by multi-modular transforms, or None when the coefficients need more primes than the table holds."""
+    """The exact product by multi-modular transforms or Kronecker segmentation, or None past the transform limits."""
     var count = len(a) + len(b) - 1
+    var values = _zz_product_range[C](a, b, 0, count, square, budget)
+    if not values:
+        return None
+    var result = values.take()
+    while len(result) and result[len(result) - 1].is_zero():
+        _ = result.pop()
+    return result^
+
+
+comptime _FLOAT_PRIMES = 4
+"""Products whose coefficients fit this many float primes use the double-precision transforms."""
+
+
+def _zz_product_range[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _], lo: Int, hi: Int, square: Bool, mut budget: Budget) raises PolyError -> Optional[List[C]]:
+    """Coefficients lo ..< hi of a * b over ZZ, by the cheapest transform family that holds them."""
     # |c_i| <= min(len) * max|a| * max|b|; the symmetric range needs one more bit.
     var bits_a = _bits_zz(a)
     var bits = bits_a + (bits_a if square else _bits_zz(b)) + _bit_length(min(len(a), len(b))) + 1
+    var n = _range_length(len(a), len(b), lo, hi)
+    var small = (bits + _FPRIME_BITS - 1) // _FPRIME_BITS
+    if small <= _FLOAT_PRIMES and n >= 16 and n <= (1 << 30):
+        return _multimodular[C, True](a, b, lo, hi, small, n, square, budget)
     var k = (bits + _PRIME_BITS - 1) // _PRIME_BITS
-    var n = _transform_length(count)
     if k > _PRIME_COUNT:
-        var segmented = _ks_range[C](a, b, 0, count, square, budget)
-        if not segmented:
-            return None
-        var values = segmented.take()
-        while len(values) and values[len(values) - 1].is_zero():
-            _ = values.pop()
-        return values^
+        return _ks_range[C](a, b, lo, hi, square, budget)
     if n > (1 << 30):
         return None
+    return _multimodular[C, False](a, b, lo, hi, k, n, square, budget)
+
+
+def _multimodular[C: CoefficientRing, F: Bool](a: _CoefficientView[C, _], b: _CoefficientView[C, _], lo: Int, hi: Int, k: Int, n: Int, square: Bool, mut budget: Budget) raises PolyError -> List[C]:
+    """Coefficients lo ..< hi of a * b by k primes of one family and transforms of length n."""
     _charge_transforms(k, n, square, budget)
-    _allocation[UInt64](_product(k, count), budget)
-    var left = _residues_zz(a, k, n, budget)
-    var right = List[List[UInt64]]() if square else _residues_zz(b, k, n, budget)
+    _allocation[UInt64](_product(k, hi), budget)
+    var left = _residues_zz[C, F](a, k, n, budget)
+    var right = List[List[UInt64]]() if square else _residues_zz[C, F](b, k, n, budget)
     var residues = List[List[UInt64]](capacity=k)
     for p in range(k):
         var x = List[UInt64]()
@@ -562,18 +599,22 @@ def _ntt_zz[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C
         var y = List[UInt64]()
         if not square:
             swap(y, right[p])
-        residues.append(_convolve(x^, y^, count, square, p, n))
-    var result = _reconstruct_zz[C](residues, k, count, budget)
-    while len(result) and result[len(result) - 1].is_zero():
-        _ = result.pop()
-    return result^
+        var column = _modular_convolve[F](x^, y^, hi, square, p, n)
+        if lo:
+            var kept = List[UInt64](capacity=hi - lo)
+            for i in range(lo, hi):
+                kept.append(column[i])
+            residues.append(kept^)
+        else:
+            residues.append(column^)
+    return _reconstruct_zz[C, F](residues, k, hi - lo, budget)
 
 
-def _reconstruct_zz[C: CoefficientRing](residues: List[List[UInt64]], k: Int, count: Int, mut budget: Budget) raises PolyError -> List[C]:
+def _reconstruct_zz[C: CoefficientRing, F: Bool = False](residues: List[List[UInt64]], k: Int, count: Int, mut budget: Budget) raises PolyError -> List[C]:
     """The symmetric CRT representatives, as ZZ values, of the first `count` residue columns modulo the first k primes."""
     _charge_size(_product(count, _product(k, k)), budget)
     _allocation[C](count, budget)
-    var g = _garner(k)
+    var g = _garner[F](k)
     var result = List[C](capacity=count)
     var digits = List[UInt64](length=k, fill=0)
     var bytes = List[UInt8](length=8 * (k + 1), fill=0)
@@ -591,7 +632,7 @@ def _reconstruct_zz[C: CoefficientRing](residues: List[List[UInt64]], k: Int, co
                 x = modulus - x
             result.append(rebind_var[C](ZZ(_integer_128(x, negative, bytes))))
         return result^
-    var modulus = _radix_limbs(k)
+    var modulus = _radix_limbs[F](k)
     var half = modulus.copy()
     var low = UInt64(0)
     var l = len(half) - 1
@@ -730,6 +771,9 @@ def _modular_product(a: List[UInt64], b: List[UInt64], count: Int, p: UInt64, sq
     var k = 1
     if index < 0:
         var bits = 2 * _bit_length(Int(p - 1)) + _bit_length(min(la, lb))
+        var small = (bits + _FPRIME_BITS - 1) // _FPRIME_BITS
+        if small <= _FLOAT_PRIMES and n >= 16:
+            return _float_modular_product(a, b, count, p, square, la, lb, small, n, budget)
         k = (bits + _PRIME_BITS - 1) // _PRIME_BITS
     _charge_transforms(k, n, square, budget)
     _allocation[UInt64](_product(k, full), budget)
@@ -759,6 +803,47 @@ def _modular_product(a: List[UInt64], b: List[UInt64], count: Int, p: UInt64, sq
     for i in range(k):
         weights.append(w)
         w = _mod_mul(w, primes[i] % p, p)
+    var digits = List[UInt64](length=k, fill=0)
+    var result = List[UInt64](length=count, fill=0)
+    for i in range(out):
+        var value = residues[0][i] % p
+        if k > 1:
+            _digits(g, residues, i, digits)
+            value = digits[0] % p
+            for j in range(1, k):
+                value = (value + _mod_mul(digits[j] % p, weights[j], p)) % p
+        result[i] = value
+    return result^
+
+
+def _float_modular_product(a: List[UInt64], b: List[UInt64], count: Int, p: UInt64, square: Bool, la: Int, lb: Int, k: Int, n: Int, mut budget: Budget) raises PolyError -> List[UInt64]:
+    """_modular_product by k float primes: Garner's CRT of the exact nonnegative convolution, reduced modulo p."""
+    var full = la + lb - 1
+    _charge_transforms(k, n, square, budget)
+    _allocation[UInt64](_product(k, full), budget)
+    var out = min(count, full)
+    var moduli = _moduli[True](k)
+    var residues = List[List[UInt64]](capacity=k)
+    for j in range(k):
+        var q = moduli[j]
+        var one_quotient = _shoup_quotient(1, q)
+        var x = List[UInt64](capacity=la)
+        for i in range(la):
+            x.append(_reduce_2q(_shoup(a[i], 1, one_quotient, q), q))
+        var y = List[UInt64]()
+        if not square:
+            y.reserve(lb)
+            for i in range(lb):
+                y.append(_reduce_2q(_shoup(b[i], 1, one_quotient, q), q))
+        residues.append(_fconvolve(x, y, out, square, j, n))
+    _charge_size(_product(out, _product(k, k)), budget)
+    var g = _garner[True](k)
+    # x mod p = sum v_i (q_0 ... q_(i-1) mod p).
+    var weights = List[UInt64](capacity=k)
+    var w = UInt64(1)
+    for i in range(k):
+        weights.append(w)
+        w = _mod_mul(w, moduli[i] % p, p)
     var digits = List[UInt64](length=k, fill=0)
     var result = List[UInt64](length=count, fill=0)
     for i in range(out):
@@ -1099,33 +1184,9 @@ def _modular_range(a: List[UInt64], b: List[UInt64], lo: Int, hi: Int, p: UInt64
 
 
 def _zz_range[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _], lo: Int, hi: Int, mut budget: Budget) raises PolyError -> Optional[List[C]]:
-    """Coefficients lo ..< hi of a * b over ZZ, or None when they need more primes than the table holds."""
+    """Coefficients lo ..< hi of a * b over ZZ, or None past the transform limits."""
     var square = len(a) == len(b) and _same_zz(a, b)
-    var bits_a = _bits_zz(a)
-    var bits = bits_a + (bits_a if square else _bits_zz(b)) + _bit_length(min(len(a), len(b))) + 1
-    var k = (bits + _PRIME_BITS - 1) // _PRIME_BITS
-    var n = _range_length(len(a), len(b), lo, hi)
-    if k > _PRIME_COUNT:
-        return _ks_range[C](a, b, lo, hi, square, budget)
-    if n > (1 << 30):
-        return None
-    _charge_transforms(k, n, square, budget)
-    _allocation[UInt64](_product(k, hi), budget)
-    var left = _residues_zz(a, k, n, budget)
-    var right = List[List[UInt64]]() if square else _residues_zz(b, k, n, budget)
-    var residues = List[List[UInt64]](capacity=k)
-    for p in range(k):
-        var x = List[UInt64]()
-        swap(x, left[p])
-        var y = List[UInt64]()
-        if not square:
-            swap(y, right[p])
-        var column = _convolve(x^, y^, hi, square, p, n)
-        var kept = List[UInt64](capacity=hi - lo)
-        for i in range(lo, hi):
-            kept.append(column[i])
-        residues.append(kept^)
-    return _reconstruct_zz[C](residues, k, hi - lo, budget)
+    return _zz_product_range[C](a, b, lo, hi, square, budget)
 
 
 def _same_zz[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _]) -> Bool:
