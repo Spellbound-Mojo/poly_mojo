@@ -16,7 +16,7 @@ from .coefficient_buffer import _CoefficientView, _view
 from .coefficients import CoefficientRing, ZZ, QQ, ModInt, _mod_mul
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product, _sum
 from apn_mojo import Integer, Rational, lcm
-from ._fntt import _fconvolve, _ftransform, _fmultiply, _FTables, _FPRIMES, _FROOTS, _FPRIME_BITS
+from ._fntt import _fconvolve, _ftransform, _fmultiply, _FTables, _FPRIMES, _FROOTS, _FPRIME_BITS, _float_garner
 
 comptime _PRIME_COUNT = 48
 comptime _PRIMES: Array[UInt64, _PRIME_COUNT] = [
@@ -576,9 +576,18 @@ def _zz_product_range[C: CoefficientRing](a: _CoefficientView[C, _], b: _Coeffic
     var bits = bits_a + (bits_a if square else _bits_zz(b)) + _bit_length(min(len(a), len(b))) + 1
     var n = _range_length(len(a), len(b), lo, hi)
     var small = (bits + _FPRIME_BITS - 1) // _FPRIME_BITS
+    var k = (bits + _PRIME_BITS - 1) // _PRIME_BITS
+    # Segmentation does the same transform work as three or four float primes
+    # with a vectorized CRT, and past a few hundred bits its linear CRT beats
+    # the quadratic one for short operands (measured crossovers).
+    var shorter = min(len(a), len(b))
+    var fits = _bit_length(shorter) + _bit_length(bits_a // 64 + 1) <= 18
+    if fits and small >= 3 and n >= 16 and (small <= _FLOAT_PRIMES or (k >= 33 and shorter <= 256) or (k >= 17 and shorter <= 64)):
+        var segmented = _ks_range[C](a, b, lo, hi, square, budget)
+        if segmented:
+            return segmented^
     if small <= _FLOAT_PRIMES and n >= 16 and n <= (1 << 30):
         return _multimodular[C, True](a, b, lo, hi, small, n, square, budget)
-    var k = (bits + _PRIME_BITS - 1) // _PRIME_BITS
     if k > _PRIME_COUNT:
         return _ks_range[C](a, b, lo, hi, square, budget)
     if n > (1 << 30):
@@ -1470,6 +1479,13 @@ def _ks_core[C: CoefficientRing, F: Bool](left: _Segments, right: _Segments, lo:
     var limbs = List[UInt64](length=stride + 2, fill=0)
     var bytes = List[UInt8](length=8 * (stride + 2), fill=0)
     var result = List[C](capacity=hi - lo)
+    # Float primes: every point's mixed-radix digits at once, eight lanes wide.
+    var second = List[UInt64]()
+    var third = List[UInt64]()
+    comptime if F:
+        second = List[UInt64](length=count, fill=0)
+        third = List[UInt64](length=count, fill=0)
+        _float_garner(residues, g.moduli, second, third)
     for t in range(hi - lo):
         # c_t = sum_u z_u 2^(64 u), by a running signed three-word carry.
         var r0 = UInt64(0)
@@ -1477,7 +1493,13 @@ def _ks_core[C: CoefficientRing, F: Bool](left: _Segments, right: _Segments, lo:
         var r2 = Int64(0)
         for u in range(stride + 2):
             if u < stride:
-                _digits(g, residues, t * stride + u, digits)
+                var index = t * stride + u
+                comptime if F:
+                    digits[0] = residues[0].unsafe_get(index)
+                    digits[1] = second.unsafe_get(index)
+                    digits[2] = third.unsafe_get(index)
+                else:
+                    _digits(g, residues, index, digits)
                 var inner = UInt128(digits[1]) + UInt128(digits[2]) * UInt128(g.moduli[1])
                 var low = UInt128(g.moduli[0]) * UInt128(UInt64(inner)) + UInt128(digits[0])
                 var high = UInt128(g.moduli[0]) * UInt128(UInt64(inner >> 64)) + (low >> 64)
