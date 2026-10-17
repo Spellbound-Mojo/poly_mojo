@@ -1298,8 +1298,8 @@ def _interreduce[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], va
             step.columns.append(matrix.columns.monomials[order[c]])
         trace.steps.append(step^)
     # The output needs only the reduced rows and the column monomials: the
-    # elements, their stored terms, and the matrix's rows and index go first.
-    store = _Store[W]()
+    # elements and the matrix's rows and index go first (the owned store and
+    # the pivot list already died at their last use).
     engine.polys = List[List[_Term[ModInt, W]]]()
     matrix.entries = List[Int32]()
     matrix.starts = List[Int]()
@@ -1307,7 +1307,6 @@ def _interreduce[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], va
     matrix.columns.keys = List[SIMD[DType.uint8, W]]()
     matrix.columns.covered = List[Bool]()
     matrix.columns.slots = List[UInt64]()
-    pivot = List[Int]()
     var basis = List[List[_Term[ModInt, W]]](capacity=basis_rows)
     for r in range(basis_rows):
         var n = found.starts[r + 1] - found.starts[r]
