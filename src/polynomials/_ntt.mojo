@@ -463,21 +463,42 @@ def _residues_zz[C: CoefficientRing](values: _CoefficientView[C, _], k: Int, n: 
         offsets.append(len(limbs))
         negative.append(c.value.sign() < 0)
     _charge_size(_product(k, len(limbs)), budget)
+    var longest = 0
+    for i in range(len(values)):
+        longest = max(longest, offsets[i + 1] - offsets[i])
     var out = List[List[UInt64]](capacity=k)
+    var powers = List[UInt64](length=longest, fill=0)
     for p in range(k):
         var q = primes[p]
+        # A coefficient is sum l_j 2^(64 j): sum the limbs times 2^(64 j) mod q in
+        # 192 bits, a top word counting the 128-bit overflows, and reduce once.
         var radix = UInt64(((UInt128(1) << 64) % UInt128(q)))
+        var x = UInt64(1)
+        for j in range(longest):
+            powers.unsafe_get(j) = x
+            x = _mod_mul(x, radix, q)
         var radix_quotient = _shoup_quotient(radix, q)
+        var square = _mod_mul(radix, radix, q)
+        var square_quotient = _shoup_quotient(square, q)
         var one_quotient = _shoup_quotient(1, q)
         var residues = List[UInt64](length=n, fill=0)
         for i in range(len(values)):
-            var r = UInt64(0)
-            var l = offsets[i + 1] - 1
-            while l >= offsets[i]:
-                r = _reduce_2q(_shoup(r, radix, radix_quotient, q), q) + _reduce_2q(_shoup(limbs[l], 1, one_quotient, q), q)
-                r = _reduce_2q(r, q)
-                l -= 1
-            residues[i] = (q - r if r else r) if negative[i] else r
+            var start = offsets[i]
+            var end = offsets[i + 1]
+            var r: UInt64
+            if end - start <= 1:
+                r = _reduce_2q(_shoup(limbs.unsafe_get(start), 1, one_quotient, q), q) if end > start else UInt64(0)
+            else:
+                var acc = UInt128(0)
+                var top = UInt64(0)
+                for l in range(start, end):
+                    var t = acc + UInt128(limbs.unsafe_get(l)) * UInt128(powers.unsafe_get(l - start))
+                    top += UInt64(1) if t < acc else UInt64(0)
+                    acc = t
+                r = _reduce_2q(_reduce_2q(_shoup(UInt64(acc), 1, one_quotient, q), q) + _reduce_2q(_shoup(UInt64(acc >> 64), radix, radix_quotient, q), q), q)
+                if top:
+                    r = _reduce_2q(r + _reduce_2q(_shoup(top, square, square_quotient, q), q), q)
+            residues.unsafe_get(i) = (q - r if r else r) if negative[i] else r
         out.append(residues^)
     return out^
 
@@ -580,22 +601,32 @@ def _reconstruct_zz[C: CoefficientRing](residues: List[List[UInt64]], k: Int, co
         inverses.append(inverse)
         inverse_quotients.append(_shoup_quotient(inverse, q))
         reciprocals.append(1.0 / Float64(q))
+    # Column-major cofactor limbs: the sum for one limb position has no carry chain
+    # between primes, only a 192-bit accumulator.
+    var columns = List[UInt64](length=size * k, fill=0)
+    for j in range(k):
+        for l in range(size):
+            columns[l * k + j] = cofactors[j][l]
+    var ys = List[UInt64](length=k, fill=0)
     var x = List[UInt64](length=size + 1, fill=0)
     for i in range(count):
-        for l in range(size + 1):
-            x.unsafe_get(l) = 0
         var estimate = Float64(0)
         for j in range(k):
             var q = g.moduli[j]
             var y = _reduce_2q(_shoup(residues[j].unsafe_get(i), inverses[j], inverse_quotients[j], q), q)
             estimate += Float64(y) * reciprocals[j]
-            ref cofactor = cofactors[j]
-            var carry = UInt128(0)
-            for l in range(size):
-                var t = UInt128(cofactor.unsafe_get(l)) * UInt128(y) + UInt128(x.unsafe_get(l)) + carry
-                x.unsafe_get(l) = UInt64(t)
-                carry = t >> 64
-            x.unsafe_get(size) += UInt64(carry)
+            ys.unsafe_get(j) = y
+        var acc = UInt128(0)
+        for l in range(size):
+            var top = UInt64(0)
+            var row = l * k
+            for j in range(k):
+                var t = acc + UInt128(columns.unsafe_get(row + j)) * UInt128(ys.unsafe_get(j))
+                top += UInt64(1) if t < acc else UInt64(0)
+                acc = t
+            x.unsafe_get(l) = UInt64(acc)
+            acc = (UInt128(top) << 64) | (acc >> 64)
+        x.unsafe_get(size) = UInt64(acc)
         var multiple = UInt64(estimate - 1e-6) if estimate > 1e-6 else UInt64(0)
         var carry = UInt128(0)
         var borrow = UInt64(0)
@@ -645,8 +676,9 @@ def _integer(limbs: List[UInt64], used: Int, negative: Bool, mut bytes: List[UIn
         if not negative:
             return Integer(m)
     for l in range(used):
+        var limb = limbs.unsafe_get(l)
         comptime for shift in range(8):
-            bytes[8 * l + shift] = UInt8((limbs[l] >> UInt64(8 * shift)) & 0xFF)
+            bytes.unsafe_get(8 * l + shift) = UInt8((limb >> UInt64(8 * shift)) & 0xFF)
     return Integer.from_bytes(Span(bytes)[: 8 * used], negative=negative)
 
 
