@@ -431,3 +431,56 @@ def _msolve_number(text):
 
 TOOLS = [PolyMojoRoots(), FlintRoots(), FlintRoots(sturm=True), SymPyRoots(), MsolveRoots()]
 NAMES = [t.name for t in TOOLS]
+
+
+# ---------------------------------------------------------------- report
+
+REPORT_TOOLS = ['polymojo-roots', 'flint-roots', 'flint-roots-sturm', 'sympy-roots', 'msolve-roots']
+REPORT_LABEL = {'polymojo-roots': 'Poly Mojo', 'flint-roots': 'FLINT', 'flint-roots-sturm': 'FLINT (Sturm count)',
+                'sympy-roots': 'SymPy', 'msolve-roots': 'msolve'}
+MODE_TITLE = {
+    'isolate': 'Isolation (Poly Mojo `real_root_cover`, width 1/2)',
+    'refine53': 'Refinement of every root to width 2^-53 (Poly Mojo `roots.refine` of the isolating cover)',
+    'refine1000': 'Refinement of every root to width 2^-1000',
+    'exact': 'Exact real roots (Poly Mojo `real_roots`, SymPy `real_roots`)',
+    'count': 'Distinct real roots (Poly Mojo `sturm_sequence` + `count_roots` on a power-of-two root bound)',
+}
+
+
+def report(records, env, folder):
+    """Markdown report for the roots family: one table per mode, ladders as rows."""
+    short = {'timeout': 'timeout', 'out-of-memory': 'OOM', 'error': 'error', 'skipped': '·',
+             'unsupported': 'n/a', 'wrong': 'wrong'}
+    by = {(r['case'], r['tool']): r for r in records}
+    tools = [t for t in REPORT_TOOLS if any(r['tool'] == t for r in records)]
+    lines = ['# Real roots', '',
+             f"Host: {env['cpu']}, {env['cpus']} vCPUs, {env['memory_kib'] / 1048576:.0f} GiB RAM, {env['os']}. "
+             f"Runs are pinned to one CPU, capped at {records[0]['memory_cap']} and {records[0]['timeout_s']:.0f} s.", '',
+             'Each answer is checked against an Arb reference: the number of distinct real roots, and every '
+             'interval holding exactly one reference root (`wrong` otherwise). The last column divides Poly Mojo\'s '
+             'time by the fastest other tool on the case.', '']
+    for mode in MODES:
+        cases = sorted({r['case'] for r in records if r.get('case', '').endswith('.' + mode)},
+                       key=lambda c: (c.split('-')[0], int(c.split('-')[1].split('.')[0])))
+        if not cases:
+            continue
+        lines += [f'## {MODE_TITLE[mode]}', '',
+                  '| Case | ' + ' | '.join(REPORT_LABEL[t] for t in tools) + ' | Poly Mojo / best |',
+                  '|---' * (len(tools) + 2) + '|']
+        for case in cases:
+            cells, times = [], {}
+            for t in tools:
+                r = by.get((case, t))
+                if r is None:
+                    cells.append('')
+                elif r['outcome'] == 'ok':
+                    cells.append(f"{r['time_s']:.3g} s")
+                    times[t] = r['time_s']
+                else:
+                    cells.append(short.get(r['outcome'], r['outcome']))
+            others = [v for t, v in times.items() if t != 'polymojo-roots' and v > 0]
+            ratio = f"{times['polymojo-roots'] / min(others):.2g}" if 'polymojo-roots' in times and others else ''
+            lines.append(f'| {case} | ' + ' | '.join(cells) + f' | {ratio} |')
+        lines.append('')
+    (folder / 'report.md').write_text('\n'.join(lines) + '\n')
+    return folder / 'report.md'
