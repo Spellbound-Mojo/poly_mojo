@@ -76,6 +76,37 @@ def value_cases(mut c: Checker) raises:
         for variable in range(3):
             if f.degree_in(Int64(variable), work) > 0 or g.degree_in(Int64(variable), work) > 0:
                 value_matches(f, g, Int64(variable), c, work)
+    multivariate_value_cases[ZZ](NoContext(), c)
+    multivariate_value_cases[ModInt](Modulus(101, work), c)
+    multivariate_value_cases[ModInt](Modulus(prime(0, work), work), c)
+    multivariate_value_cases[ModInt](Modulus(3, work), c)
+
+
+def multivariate_value_cases[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
+    """Evaluation and interpolation, including leading coefficients that vanish on the grid."""
+    var work = Budget()
+    var rng = SplitMix64(8101)
+    var order = MonomialOrder(MonomialOrder.LEX, [0, 1, 2], work)
+    for round in range(10):
+        var nvars = 2 + round % 2
+        var f = polynomial[C](ctx, order, rng, work, terms=4 + round % 3, variables=nvars, degree=2 + round % 3, coefficient_bits=0 if round % 2 else 35)
+        var g = polynomial[C](ctx, order, rng, work, terms=3 + round % 4, variables=nvars, degree=2 + round % 2)
+        for variable in range(nvars):
+            if f.degree_in(Int64(variable), work) > 0 or g.degree_in(Int64(variable), work) > 0:
+                value_matches(f, g, Int64(variable), c, work)
+    var x = SparsePoly[C].variable(0, order, ctx, work)
+    var y = SparsePoly[C].variable(1, order, ctx, work)
+    var z = SparsePoly[C].variable(2, order, ctx, work)
+    var one = SparsePoly[C].constant(C.one(ctx), order, work)
+    var two = one.add(one, work)
+    # lc_x(f) = (y - 1)(z - 2) and lc_x(g) = y vanish at grid points, alone and together.
+    var f = y.sub(one, work).mul(z.sub(two, work), work).mul(x.pow(2, work), work).add(y.mul(x, work), work).add(z, work)
+    var g = y.mul(x.pow(3, work), work).add(z.sub(one, work).mul(x, work), work).add(two.add(one, work), work)
+    for variable in range(3):
+        value_matches(f, g, Int64(variable), c, work)
+    var h = y.mul(z, work).mul(x, work).add(one, work)
+    value_matches(f.mul(h, work), g.mul(h, work), 0, c, work)
+    c.check(resultant_value(f.mul(h, work), g.mul(h, work), 0, work).is_zero(), "common factor in x gives zero")
 
 
 def main() raises:

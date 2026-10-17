@@ -6,6 +6,7 @@ from .dense import DensePoly
 from ._views import _variables, _constant
 from ._nmod import _Field, _resultant_words
 from ._univariate_modular import _modular_resultant
+from ._multivariate_resultant import _integer_resultant, _field_resultant
 from .certificates import ResultantResult
 from .division import divide_exact
 from ._tower import _zero, _lc, _exact_poly
@@ -134,8 +135,10 @@ def resultant_value[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], vari
 
     Univariate integer inputs use multi-modular reconstruction up to the
     Hadamard bound, univariate inputs over odd prime fields a word-size
-    Euclidean recurrence, and all others the subresultant PRS of
-    `resultant` without cofactor propagation.
+    Euclidean recurrence, multivariate integer and odd prime field inputs
+    dense evaluation and interpolation when the specialization grid is
+    small enough, and all others the subresultant PRS of `resultant`
+    without cofactor propagation.
 
     Parameters:
         C: ZZ or a coefficient field.
@@ -179,6 +182,15 @@ def resultant_value[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], vari
                 if value.is_zero():
                     return zero^
                 return _constant(f, rebind[C](value), budget)
+    if len(variables) > 1:
+        comptime if C == ZZ:
+            var image = _integer_resultant(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](g), variable, variables, budget)
+            if image:
+                return rebind_var[SparsePoly[C]](image.take())
+        elif C == ModInt:
+            var image = _field_resultant(rebind[SparsePoly[ModInt]](f), rebind[SparsePoly[ModInt]](g), variable, variables, budget)
+            if image:
+                return rebind_var[SparsePoly[C]](image.take())
     var sequence = _prs(f, g, variable, False, budget, history=False)
     if not len(sequence) or sequence[len(sequence) - 1].polynomial.degree_in(variable, budget) != 0:
         return zero^
