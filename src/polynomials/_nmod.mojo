@@ -760,8 +760,8 @@ def _equal_degree(g: List[UInt64], degree: Int, xp: List[UInt64], field: _Field,
                 next.append(piece.copy())
                 done += 1
                 continue
-            var reduced = _divmod_classic(b, piece, False, field, budget)[1].copy()
-            var divisor = _gcd(piece, reduced, field, budget)
+            # gcd(piece, b) = gcd(piece, b mod piece); the Euclidean kernel reduces first.
+            var divisor = _gcd(piece, b, field, budget)
             if len(divisor) > 1 and len(divisor) < len(piece):
                 var other = _divmod_classic(piece, divisor, True, field, budget)[0].copy()
                 done += Int(len(divisor) - 1 == degree) + Int(len(other) - 1 == degree)
@@ -840,7 +840,7 @@ def _distinct_degree(f: List[UInt64], field: _Field, seed: UInt64, mut budget: B
             while i >= 0 and len(block) > 1:
                 budget.charge(1)
                 var difference = _sub(giant, baby[i], field, budget)
-                var part = _gcd(block, _divmod_classic(difference, block, False, field, budget)[1], field, budget)
+                var part = _gcd(block, difference, field, budget)
                 if len(part) > 1:
                     _equal_degree(part, j * steps - i, xp, field, rng, factors, budget)
                     block = _divmod_classic(block, part, True, field, budget)[0].copy()
