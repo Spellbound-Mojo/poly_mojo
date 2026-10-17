@@ -1,6 +1,6 @@
 """Univariate integer and rational factorization by Hensel–Zassenhaus (Z-6)."""
 from apn_mojo import Integer
-from .coefficients import CoefficientRing, ZZ, QQ, ModInt, Modulus, NoContext, _pow
+from .coefficients import CoefficientRing, ZZ, QQ, ModInt, Modulus, NoContext, _pow, _prime
 from .dense import DensePoly
 from ._subsets import _Recombination
 from ._coefficient_ops import _copy as _copy_coefficient
@@ -119,6 +119,20 @@ comptime _PRIME_TRIALS = 3
 """Good primes whose modular factorizations are compared before lifting."""
 
 
+def _small_prime(index: Int, mut budget: Budget) raises PolyError -> UInt64:
+    """The index-th prime below 2^28, descending; such primes take the SIMD
+    residue products, and quadratic lifting makes their size irrelevant."""
+    var candidate = (UInt64(1) << 28) - 1
+    var found = -1
+    while True:
+        budget.charge(1)
+        if _prime(candidate, budget):
+            found += 1
+            if found == index:
+                return candidate
+        candidate -= 2
+
+
 def _squarefree_factors(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> List[DensePoly[ZZ]]:
     if f.degree() <= 1:
         _allocation[DensePoly[ZZ]](1, budget)
@@ -132,7 +146,7 @@ def _squarefree_factors(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -
     var best = List[DensePoly[ModInt]]()
     while trials < _PRIME_TRIALS:
         budget.charge(1)
-        var p = prime(index, budget)
+        var p = _small_prime(index, budget)
         index = _sum(index, 1)
         if _residue(f.coefficients[f.degree()].value, p, budget) == 0:
             continue
@@ -240,7 +254,7 @@ def _modular_squarefree(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -
     # squarefree over QQ: a repeated primitive factor would survive reduction.
     for index in range(2):
         budget.charge(1)
-        var p = prime(index, budget)
+        var p = _small_prime(index, budget)
         if _residue(f.coefficients[f.degree()].value, p, budget) == 0:
             continue
         var field = _nmod._field(p)
