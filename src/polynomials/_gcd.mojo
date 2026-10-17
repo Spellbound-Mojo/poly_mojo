@@ -15,6 +15,7 @@ from ._univariate_modular import _GcdSearch, _next_gcd_candidate, _univariate_gc
 from .monomial import MonomialOrder
 from ._sparse_gcd import _sparse_gcd
 from ._heuristic_gcd import _heuristic
+from ._brown_gcd import _brown_gcd
 from ._multivariate_gcd import _deflation, _deflates, _scaled, _image_coprime
 from .primes import prime, _residue, _merge_residue, _symmetric
 
@@ -110,13 +111,15 @@ def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budge
     if not len(variables):
         return _constant(f, _gcd_coefficient(f.terms[0].coefficient, h.terms[0].coefficient, budget), budget)
     var variable = variables[0]
+    comptime if C == QQ:
+        # Clearing denominators scales each input by a unit of QQ, so the monic
+        # gcd is that of the integer images; their gcd takes the integer paths.
+        var integer_f = _integer_image(rebind[SparsePoly[QQ]](f), budget)
+        var integer_h = _integer_image(rebind[SparsePoly[QQ]](h), budget)
+        var integer_gcd = _gcd_value(integer_f, integer_h, budget)
+        return rebind_var[SparsePoly[C]](_normalized(_rational_image(integer_gcd, budget), budget))
     if len(variables) == 1:
-        comptime if C == QQ:
-            var integer_f = _integer_image(rebind[SparsePoly[QQ]](f), budget)
-            var integer_h = _integer_image(rebind[SparsePoly[QQ]](h), budget)
-            var integer_gcd = _gcd_value(integer_f, integer_h, budget)
-            return rebind_var[SparsePoly[C]](_normalized(_rational_image(integer_gcd, budget), budget))
-        elif C == ModInt:
+        comptime if C == ModInt:
             var result = _field_gcd(DensePoly[ModInt].from_sparse(rebind[SparsePoly[ModInt]](f), budget, variable=variable), DensePoly[ModInt].from_sparse(rebind[SparsePoly[ModInt]](h), budget, variable=variable), budget)
             return rebind_var[SparsePoly[C]](result.to_sparse(f.order, budget))
     comptime if C == ZZ:
@@ -136,6 +139,17 @@ def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budge
             # Sparse modular interpolation, unless both inputs fill most of their
             # total-degree box, where the subresultant PRS measures faster.
             var dense = _dense_in_total_degree(f, len(variables), budget) and _dense_in_total_degree(h, len(variables), budget)
+            # Brown's dense modular gcd first for few variables of high degree,
+            # where it measured faster than GCDHEU; GCDHEU first otherwise.
+            var high = False
+            if len(variables) <= 3:
+                for v in variables:
+                    if max(f.degree_in(v, budget), h.degree_in(v, budget)) >= 16:
+                        high = True
+            if dense and high:
+                var brown = _brown_gcd(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variables, budget)
+                if brown:
+                    return _normalized(rebind_var[SparsePoly[C]](brown.take()), budget)
             if dense and heuristic:
                 use_heuristic = False
                 var guess = _heuristic(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), budget)

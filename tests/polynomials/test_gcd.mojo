@@ -1,5 +1,5 @@
 """Independent gcd corpus, including integer contents and an unlucky prime."""
-from apn_mojo import Integer
+from apn_mojo import Integer, Rational
 from polynomials import Budget, QQ, ZZ, ModInt, Modulus, NoContext, CoefficientRing, SparsePoly, DensePoly, MonomialOrder, prime, PolyErrorKind
 from polynomials._prs import _prs
 from support.gen import coefficient
@@ -247,6 +247,40 @@ def heuristic_cases(mut c: Checker) raises:
         c.check(_gcd_value(f, v.pow(UInt64(k + 1), work).mul(w, work), work) == _gcd_value(f, v.pow(UInt64(k + 1), work).mul(w, work), work, heuristic=False), "heuristic gcd of a cofactor power")
 
 
+def brown_cases(mut c: Checker) raises:
+    """Few variables of high degree take Brown's dense modular gcd; QQ inputs take the integer paths."""
+    var work = Budget()
+    var order = MonomialOrder(MonomialOrder.GREVLEX, [0, 1, 2], work)
+    var one = SparsePoly[ZZ].constant(ZZ.one(NoContext()), order, work)
+    var x = SparsePoly[ZZ].variable(0, order, NoContext(), work)
+    var y = SparsePoly[ZZ].variable(1, order, NoContext(), work)
+    var z = SparsePoly[ZZ].variable(2, order, NoContext(), work)
+    var a = one.add(x, work).add(y, work).add(z, work)
+    var b = one.scale(ZZ(Integer(2)), work).add(x, work).sub(y, work).add(z.scale(ZZ(Integer(3)), work), work)
+    var d = x.mul(y, work).sub(z.pow(2, work), work).add(one.scale(ZZ(Integer(5)), work), work)
+    var e = x.pow(3, work).add(y.mul(z, work), work).sub(one.scale(ZZ(Integer(7)), work), work)
+    for k in [8, 9]:
+        var g = a.pow(UInt64(k), work).mul(b.pow(UInt64(k), work), work)
+        var f = g.mul(d, work).scale(ZZ(Integer(6)), work)
+        var h = g.mul(e, work).scale(ZZ(Integer(-4)), work)
+        var got = _gcd_value(f, h, work)
+        c.check(got == g.scale(ZZ(Integer(2)), work), "dense modular gcd of planted high-degree products")
+        var lone = _gcd_value(g.mul(d, work), g.mul(d, work).add(one, work), work)
+        c.check(lone == one, "dense modular gcd of coprime high-degree inputs")
+    # Rational multivariate inputs clear denominators and take the integer paths.
+    var qorder = MonomialOrder(MonomialOrder.GREVLEX, [0, 1, 2], work)
+    var qx = SparsePoly[QQ].variable(0, qorder, NoContext(), work)
+    var qy = SparsePoly[QQ].variable(1, qorder, NoContext(), work)
+    var qone = SparsePoly[QQ].constant(QQ.one(NoContext()), qorder, work)
+    var half = qone.scale(QQ(Rational(1, 2)), work)
+    var common = qx.add(qy.scale(QQ(Rational(2, 3)), work), work).add(half, work)
+    var qf = common.mul(qx.sub(qy, work), work).scale(QQ(Rational(5, 7)), work)
+    var qh = common.mul(qx.mul(qy, work).add(qone, work), work).scale(QQ(Rational(-3, 4)), work)
+    c.check(_gcd_value(qf, qh, work) == common, "monic rational multivariate gcd")
+    var qd = qf.mul(qf, work)
+    c.check(_gcd_value(qd, qf.mul(qh, work), work) == _gcd_value(qd, qf.mul(qh, work), work, heuristic=False), "rational gcd matches the route without the heuristic")
+
+
 def main() raises:
     var c = Checker("gcd")
     var work = Budget()
@@ -297,4 +331,5 @@ def main() raises:
     division_cases[ModInt](Modulus(101, work), c)
     shortcut_cases(c)
     heuristic_cases(c)
+    brown_cases(c)
     c.finish()
