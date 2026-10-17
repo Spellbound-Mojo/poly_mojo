@@ -864,12 +864,18 @@ struct _Step[W: Int](Copyable, Movable):
     in the order they come when it is not empty; the final matrix also keeps
     the monomial of each column, which `monomial` reads through the
     supports.
+
+    A symbolic step keeps no columns: each row is `shifts[r]` times its
+    source, and `_Trace.expand` numbers its columns again, as the recorded
+    run did, before a replay uses it.
     """
     var final: Bool
     var ncols: Int
     var sources: List[Int]
     var starts: List[Int]
     var entries: List[Int32]
+    var symbolic: Bool
+    var shifts: List[_Packed[Self.W]]
     var pivots: Int
     var basis: Int
     var leads: List[Int32]
@@ -883,6 +889,8 @@ struct _Step[W: Int](Copyable, Movable):
         self.sources = List[Int]()
         self.starts = [0]
         self.entries = List[Int32]()
+        self.symbolic = False
+        self.shifts = List[_Packed[Self.W]]()
         self.pivots = 0
         self.basis = 0
         self.leads = List[Int32]()
@@ -905,6 +913,12 @@ struct _Step[W: Int](Copyable, Movable):
         self.sources.append(matrix.sources[r])
         self.starts.append(len(self.entries))
 
+    def keep_symbolic(mut self, matrix: _Matrix[Self.W], r: Int, lead: _Packed[Self.W], source_lead: _Packed[Self.W], mut budget: Budget) raises PolyError:
+        """Append matrix row r, which leads with `lead`, as its multiplier of its source, which leads with `source_lead`."""
+        _allocation[_Packed[Self.W]](1, budget)
+        self.sources.append(matrix.sources[r])
+        self.shifts.append(_div(lead, source_lead))
+
     def matrix(self) -> _Matrix[Self.W]:
         """The recorded rows as a matrix, with no monomials."""
         var matrix = _Matrix[Self.W]()
@@ -914,15 +928,98 @@ struct _Step[W: Int](Copyable, Movable):
         return matrix^
 
 
+comptime _TRACE_ENTRIES = 1 << 28
+"""Column entries a trace keeps explicitly; later steps are symbolic, at a row's cost rather than an entry's."""
+
+
 struct _Trace[W: Int](Movable):
-    """A recorded F4 run: the elements its start leaves, and its matrices."""
+    """A recorded F4 run: the elements its start leaves, and its matrices.
+
+    Steps keep their rows' columns while the trace keeps fewer than
+    `_TRACE_ENTRIES` of them; the steps after that are symbolic, and the
+    trace then keeps every element's terms, as numbers in `table`, to number
+    their columns again (`expand`).
+    """
     var inputs: List[List[_Packed[Self.W]]]
     """Each element's monomials after the start, in increasing order."""
     var steps: List[_Step[Self.W]]
+    var kept: Int
+    """The column entries the explicit steps keep."""
+    var table: _Columns[Self.W]
+    var hashes: List[UInt64]
+    """The raw hash of each monomial of `table`."""
+    var terms: List[List[UInt32]]
+    """Once a step is symbolic, each element's monomials, leading first, as numbers in `table`."""
+    var tracking: Bool
+    var limit: Int
+    """The column entries the trace keeps explicitly at most, `_TRACE_ENTRIES` but in tests."""
 
     def __init__(out self):
         self.inputs = List[List[_Packed[Self.W]]]()
         self.steps = List[_Step[Self.W]]()
+        self.kept = 0
+        self.table = _Columns[Self.W]()
+        self.hashes = List[UInt64]()
+        self.terms = List[List[UInt32]]()
+        self.tracking = False
+        self.limit = _TRACE_ENTRIES
+
+    def symbolic(self, entries: Int) -> Bool:
+        """Whether a step whose kept rows have `entries` entries is to be symbolic."""
+        return self.tracking or self.kept + entries > self.limit
+
+    def track[C: CoefficientRing, integral: Bool](mut self, engine: _Engine[C, Self.W, integral], store: _Store[Self.W], mut budget: Budget) raises PolyError:
+        """Keep the terms of the stored elements not kept yet."""
+        self.tracking = True
+        for i in range(len(self.terms), len(store.hashes)):
+            ref h = store.hashes[i]
+            var n = len(h)
+            budget.charge(UInt64(n))
+            _allocation[UInt32](n, budget)
+            self.table.reserve(n, budget)
+            var narrow = store.tops[i].exponents().reduce_max() < 256
+            var numbers = List[UInt32](capacity=n)
+            for k in range(n):
+                var m: _Packed[Self.W]
+                if narrow:
+                    m = _packed(store.keys[i][k].cast[DType.uint32]())
+                else:
+                    m = engine.polys[i][n - 1 - k].monomial
+                var number = Int(self.table.find(m, h[k]))
+                if number == len(self.hashes):
+                    self.hashes.append(h[k])
+                numbers.append(UInt32(number))
+            self.terms.append(numbers^)
+
+    def expand(mut self, s: Int, kind: UInt8, mut budget: Budget) raises PolyError:
+        """Give symbolic step s its columns, numbered as the recorded run numbered them."""
+        if not self.steps[s].symbolic:
+            return
+        var matrix = _Matrix[Self.W]()
+        ref step = self.steps[s]
+        for r in range(len(step.sources)):
+            ref numbers = self.terms[step.sources[r]]
+            var shift = step.shifts[r]
+            var n = len(numbers)
+            budget.charge(UInt64(n))
+            _allocation[Int32](n, budget)
+            matrix.columns.reserve(n, budget)
+            var base = _raw_hash(shift)
+            for k in range(n):
+                var number = Int(numbers.unsafe_get(k))
+                matrix.entries.append(matrix.columns.find(_times(self.table.monomials.unsafe_get(number), shift), base + self.hashes.unsafe_get(number)))
+            matrix.starts.append(len(matrix.entries))
+        _ = matrix.number(kind, budget)
+        if len(matrix.columns.monomials) != step.ncols:
+            raise PolyError(PolyErrorKind.CAPACITY, "symbolic F4 step does not rebuild")
+        swap(step.starts, matrix.starts)
+        swap(step.entries, matrix.entries)
+
+    def contract(mut self, s: Int):
+        """Drop the columns `expand` gave symbolic step s."""
+        if self.steps[s].symbolic:
+            self.steps[s].starts = [0]
+            self.steps[s].entries = List[Int32]()
 
 
 def _eliminate[W: Int](matrix: _Matrix[W], mut pivot: List[Int], reduce: List[Int], values: List[List[UInt32]], prime: UInt64, ring: Modulus, mut found: _Rows, mut kept: List[Int], mut budget: Budget) raises PolyError -> List[Int]:
@@ -1106,11 +1203,28 @@ def _round[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], store: _
     comptime if record:
         # The replay keeps the pivots and the rows that gave new ones.
         var step = _Step[W](False, ncols)
+        var size = 0
         for r in pivots:
-            step.keep(matrix, r, budget)
+            size += matrix.starts[r + 1] - matrix.starts[r]
+        for r in kept:
+            size += matrix.starts[r + 1] - matrix.starts[r]
+        step.symbolic = trace.symbolic(size)
+        if step.symbolic:
+            trace.track(engine, store, budget)
+        else:
+            trace.kept += size
+        for r in pivots:
+            if step.symbolic:
+                step.keep_symbolic(matrix, r, matrix.columns.monomials[order[Int(matrix.entries[matrix.starts[r]])]], engine.leads[matrix.sources[r]], budget)
+            else:
+                step.keep(matrix, r, budget)
         step.pivots = len(pivots)
         for i in range(len(kept)):
-            step.keep(matrix, kept[i], budget)
+            var r = kept[i]
+            if step.symbolic:
+                step.keep_symbolic(matrix, r, matrix.columns.monomials[order[Int(matrix.entries[matrix.starts[r]])]], engine.leads[matrix.sources[r]], budget)
+            else:
+                step.keep(matrix, r, budget)
             step.leads.append(found.columns[found.starts[i]])
         step.supports = _supports(found, results, budget)
         step.inserted = inserted^
@@ -1157,8 +1271,16 @@ def _interreduce[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], st
         rows.append(r)
     comptime if record:
         var step = _Step[W](True, ncols)
+        step.symbolic = trace.symbolic(len(matrix.entries))
+        if step.symbolic:
+            trace.track(engine, store, budget)
+        else:
+            trace.kept += len(matrix.entries)
         for r in range(nrows):
-            step.keep(matrix, r, budget)
+            if step.symbolic:
+                step.keep_symbolic(matrix, r, matrix.columns.monomials[order[Int(matrix.entries[matrix.starts[r]])]], engine.leads[matrix.sources[r]], budget)
+            else:
+                step.keep(matrix, r, budget)
         step.pivots = nrows
         step.basis = basis_rows
         step.supports = _supports(found, rows, budget)
@@ -1193,6 +1315,9 @@ def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], 
         budget.charge(1)
         engine.sort_active(budget)
         store.extend(engine, budget)
+        comptime if record:
+            if trace.tracking:
+                trace.track(engine, store, budget)
         store.release(engine)
         var fresh = _round[W, record](engine, store, prime, ring, trace, budget)
         for k in range(len(fresh)):
@@ -1202,6 +1327,9 @@ def _f4_run[W: Int, record: Bool](var generators: List[List[_Term[ModInt, W]]], 
         # The pairs are ordered once the round's elements are all in.
         engine.heapify_pairs(budget)
     store.extend(engine, budget)
+    comptime if record:
+        if trace.tracking:
+            trace.track(engine, store, budget)
     store.release(engine)
     return _interreduce[W, record](engine, store, prime, ring, trace, budget)
 
@@ -1217,8 +1345,10 @@ def _f4_packed[W: Int](var generators: List[List[_Term[ModInt, W]]], kind: UInt8
 
 
 def _f4_learn[W: Int](var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut trace: _Trace[W], mut budget: Budget) raises PolyError -> List[List[_Term[ModInt, W]]]:
-    """As `_f4_packed`, recording the run in `trace` for `_f4_replay`."""
+    """As `_f4_packed`, recording the run in `trace` for `_f4_replay`; the trace keeps its `limit`."""
+    var limit = trace.limit
     trace = _Trace[W]()
+    trace.limit = limit
     return _f4_run[W, True](generators^, kind, ring, trace, budget)
 
 
@@ -1243,7 +1373,7 @@ def _replay_rows(found: _Rows, results: List[Int], supports: List[List[Int32]], 
     return True
 
 
-def _f4_replay[W: Int](trace: _Trace[W], var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ModInt, W]]]]:
+def _f4_replay[W: Int](mut trace: _Trace[W], var generators: List[List[_Term[ModInt, W]]], kind: UInt8, ring: Modulus, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ModInt, W]]]]:
     """The reduced basis modulo another prime by the recorded matrices, or None where this prime departs from them.
 
     Only the recorded rows are reduced: no pairs, symbolic preprocessing, or
@@ -1272,8 +1402,12 @@ def _f4_replay[W: Int](trace: _Trace[W], var generators: List[List[_Term[ModInt,
                 return None
             residues.append(UInt32(p[k].coefficient.value))
         values.append(residues^)
-    for step in trace.steps:
+    for s in range(len(trace.steps)):
         budget.charge(1)
+        if s > 0:
+            trace.contract(s - 1)
+        trace.expand(s, kind, budget)
+        ref step = trace.steps[s]
         var matrix = step.matrix()
         var nrows = len(matrix.sources)
         for r in range(nrows):
@@ -1584,7 +1718,7 @@ def _lane_basis[W: Int](trace: _Trace[W], bases: _LaneBases, lane: Int, ring: Mo
     return basis^
 
 
-def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_Term[ModInt, W]]]], kind: UInt8, rings: List[Modulus], mut budget: Budget) raises PolyError -> List[List[List[_Term[ModInt, W]]]]:
+def _f4_replay_lanes[W: Int](mut trace: _Trace[W], var generators: List[List[List[_Term[ModInt, W]]]], kind: UInt8, rings: List[Modulus], mut budget: Budget) raises PolyError -> List[List[List[_Term[ModInt, W]]]]:
     """`_f4_replay` modulo `_LANES` primes below 2^31 at once, one per SIMD lane.
 
     Returns the bases of the primes before the first whose replay declines,
@@ -1599,7 +1733,7 @@ def _f4_replay_lanes[W: Int](trace: _Trace[W], var generators: List[List[List[_T
     return result^
 
 
-def _f4_replay_bases[W: Int](trace: _Trace[W], var generators: List[List[List[_Term[ModInt, W]]]], kind: UInt8, rings: List[Modulus], mut budget: Budget) raises PolyError -> _LaneBases:
+def _f4_replay_bases[W: Int](mut trace: _Trace[W], var generators: List[List[List[_Term[ModInt, W]]]], kind: UInt8, rings: List[Modulus], mut budget: Budget) raises PolyError -> _LaneBases:
     """As `_f4_replay_lanes`, with the bases as residues over the recorded supports."""
     var lanes = _Primes(rings)
     var values = List[List[UInt32]]()
@@ -1638,8 +1772,13 @@ def _f4_replay_bases[W: Int](trace: _Trace[W], var generators: List[List[List[_T
         width = max(width, step.ncols)
     _allocation[UInt64](_product(width, _LANES), budget)
     var dense = List[UInt64](length=_LANES * width, fill=0)
-    for step in trace.steps:
+    for s in range(len(trace.steps)):
         budget.charge(1)
+        # A symbolic step has its columns only while it is replayed.
+        if s > 0:
+            trace.contract(s - 1)
+        trace.expand(s, kind, budget)
+        ref step = trace.steps[s]
         var nrows = len(step.sources)
         for r in range(nrows):
             if step.starts[r + 1] - step.starts[r] != len(values[step.sources[r]]) // _LANES:
@@ -1677,6 +1816,7 @@ def _f4_replay_bases[W: Int](trace: _Trace[W], var generators: List[List[List[_T
             var residues = List[UInt32]()
             swap(residues, values[first + r])
             bases.values.append(residues^)
+        trace.contract(s)
         return bases^
     return bases^
 
