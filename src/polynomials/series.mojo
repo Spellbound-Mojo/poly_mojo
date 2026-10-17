@@ -282,6 +282,10 @@ struct TruncatedSeries[C: CoefficientField](Copyable, Movable):
             PolyError: DOMAIN for incompatible inputs or unavailable divisions, LIMIT or CAPACITY on work limits.
         """
         self._validate(budget)
+        comptime if Self.C == ModInt:
+            var native = _native_series(rebind[List[ModInt]](self.polynomial.coefficients.to_list(budget)), rebind[Modulus](self.polynomial.ring), self.order, 3, budget)
+            if native:
+                return Self(DensePoly[Self.C].from_coefficients(self.polynomial.variable, self.polynomial.ring, rebind_var[List[Self.C]](native.take()), budget), self.order)
         var values = _revert_values[_ExactOps[Self.C]](_view(self.polynomial.coefficients), self.order, self.polynomial.ring, budget)
         var poly = DensePoly[Self.C].from_coefficients(self.polynomial.variable, self.polynomial.ring, values^, budget)
         return Self(poly^, self.order)

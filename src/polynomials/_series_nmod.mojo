@@ -11,7 +11,7 @@ in proportion to its coefficient work.
 from .errors import Budget, PolyError, _allocation, _charge_size, _product
 from .coefficients import ModInt, Modulus
 from ._nmod import _Field, _field, _dot, _mulm, _addm, _subm, _negm, _to, _from, _invm, _reversed
-from ._multipoint import _mullow_fast, _redc_all, _TRANSFORM
+from ._multipoint import _mullow_fast, _redc_all, _TRANSFORM, _compose_series
 from ._ntt import _modular_range
 from ._nmod import _slice
 
@@ -164,8 +164,47 @@ def _exp(a: List[UInt64], n: Int, naturals: List[UInt64], f: _Field, mut budget:
     return g^
 
 
+
+def _derivative(a: List[UInt64], n: Int, f: _Field) -> List[UInt64]:
+    """The first n coefficients of a', zero-padded."""
+    var result = List[UInt64](length=n, fill=0)
+    var k = UInt64(0)
+    for i in range(1, min(n + 1, len(a))):
+        k = _addm(k, f.one, f)
+        result[i - 1] = _mulm(a[i], k, f)
+    return result^
+
+
+def _revert(a: List[UInt64], n: Int, f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
+    """The compositional inverse of a modulo x^n, for a(0) = 0 and a unit a(1).
+
+    Newton steps g <- g - (a(g) - x) / a'(g) take a'(g) = (a o g)' / g', so
+    each doubling needs one composition and one short inverse.
+    """
+    var g: List[UInt64] = [UInt64(0), _invm(a[1], f, budget)]
+    var known = 2
+    while known < n:
+        budget.charge(1)
+        var next = min(2 * known, n)
+        var width = next - known
+        var prefix = _padded(a, min(len(a), next), budget)
+        var composed = _compose_series(prefix, g, next, f, budget)
+        composed.resize(next, 0)
+        var high = List[UInt64](capacity=width)
+        for i in range(known, next):
+            high.append(composed[i])
+        # (a o g)' / g' = a'(g); the correction is high * g' / (a o g)'.
+        var slope = _inverse(_derivative(composed, width, f), width, f, budget)
+        var ratio = _mullow_fast(_derivative(g, width, f), slope, width, f, budget)
+        var correction = _mullow_fast(high, ratio, width, f, budget)
+        for i in range(width):
+            g.append(_negm(correction[i], f) if i < len(correction) else UInt64(0))
+        known = next
+    g.resize(n, 0)
+    return g^
+
 def _native_series(coefficients: List[ModInt], ring: Modulus, order: Int, operation: Int, mut budget: Budget) raises PolyError -> Optional[List[ModInt]]:
-    """Operation 0 (inverse), 1 (logarithm) or 2 (exponential) modulo x^order.
+    """Operation 0 (inverse), 1 (logarithm), 2 (exponential) or 3 (reversion) modulo x^order.
 
     None when the generic routine must decide instead: the field GF(2), a
     constant term outside the operation's domain, or an order whose integer
@@ -174,10 +213,12 @@ def _native_series(coefficients: List[ModInt], ring: Modulus, order: Int, operat
     """
     if ring.value <= 2 or order < 1:
         return None
-    if operation > 0 and UInt64(order) > ring.value:
+    if (operation == 1 or operation == 2) and UInt64(order) > ring.value:
         return None
     var constant = coefficients[0].value if len(coefficients) else UInt64(0)
-    if (operation == 0 and constant == 0) or (operation == 1 and constant != 1) or (operation == 2 and constant != 0):
+    if (operation == 0 and constant == 0) or (operation == 1 and constant != 1) or (operation >= 2 and constant != 0):
+        return None
+    if operation == 3 and (order < 2 or len(coefficients) < 2 or coefficients[1].value == 0):
         return None
     var f = _field(ring.value)
     # Field setup and the Newton schedule are charged before any work, like
@@ -193,6 +234,8 @@ def _native_series(coefficients: List[ModInt], ring: Modulus, order: Int, operat
     var values: List[UInt64]
     if operation == 0:
         values = _inverse(a, order, f, budget)
+    elif operation == 3:
+        values = _revert(a, order, f, budget)
     else:
         var naturals = _naturals(order, f, budget)
         values = _log(a, order, naturals, f, budget) if operation == 1 else _exp(a, order, naturals, f, budget)
