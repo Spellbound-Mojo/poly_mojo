@@ -7,7 +7,9 @@ matrix inner loops perform no division. Every operation charges the shared
 budget in proportion to its coefficient work before doing it.
 """
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product, _sum
-from ._ntt import _modular_product
+from ._ntt import _modular_product, _Tables, _forward, _inverse, _redc as _transform_redc, _montgomery_inverse, _shoup, _shoup_quotient, _reduce_2q, _power as _transform_power, _transform_length, _PRIMES, _ROOTS, _MAX_LOG
+from std.memory import ArcPointer
+from ._nmod_euclid import _Field as _EuclidField, _gcd_words
 
 comptime _KARATSUBA = 128
 """Operand length at which products switch from schoolbook to Karatsuba;
@@ -333,15 +335,309 @@ def _divmod_classic(a: List[UInt64], b: List[UInt64], quotient: Bool, f: _Field,
 
 
 def _gcd(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
-    """The monic gcd; zero only when both inputs are zero."""
-    var x = a.copy()
-    var y = b.copy()
-    while len(y):
-        budget.charge(1)
-        var r = _divmod_classic(x, y, False, f, budget)[1].copy()
-        x = y^
-        y = r^
-    return _monic(x, f, budget)
+    """The monic gcd; zero only when both inputs are zero.
+
+    Residues share the Montgomery form a 2^64 mod p of the word-size Euclidean
+    kernels, which run the remainder sequence.
+    """
+    _allocation[UInt64](len(a) + len(b), budget)
+    return _gcd_words(a.copy(), b.copy(), _EuclidField.of(f.p), budget)
+
+
+comptime _SPECTRAL = 128
+"""Modulus degree from which reductions, modular products and compositions
+keep their fixed operands as transforms modulo one transform prime."""
+comptime _SPECTRAL_SMALL = 64
+"""The same, when the vectorized 32-bit transform prime holds the sums."""
+comptime _SPECTRAL_BOUND = UInt128(1) << 61
+"""Every transform prime exceeds 2^61: exact integer coefficients below it survive."""
+
+
+def _spectral_from(f: _Field, terms: Int) -> Int:
+    """The modulus degree from which fixed operands are kept as transforms: lower when the 32-bit transform prime holds the sums."""
+    if UInt128(f.p - 1) * UInt128(f.p - 1) * UInt128(terms) < UInt128(_SMALL_Q):
+        return _SPECTRAL_SMALL
+    return _SPECTRAL
+
+
+def _spectral_ok(f: _Field, terms: Int) -> Bool:
+    """Whether sums of `terms` products of residues stay below every transform prime."""
+    return UInt128(f.p - 1) * UInt128(f.p - 1) * UInt128(terms) < _SPECTRAL_BOUND
+
+
+comptime _SMALL_Q = UInt64(998244353)
+"""119 2^23 + 1, with primitive root 3: transforms of length up to 2^23 for
+convolutions whose exact coefficients stay below it, with every product of
+two values below 2q under q 2^32."""
+comptime _SMALL_LOG = 23
+comptime _SMALL_LANES = 8
+comptime _SmallLane = SIMD[DType.uint64, _SMALL_LANES]
+
+
+@always_inline
+def _small_redc(t: UInt64, q: UInt64, negated_inverse: UInt64) -> UInt64:
+    """t 2^-32 mod q in [0, 2q), for t < q 2^32."""
+    var m = ((t & 0xFFFFFFFF) * negated_inverse) & 0xFFFFFFFF
+    return (t + m * q) >> 32
+
+
+@always_inline
+def _small_redc_lanes(t: _SmallLane, q: _SmallLane, negated_inverse: _SmallLane) -> _SmallLane:
+    var mask = _SmallLane(0xFFFFFFFF)
+    var m = ((t & mask) * negated_inverse) & mask
+    return (t + m * q) >> 32
+
+
+struct _SmallTables(Movable):
+    """Montgomery (2^32) twiddles modulo _SMALL_Q: entry m + j holds w_2m^j (forward) or w_2m^-j (inverse)."""
+    var forward: List[UInt64]
+    var inverse: List[UInt64]
+    var negated_inverse: UInt64
+    var one: UInt64
+
+    def __init__(out self, n: Int):
+        var q = _SMALL_Q
+        var inverse = q
+        for _ in range(5):
+            inverse = inverse * (2 - q * inverse)
+        self.negated_inverse = (UInt64(0) - inverse) & 0xFFFFFFFF
+        self.one = (UInt64(1) << 32) % q
+        self.forward = List[UInt64](length=max(n, 1), fill=0)
+        self.inverse = List[UInt64](length=max(n, 1), fill=0)
+        if n < 2:
+            return
+        var half = n // 2
+        var w = _plain_power(3, (q - 1) // UInt64(n), q)
+        var x = UInt64(1)
+        for j in range(half):
+            self.forward[half + j] = (x << 32) % q
+            x = (x * w) % q
+        self.inverse[half] = self.one
+        for j in range(1, half):
+            self.inverse[half + j] = q - self.forward[n - j]
+        var m = half // 2
+        var stride = 2
+        while m >= 1:
+            for j in range(m):
+                self.forward[m + j] = self.forward[half + j * stride]
+                self.inverse[m + j] = self.inverse[half + j * stride]
+            m //= 2
+            stride *= 2
+
+
+def _plain_power(a: UInt64, e: UInt64, q: UInt64) -> UInt64:
+    """a^e mod q for q below 2^32."""
+    var result = UInt64(1)
+    var base = a % q
+    var n = e
+    while n:
+        if n & 1:
+            result = (result * base) % q
+        base = (base * base) % q
+        n >>= 1
+    return result
+
+
+def _small_forward(mut a: List[UInt64], tables: _SmallTables):
+    """Decimation in frequency modulo _SMALL_Q; values below 2q in and out, bit-reversed output."""
+    var n = len(a)
+    var q = _SMALL_Q
+    var q2 = 2 * q
+    var vq = _SmallLane(q)
+    var vq2 = _SmallLane(q2)
+    var vn = _SmallLane(tables.negated_inverse)
+    var pa = a.unsafe_ptr()
+    var pw = tables.forward.unsafe_ptr()
+    var m = n // 2
+    while m >= 1:
+        var start = 0
+        while start < n:
+            if m >= _SMALL_LANES:
+                var j = 0
+                while j < m:
+                    var u = pa.unsafe_offset(start + j).unsafe_load[width=_SMALL_LANES]()
+                    var v = pa.unsafe_offset(start + j + m).unsafe_load[width=_SMALL_LANES]()
+                    var w = pw.unsafe_offset(m + j).unsafe_load[width=_SMALL_LANES]()
+                    var x = u + v
+                    pa.unsafe_offset(start + j).unsafe_store[width=_SMALL_LANES](x.ge(vq2).select(x - vq2, x))
+                    pa.unsafe_offset(start + j + m).unsafe_store[width=_SMALL_LANES](_small_redc_lanes((u - v + vq2) * w, vq, vn))
+                    j += _SMALL_LANES
+            else:
+                for j in range(m):
+                    var u = pa.unsafe_offset(start + j).unsafe_load()
+                    var v = pa.unsafe_offset(start + j + m).unsafe_load()
+                    var x = u + v
+                    pa.unsafe_offset(start + j).unsafe_store(x - q2 if x >= q2 else x)
+                    pa.unsafe_offset(start + j + m).unsafe_store(_small_redc((u - v + q2) * pw.unsafe_offset(m + j).unsafe_load(), q, tables.negated_inverse))
+            start += 2 * m
+        m //= 2
+
+
+def _small_inverse(mut a: List[UInt64], tables: _SmallTables):
+    """Decimation in time modulo _SMALL_Q without the 1/n factor; values below 2q in and out, bit-reversed input."""
+    var n = len(a)
+    var q = _SMALL_Q
+    var q2 = 2 * q
+    var vq = _SmallLane(q)
+    var vq2 = _SmallLane(q2)
+    var vn = _SmallLane(tables.negated_inverse)
+    var pa = a.unsafe_ptr()
+    var pw = tables.inverse.unsafe_ptr()
+    var m = 1
+    while m < n:
+        var start = 0
+        while start < n:
+            if m >= _SMALL_LANES:
+                var j = 0
+                while j < m:
+                    var u = pa.unsafe_offset(start + j).unsafe_load[width=_SMALL_LANES]()
+                    var w = pw.unsafe_offset(m + j).unsafe_load[width=_SMALL_LANES]()
+                    var t = _small_redc_lanes(pa.unsafe_offset(start + j + m).unsafe_load[width=_SMALL_LANES]() * w, vq, vn)
+                    var x = u + t
+                    var y = u - t + vq2
+                    pa.unsafe_offset(start + j).unsafe_store[width=_SMALL_LANES](x.ge(vq2).select(x - vq2, x))
+                    pa.unsafe_offset(start + j + m).unsafe_store[width=_SMALL_LANES](y.ge(vq2).select(y - vq2, y))
+                    j += _SMALL_LANES
+            else:
+                for j in range(m):
+                    var u = pa.unsafe_offset(start + j).unsafe_load()
+                    var t = _small_redc(pa.unsafe_offset(start + j + m).unsafe_load() * pw.unsafe_offset(m + j).unsafe_load(), q, tables.negated_inverse)
+                    var x = u + t
+                    var y = u - t + q2
+                    pa.unsafe_offset(start + j).unsafe_store(x - q2 if x >= q2 else x)
+                    pa.unsafe_offset(start + j + m).unsafe_store(y - q2 if y >= q2 else y)
+            start += 2 * m
+        m *= 2
+
+
+struct _Spectral(Movable):
+    """Cyclic convolutions of length n of Montgomery residues whose exact
+    integer convolutions stay below the transform prime: _SMALL_Q, with
+    vectorized 32-bit butterflies, when the caller's sums fit it, else the
+    first 62-bit transform prime.
+
+    Transforms hold values below 2q; pointwise products use the transform
+    prime's Montgomery reduction, whose factor is folded, with 1/n, into the
+    scale of the inverse; the exact result v then leaves through one
+    reduction modulo p, which turns a R^2 into a R.
+    """
+    var n: Int
+    var small: Bool
+    var q: UInt64
+    var q_inverse: UInt64
+    var scale: UInt64
+    var scale_quotient: UInt64
+    var tables: _Tables
+    var small_tables: _SmallTables
+    var field: _Field
+
+    def __init__(out self, n: Int, field: _Field, terms: Int, mut budget: Budget) raises PolyError:
+        """Length n, for sums of at most `terms` products of residues below p."""
+        var primes = materialize[_PRIMES]()
+        var roots = materialize[_ROOTS]()
+        _charge_size(_product(4, n), budget)
+        _allocation[UInt64](_product(4, n), budget)
+        self.n = n
+        self.field = field
+        self.small = n <= (1 << _SMALL_LOG) and UInt128(field.p - 1) * UInt128(field.p - 1) * UInt128(terms) < UInt128(_SMALL_Q)
+        if self.small:
+            self.q = _SMALL_Q
+            self.q_inverse = 0
+            self.small_tables = _SmallTables(n)
+            self.tables = _Tables(primes[0], roots[0], 1)
+            # x n 2^-32 back to x: multiply by 2^32 / n through one more reduction.
+            var target = ((UInt64(1) << 32) % _SMALL_Q) * _plain_power(UInt64(n) % _SMALL_Q, _SMALL_Q - 2, _SMALL_Q) % _SMALL_Q
+            self.scale = (target << 32) % _SMALL_Q
+            self.scale_quotient = 0
+        else:
+            self.q = primes[0]
+            self.q_inverse = _montgomery_inverse(self.q)
+            var r = UInt64(((UInt128(1) << 64) % UInt128(self.q)))
+            self.scale = UInt64((UInt128(r) * UInt128(_transform_power(UInt64(n) % self.q, self.q - 2, self.q))) % UInt128(self.q))
+            self.scale_quotient = _shoup_quotient(self.scale, self.q)
+            self.tables = _Tables(self.q, roots[0], n)
+            self.small_tables = _SmallTables(1)
+
+    def exact(self, terms: Int) -> Bool:
+        """Whether sums of `terms` products of residues below p stay below the transform prime."""
+        var bound = UInt128(_SMALL_Q) if self.small else _SPECTRAL_BOUND
+        return UInt128(self.field.p - 1) * UInt128(self.field.p - 1) * UInt128(terms) < bound
+
+    @always_inline
+    def _reduce(self, a: UInt64, b: UInt64) -> UInt64:
+        if self.small:
+            return _small_redc(a * b, self.q, self.small_tables.negated_inverse)
+        return _transform_redc(a, b, self.q, self.q_inverse)
+
+    def forward(self, values: List[UInt64], mut budget: Budget) raises PolyError -> List[UInt64]:
+        """The transform of at most n residues below p."""
+        _charge_size(_product(self.n, _log2(self.n) + 1), budget)
+        _allocation[UInt64](self.n, budget)
+        var x = List[UInt64](length=self.n, fill=0)
+        for i in range(min(len(values), self.n)):
+            x.unsafe_get(i) = values[i]
+        if self.small:
+            _small_forward(x, self.small_tables)
+        else:
+            _forward(x, self.tables, self.q)
+        return x^
+
+    def accumulate(self, mut total: List[UInt64], a: List[UInt64], b: List[UInt64]):
+        """total += a b pointwise, everything below 2q."""
+        var q2 = 2 * self.q
+        for i in range(self.n):
+            var s = total.unsafe_get(i) + self._reduce(a.unsafe_get(i), b.unsafe_get(i))
+            total.unsafe_get(i) = s - q2 if s >= q2 else s
+
+    def product(self, a: List[UInt64], b: List[UInt64]) -> List[UInt64]:
+        var x = List[UInt64](length=self.n, fill=0)
+        for i in range(self.n):
+            x.unsafe_get(i) = self._reduce(a.unsafe_get(i), b.unsafe_get(i))
+        return x^
+
+    def sum(self, a: List[UInt64], b: List[UInt64]) -> List[UInt64]:
+        """a + b pointwise, below 2q from inputs below 2q."""
+        var q2 = 2 * self.q
+        var x = List[UInt64](length=self.n, fill=0)
+        for i in range(self.n):
+            var t = a.unsafe_get(i) + b.unsafe_get(i)
+            x.unsafe_get(i) = t - q2 if t >= q2 else t
+        return x^
+
+    def back(self, var x: List[UInt64], lo: Int, hi: Int, mut budget: Budget) raises PolyError -> List[UInt64]:
+        """Coefficients lo ..< hi of the convolution whose pointwise products x holds, as Montgomery residues, trimmed."""
+        _charge_size(_product(self.n, _log2(self.n) + 1), budget)
+        if self.small:
+            _small_inverse(x, self.small_tables)
+        else:
+            _inverse(x, self.tables, self.q)
+        _allocation[UInt64](hi - lo, budget)
+        var out = List[UInt64](capacity=hi - lo)
+        for i in range(lo, hi):
+            var v: UInt64
+            if self.small:
+                v = _small_redc(x.unsafe_get(i) * self.scale, self.q, self.small_tables.negated_inverse)
+                v = v - self.q if v >= self.q else v
+            else:
+                v = _reduce_2q(_shoup(x.unsafe_get(i), self.scale, self.scale_quotient, self.q), self.q)
+            out.append(_redc(UInt128(v), self.field))
+        _trim(out)
+        return out^
+
+
+def _log2(n: Int) -> Int:
+    var log = 0
+    while (1 << log) < n:
+        log += 1
+    return log
+
+
+@fieldwise_init
+struct _ModulusSpectra(Movable):
+    """The transforms of a modulus f and of its reversed inverse, at length 2 deg f or more."""
+    var spectral: _Spectral
+    var f: List[UInt64]
+    var inverse: List[UInt64]
 
 
 @fieldwise_init
@@ -349,6 +645,7 @@ struct _Modulus(Copyable, Movable):
     """A monic modulus with the reversed inverse used for division by products."""
     var f: List[UInt64]
     var inverse: List[UInt64]
+    var spectra: Optional[ArcPointer[_ModulusSpectra]]
 
 
 def _modulus(f: List[UInt64], field: _Field, mut budget: Budget) raises PolyError -> _Modulus:
@@ -368,7 +665,14 @@ def _modulus(f: List[UInt64], field: _Field, mut budget: Budget) raises PolyErro
         buffer[n - 1 - k] = _negm(s, field)
     var g = _reversed(buffer, len(buffer), budget)
     _trim(g)
-    return _Modulus(f.copy(), g^)
+    var spectra = Optional[ArcPointer[_ModulusSpectra]](None)
+    if n >= _spectral_from(field, 2 * n + 2) and _spectral_ok(field, n + 1):
+        # Distinct-degree interval factors have entries below 2p: 2n + 2 terms.
+        var spectral = _Spectral(_transform_length(2 * n), field, 2 * n + 2, budget)
+        var tf = spectral.forward(f, budget)
+        var tg = spectral.forward(g, budget)
+        spectra = ArcPointer(_ModulusSpectra(spectral^, tf^, tg^))
+    return _Modulus(f.copy(), g^, spectra^)
 
 
 def _rem(a: List[UInt64], m: _Modulus, field: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
@@ -380,6 +684,17 @@ def _rem(a: List[UInt64], m: _Modulus, field: _Field, mut budget: Budget) raises
         return _divmod_classic(a, m.f, False, field, budget)[1].copy()
     var size = len(a)
     var length = size - n
+    if m.spectra:
+        # rev(q) = rev(a) g mod x^length and r = a - q f mod x^n, with the
+        # transforms of g and f kept; neither product wraps at length >= 2n.
+        ref spectra = m.spectra.value()[]
+        var top = _reversed(a, size, budget)
+        top.resize(length, 0)
+        var rq = spectra.spectral.back(spectra.spectral.product(spectra.spectral.forward(top, budget), spectra.inverse), 0, length, budget)
+        var q = _reversed(rq, length, budget)
+        _trim(q)
+        var qf = spectra.spectral.back(spectra.spectral.product(spectra.spectral.forward(q, budget), spectra.f), 0, n, budget)
+        return _sub(_slice(a, 0, n, budget), qf, field, budget)
     if n < 8 * field.karatsuba:
         # rev(q) = rev(a) * g mod x^length, and r = a - q * f mod x^n. With
         # q_i = rq_(length-1-i), both sums are forward dot products, so no
@@ -412,6 +727,11 @@ def _rem(a: List[UInt64], m: _Modulus, field: _Field, mut budget: Budget) raises
 
 
 def _mulmod(a: List[UInt64], b: List[UInt64], m: _Modulus, field: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
+    var n = len(m.f) - 1
+    if m.spectra and len(a) <= n and len(b) <= n and len(a) and len(b):
+        ref spectral = m.spectra.value()[].spectral
+        var product = spectral.back(spectral.product(spectral.forward(a, budget), spectral.forward(b, budget)), 0, len(a) + len(b) - 1, budget)
+        return _rem(product, m, field, budget)
     return _rem(_mul(a, b, field, budget), m, field, budget)
 
 
@@ -434,9 +754,17 @@ def _powmod(a: List[UInt64], e: UInt64, m: _Modulus, field: _Field, mut budget: 
 @fieldwise_init
 struct _Composer(Copyable, Movable):
     """Brent–Kung powers of h modulo f: h^i for i below `block`, stored
-    transposed for dot products, and the giant powers h^(j*block)."""
+    transposed for dot products, and the giant powers h^(j*block), also as
+    transforms when their products can be summed in one transform prime."""
     var block: Int
     var columns: List[List[UInt64]]
+    var giants: List[List[UInt64]]
+    var spectra: Optional[ArcPointer[_ComposerSpectra]]
+
+
+@fieldwise_init
+struct _ComposerSpectra(Movable):
+    var spectral: _Spectral
     var giants: List[List[UInt64]]
 
 
@@ -464,7 +792,15 @@ def _composer(h: List[UInt64], m: _Modulus, field: _Field, mut budget: Budget) r
     giants.append([field.one])
     for j in range(1, blocks):
         giants.append(_mulmod(giants[j - 1], powers[block], m, field, budget))
-    return _Composer(block, columns^, giants^)
+    var spectra = Optional[ArcPointer[_ComposerSpectra]](None)
+    # A composition sums `blocks` products of at most n terms each.
+    if n >= _spectral_from(field, _product(blocks, n)) and _spectral_ok(field, _product(blocks, n)):
+        var spectral = _Spectral(_transform_length(2 * n), field, _product(blocks, n), budget)
+        var transforms = List[List[UInt64]](capacity=blocks)
+        for j in range(blocks):
+            transforms.append(spectral.forward(giants[j], budget))
+        spectra = ArcPointer(_ComposerSpectra(spectral^, transforms^))
+    return _Composer(block, columns^, giants^, spectra^)
 
 
 def _compose(g: List[UInt64], c: _Composer, m: _Modulus, field: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
@@ -476,6 +812,22 @@ def _compose(g: List[UInt64], c: _Composer, m: _Modulus, field: _Field, mut budg
         return _compose(_rem(g, m, field, budget), c, m, field, budget)
     var blocks = (len(g) + c.block - 1) // c.block
     _charge_size(_product(n, len(g)), budget)
+    if c.spectra:
+        # Sum G_j(h) h^(j block) over the kept transforms of the giants; one
+        # inverse transform and one reduction follow.
+        ref spectra = c.spectra.value()[]
+        var sum = List[UInt64](length=spectra.spectral.n, fill=0)
+        for j in range(blocks):
+            var start = j * c.block
+            var stop = min(len(g), start + c.block)
+            var piece = List[UInt64](capacity=n)
+            var gp = g.unsafe_ptr().unsafe_offset(start)
+            for k in range(n):
+                piece.append(_dot(gp, c.columns[k].unsafe_ptr(), stop - start, field))
+            _trim(piece)
+            if len(piece):
+                spectra.spectral.accumulate(sum, spectra.spectral.forward(piece, budget), spectra.giants[j])
+        return _rem(spectra.spectral.back(sum^, 0, 2 * n - 1, budget), m, field, budget)
     # Sum the unreduced products G_j(h) * h^(j*block); one reduction follows.
     _allocation[UInt64](2 * n, budget)
     var total = List[UInt64](length=max(2 * n - 1, 1), fill=0)
@@ -606,8 +958,8 @@ def _equal_degree(g: List[UInt64], degree: Int, xp: List[UInt64], field: _Field,
                 next.append(piece.copy())
                 done += 1
                 continue
-            var reduced = _divmod_classic(b, piece, False, field, budget)[1].copy()
-            var divisor = _gcd(piece, reduced, field, budget)
+            # gcd(piece, b) = gcd(piece, b mod piece); the Euclidean kernel reduces first.
+            var divisor = _gcd(piece, b, field, budget)
             if len(divisor) > 1 and len(divisor) < len(piece):
                 var other = _divmod_classic(piece, divisor, True, field, budget)[0].copy()
                 done += Int(len(divisor) - 1 == degree) + Int(len(other) - 1 == degree)
@@ -650,6 +1002,18 @@ def _distinct_degree(f: List[UInt64], field: _Field, seed: UInt64, mut budget: B
     var leap: Optional[_Composer] = None
     if not _prefer_powering(n, _product(steps, _cost_bits(field.p))):
         leap = _composer(giant, m, field, budget)
+    # Interval factors H - h_i come from kept transforms of H and of -h_i, as
+    # nonnegative residues: H + (p - h_i) has entries below 2p, and products
+    # of at most n terms below 2p^2 must stay exact.
+    var spectral = Bool(m.spectra) and m.spectra.value()[].spectral.exact(2 * n + 2)
+    var negated = List[List[UInt64]]()
+    if spectral:
+        _allocation[List[UInt64]](steps, budget)
+        for i in range(steps):
+            var minus = List[UInt64](capacity=len(baby[i]))
+            for v in baby[i]:
+                minus.append(_negm(v, field))
+            negated.append(m.spectra.value()[].spectral.forward(minus, budget))
     var remaining = f.copy()
     var j = 1
     while True:
@@ -658,8 +1022,15 @@ def _distinct_degree(f: List[UInt64], field: _Field, seed: UInt64, mut budget: B
         if len(remaining) - 1 < 2 * low:
             break
         var interval: List[UInt64] = [field.one]
-        for i in range(steps):
-            interval = _mulmod(interval, _sub(giant, baby[i], field, budget), m, field, budget)
+        if spectral:
+            ref transform = m.spectra.value()[].spectral
+            var high = transform.forward(giant, budget)
+            for i in range(steps):
+                var product = transform.back(transform.product(transform.forward(interval, budget), transform.sum(high, negated[i])), 0, len(interval) + n - 1, budget)
+                interval = _rem(product, m, field, budget)
+        else:
+            for i in range(steps):
+                interval = _mulmod(interval, _sub(giant, baby[i], field, budget), m, field, budget)
         var block = _gcd(remaining, interval, field, budget)
         if len(block) > 1:
             remaining = _divmod_classic(remaining, block, True, field, budget)[0].copy()
@@ -667,7 +1038,7 @@ def _distinct_degree(f: List[UInt64], field: _Field, seed: UInt64, mut budget: B
             while i >= 0 and len(block) > 1:
                 budget.charge(1)
                 var difference = _sub(giant, baby[i], field, budget)
-                var part = _gcd(block, _divmod_classic(difference, block, False, field, budget)[1], field, budget)
+                var part = _gcd(block, difference, field, budget)
                 if len(part) > 1:
                     _equal_degree(part, j * steps - i, xp, field, rng, factors, budget)
                     block = _divmod_classic(block, part, True, field, budget)[0].copy()
