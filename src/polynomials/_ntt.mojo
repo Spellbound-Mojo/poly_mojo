@@ -189,25 +189,38 @@ struct _Tables(Movable):
         self.forward_quotients = List[UInt64](length=n, fill=0)
         self.inverse = List[UInt64](length=n, fill=0)
         self.inverse_quotients = List[UInt64](length=n, fill=0)
-        var m = 1
+        if n < 2:
+            return
+        # The last stage holds w^j, j < n/2, for w of order n; every other stage
+        # takes a stride of it. Shoup quotients cost a 128-bit division each, so
+        # only these n/2 are divided: w^-j = q - w^(n/2 - j), and the quotient of
+        # q - x is 2^64 - 1 - the quotient of x.
+        var half = n // 2
         var log = 0
-        while m < n:
-            # w has order 2m: root^(2^32 / 2m).
-            var w = _power(root, UInt64(1) << UInt64(_MAX_LOG - log - 1), q)
-            var w_inverse = _power(w, q - 2, q)
-            var step = _shoup_quotient(w, q)
-            var step_inverse = _shoup_quotient(w_inverse, q)
-            var x = UInt64(1)
-            var y = UInt64(1)
-            for j in range(m):
-                self.forward[m + j] = x
-                self.forward_quotients[m + j] = _shoup_quotient(x, q)
-                self.inverse[m + j] = y
-                self.inverse_quotients[m + j] = _shoup_quotient(y, q)
-                x = _reduce_2q(_shoup(x, w, step, q), q)
-                y = _reduce_2q(_shoup(y, w_inverse, step_inverse, q), q)
-            m *= 2
+        while (1 << log) < n:
             log += 1
+        var w = _power(root, UInt64(1) << UInt64(_MAX_LOG - log), q)
+        var step = _shoup_quotient(w, q)
+        var x = UInt64(1)
+        for j in range(half):
+            self.forward[half + j] = x
+            self.forward_quotients[half + j] = _shoup_quotient(x, q)
+            x = _reduce_2q(_shoup(x, w, step, q), q)
+        self.inverse[half] = 1
+        self.inverse_quotients[half] = self.forward_quotients[half]
+        for j in range(1, half):
+            self.inverse[half + j] = q - self.forward[n - j]
+            self.inverse_quotients[half + j] = UInt64.MAX - self.forward_quotients[n - j]
+        var m = half // 2
+        var stride = 2
+        while m >= 1:
+            for j in range(m):
+                self.forward[m + j] = self.forward[half + j * stride]
+                self.forward_quotients[m + j] = self.forward_quotients[half + j * stride]
+                self.inverse[m + j] = self.inverse[half + j * stride]
+                self.inverse_quotients[m + j] = self.inverse_quotients[half + j * stride]
+            m //= 2
+            stride *= 2
 
 
 def _forward(mut a: List[UInt64], tables: _Tables, q: UInt64):
@@ -386,25 +399,28 @@ def _compare(a: List[UInt64], b: List[UInt64]) -> Int:
 
 
 def _subtract_from(m: List[UInt64], mut x: List[UInt64]):
-    """x = m - x, for x <= m."""
+    """x = m - x in place, for x <= m."""
     var borrow = UInt64(0)
-    var result = List[UInt64](capacity=len(m))
     for l in range(len(m)):
         var a = m[l]
         var b = x[l] if l < len(x) else UInt64(0)
         var d = a - b - borrow
         borrow = UInt64(1) if (a < b or (a == b and borrow == 1)) else UInt64(0)
-        result.append(d)
-    x = result^
+        if l < len(x):
+            x[l] = d
+        else:
+            x.append(d)
 
 
 def _magnitude(value: Integer, mut limbs: List[UInt64]):
     """Append the magnitude of value in 64-bit limbs, least significant first."""
-    if value.magnitude_bit_length() <= 63:
+    var bits = value.magnitude_bit_length()
+    if bits == 0:
+        return
+    if bits <= 64:
+        # Negating a value of at most 64 bits stays inline.
         try:
-            var word = value.to_native_exact[DType.int64]()
-            if word != 0:
-                limbs.append(UInt64(word if word > 0 else -word))
+            limbs.append((-value if value.sign() < 0 else value).to_native_exact[DType.uint64]())
             return
         except:
             pass
@@ -421,14 +437,6 @@ def _magnitude(value: Integer, mut limbs: List[UInt64]):
         for i in range(full * 8, count):
             limb |= UInt64(bytes.unsafe_get(i)) << UInt64(8 * (i - 8 * full))
         limbs.append(limb)
-
-
-def _from_limbs(limbs: List[UInt64], negative: Bool) -> Integer:
-    var bytes = List[UInt8](length=8 * len(limbs), fill=0)
-    for l in range(len(limbs)):
-        comptime for shift in range(8):
-            bytes[8 * l + shift] = UInt8((limbs[l] >> UInt64(8 * shift)) & 0xFF)
-    return Integer.from_bytes(bytes, negative=negative)
 
 
 def _residues_zz[C: CoefficientRing](values: _CoefficientView[C, _], k: Int, n: Int, mut budget: Budget) raises PolyError -> List[List[UInt64]]:
@@ -508,10 +516,26 @@ def _ntt_zz[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C
 
 def _reconstruct_zz[C: CoefficientRing](residues: List[List[UInt64]], k: Int, count: Int, mut budget: Budget) raises PolyError -> List[C]:
     """The symmetric CRT representatives, as ZZ values, of the first `count` residue columns modulo the first k primes."""
-    var primes = materialize[_PRIMES]()
     _charge_size(_product(count, _product(k, k)), budget)
     _allocation[C](count, budget)
     var g = _garner(k)
+    var result = List[C](capacity=count)
+    var digits = List[UInt64](length=k, fill=0)
+    var bytes = List[UInt8](length=8 * (k + 1), fill=0)
+    if k <= 2:
+        # Values below q_0 q_1 < 2^124 fit one 128-bit word.
+        var modulus = UInt128(g.moduli[0]) * (UInt128(g.moduli[1]) if k == 2 else UInt128(1))
+        var half = modulus >> 1
+        for i in range(count):
+            var x = UInt128(residues[0][i])
+            if k == 2:
+                _digits(g, residues, i, digits)
+                x = UInt128(digits[0]) + UInt128(digits[1]) * UInt128(g.moduli[0])
+            var negative = x > half
+            if negative:
+                x = modulus - x
+            result.append(rebind_var[C](ZZ(_integer_128(x, negative, bytes))))
+        return result^
     var modulus = _radix_limbs(k)
     var half = modulus.copy()
     var low = UInt64(0)
@@ -521,26 +545,52 @@ def _reconstruct_zz[C: CoefficientRing](residues: List[List[UInt64]], k: Int, co
         half[l] = (half[l] >> 1) | (low << 63)
         low = next_low
         l -= 1
-    var digits = List[UInt64](length=k, fill=0)
-    var result = List[C](capacity=count)
+    var x = List[UInt64](capacity=len(modulus) + 1)
     for i in range(count):
         _digits(g, residues, i, digits)
-        var x: List[UInt64] = [digits[k - 1]]
+        x.clear()
+        x.append(digits[k - 1])
         var j = k - 2
         while j >= 0:
-            _scale_add(x, primes[j], digits[j])
+            _scale_add(x, g.moduli[j], digits[j])
             j -= 1
         var negative = _compare(x, half) > 0
         if negative:
             _subtract_from(modulus, x)
-        while len(x) > 1 and x[len(x) - 1] == 0:
-            _ = x.pop()
-        if len(x) == 1 and x[0] <= UInt64(Int64.MAX):
-            var v = Int64(x[0])
-            result.append(rebind_var[C](ZZ(Integer(-v if negative else v))))
-        else:
-            result.append(rebind_var[C](ZZ(_from_limbs(x, negative))))
+        var used = len(x)
+        while used > 1 and x[used - 1] == 0:
+            used -= 1
+        result.append(rebind_var[C](ZZ(_integer(x, used, negative, bytes))))
     return result^
+
+
+def _integer_128(x: UInt128, negative: Bool, mut bytes: List[UInt8]) -> Integer:
+    """The integer with magnitude x and the given sign, inline when it fits a word."""
+    var lo = UInt64(x)
+    var hi = UInt64(x >> 64)
+    if hi == 0:
+        if lo <= UInt64(Int64.MAX):
+            return Integer(-Int64(lo) if negative else Int64(lo))
+        if not negative:
+            return Integer(lo)
+    comptime for shift in range(8):
+        bytes[shift] = UInt8((lo >> UInt64(8 * shift)) & 0xFF)
+        bytes[8 + shift] = UInt8((hi >> UInt64(8 * shift)) & 0xFF)
+    return Integer.from_bytes(Span(bytes)[:16], negative=negative)
+
+
+def _integer(limbs: List[UInt64], used: Int, negative: Bool, mut bytes: List[UInt8]) -> Integer:
+    """The integer with magnitude limbs[0 ..< used] and the given sign, inline when it fits a word."""
+    if used == 1:
+        var m = limbs[0]
+        if m <= UInt64(Int64.MAX):
+            return Integer(-Int64(m) if negative else Int64(m))
+        if not negative:
+            return Integer(m)
+    for l in range(used):
+        comptime for shift in range(8):
+            bytes[8 * l + shift] = UInt8((limbs[l] >> UInt64(8 * shift)) & 0xFF)
+    return Integer.from_bytes(Span(bytes)[: 8 * used], negative=negative)
 
 
 def _prime_index(p: UInt64) -> Int:
