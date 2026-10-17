@@ -40,6 +40,7 @@ from ._dense_reduction import _DenseReducer, _dense_reducer
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
 from ._dense_ops import _copy, _one, _gcd, _exact, _derivative
 from . import _nmod
+from ._berlekamp import _berlekamp, _BERLEKAMP_PRIME, _BERLEKAMP_DEGREE
 
 
 @fieldwise_init
@@ -201,7 +202,14 @@ def _native_factors(f: DensePoly[ModInt], seed: UInt64, mut factors: List[DenseP
         native.append(_nmod._to(f.coefficients[i].value, field))
     if len(_nmod._gcd(native, _nmod._derivative(native, field, budget), field, budget)) > 1:
         raise PolyError(PolyErrorKind.DOMAIN, "finite-field factorization requires a squarefree input")
-    var found = _nmod._distinct_degree(native, field, seed, budget)
+    # Tiny primes eliminate the byte-packed Berlekamp matrix up to a degree
+    # where it still beats distinct-degree factorization.
+    var n = len(native) - 1
+    var found: List[List[UInt64]]
+    if field.p <= _BERLEKAMP_PRIME and n >= 2 and n <= _BERLEKAMP_DEGREE:
+        found = _berlekamp(native, field, seed, budget)
+    else:
+        found = _nmod._distinct_degree(native, field, seed, budget)
     _allocation[DensePoly[ModInt]](len(found), budget)
     for g in found:
         _allocation[ModInt](len(g), budget)
