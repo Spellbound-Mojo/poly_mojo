@@ -2,7 +2,9 @@
 from apn_mojo import Rational, ExactComplex
 from polynomials import *
 from support.check import Checker
-from polynomials._toolkit_exact import _exact_product
+from polynomials._toolkit_exact import _exact_product, _ExactOps
+from polynomials._toolkit_ops import _divide_values, _convolve_values
+from polynomials._series_ops import _exp_values
 from polynomials._fntt import _fconvolve, _FPRIMES, _FPRIME_COUNT
 from polynomials._ntt import _transform_length, _ntt_middle_product, _ks_range, _zz_range, _transform_quotient, _shoup_quotient, _PRIMES, _PRIME_COUNT
 from polynomials.coefficient_buffer import _view
@@ -142,8 +144,55 @@ def float_convolutions(mut check: Checker):
         check.check(valid, String("float convolution modulo ", q))
 
 
+def native_recurrences(mut check: Checker) raises:
+    """Prime-field division, exponential and convolution recurrences on native words satisfy their defining identities."""
+    var work = Budget()
+    for p in [UInt64(101), (UInt64(1) << 62) - 57]:
+        var ctx = Modulus(p, work)
+        for n in [31, 32, 33, 100]:
+            var a = List[ModInt]()
+            var b = List[ModInt]()
+            var x = UInt64(n)
+            for k in range(n):
+                x = x * 6364136223846793005 + 1442695040888963407
+                a.append(ModInt(x >> 3, ctx))
+                b.append(ModInt(UInt64(1) if k == 0 else p - 1 - (x >> 40) % p, ctx))
+            # b (a / b) = a modulo x^n, by schoolbook.
+            var q = _divide_values[_ExactOps[ModInt]](_view(a), _view(b), n, ctx, work)
+            var back = DensePoly[ModInt].from_coefficients(0, ctx, b.copy(), work).mul_schoolbook(DensePoly[ModInt].from_coefficients(0, ctx, q.copy(), work), work)
+            var valid = len(q) == n
+            for k in range(n):
+                var got = back.coefficients[k].value if k < len(back.coefficients) else UInt64(0)
+                valid = valid and got == a[k].value
+            check.check(valid, String("native series quotient modulo ", p, ", length ", n))
+            # exp(f) with f(0) = 0: g' = f' g modulo x^(n-1).
+            if UInt64(n) <= p:
+                var f = a.copy()
+                f[0] = ModInt(0, ctx)
+                var g = _exp_values[_ExactOps[ModInt]](_view(f), n, ctx, work)
+                var df = List[ModInt]()
+                var dg = List[ModInt]()
+                for k in range(1, n):
+                    df.append(ModInt(UInt64((UInt128(f[k].value) * UInt128(k)) % UInt128(p)), ctx))
+                    dg.append(ModInt(UInt64((UInt128(g[k].value) * UInt128(k)) % UInt128(p)), ctx))
+                var rhs = DensePoly[ModInt].from_coefficients(0, ctx, df^, work).mul_schoolbook(DensePoly[ModInt].from_coefficients(0, ctx, g.copy(), work), work)
+                var ok = len(g) == n and g[0].value == 1
+                for k in range(n - 1):
+                    var r = rhs.coefficients[k].value if k < len(rhs.coefficients) else UInt64(0)
+                    ok = ok and r == dg[k].value
+                check.check(ok, String("native series exponential modulo ", p, ", length ", n))
+            var conv = _convolve_values[_ExactOps[ModInt]](_view(a), _view(b), n + 7, ctx, work)
+            var full = DensePoly[ModInt].from_coefficients(0, ctx, a.copy(), work).mul_schoolbook(DensePoly[ModInt].from_coefficients(0, ctx, b.copy(), work), work)
+            var same = len(conv) == n + 7
+            for k in range(n + 7):
+                var e = full.coefficients[k].value if k < len(full.coefficients) else UInt64(0)
+                same = same and conv[k].value == e
+            check.check(same, String("native convolution modulo ", p, ", length ", n))
+
+
 def main() raises:
     var check = Checker("toolkit_products")
+    native_recurrences(check)
     float_convolutions(check)
     transform_quotients(check)
     segmented(check)
