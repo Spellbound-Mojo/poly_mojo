@@ -6,6 +6,7 @@ from support.gen import coefficient
 from support.rng import SplitMix64
 from polynomials._gcd import _gcd_value, _modular_primitive, _primitive_zz, _normalized
 from polynomials._sparse_gcd import _sparse_gcd
+from polynomials._sparse_brown import _sparse_brown_gcd
 from support.corpus import read_cases, parse_order, parse_polynomial, as_zz
 from support.check import Checker
 from polynomials.gcd import gcd, gcd_value
@@ -325,6 +326,35 @@ def sparse_brown_cases(mut c: Checker) raises:
         c.check(_gcd_value(f, h, work) == expected, "sparse Brown gcd equals sparse modular interpolation")
 
 
+def skeleton_cases(mut c: Checker) raises:
+    """Sparse Brown's skeleton images: leading coefficients in x0 of several terms, and factors vanishing at small points."""
+    var work = Budget()
+    var order = MonomialOrder(MonomialOrder.LEX, [0, 1, 2, 3, 4, 5], work)
+    var variables: List[Int64] = [0, 1, 2, 3, 4, 5]
+    var gcds: List[String] = ["x0^2*x3*x5 - x0^2*x4 + x0*x1*x2 - 7*x2*x5 + x3 - 1", "x0^3*x5 - x0^3 + x0*x1*x4 - 2*x0*x1 + x2*x3 - 1", "x0*x1*x2*x3*x4*x5 + x0*x2 - 5*x1*x4^2 + x5^3 - 2"]
+    var lefts: List[String] = ["x0*x5 + x1^2 - x4 + 2", "x0 + x5 + 1", "x0^2*x3 - x1*x5 + x2^2 + 4"]
+    var rights: List[String] = ["x0*x1 - x2*x3^2 + x5 - 1", "x0^2 - x1*x4 + 3", "x0*x4^2 + x1*x2*x3 - 3*x5 + 1"]
+    for i in range(len(gcds)):
+        var g = parse_polynomial(gcds[i], order, work)
+        var f = as_zz(g.mul(parse_polynomial(lefts[i], order, work), work), work)
+        var h = as_zz(g.mul(parse_polynomial(rights[i], order, work), work), work)
+        var expected = _normalized(_sparse_gcd(f, h, work), work)
+        var got = _sparse_brown_gcd(f, h, variables, work)
+        c.check(Bool(got) and _normalized(got.value(), work) == expected, "sparse Brown with skeleton images")
+    var rng = SplitMix64(9137)
+    for round in range(6):
+        var g = polynomial[ZZ](NoContext(), order, rng, work, terms=6 + round % 3, variables=6, degree=3, coefficient_bound=20)
+        var a = polynomial[ZZ](NoContext(), order, rng, work, terms=4, variables=6, degree=2, coefficient_bound=20)
+        var b = polynomial[ZZ](NoContext(), order, rng, work, terms=5, variables=6, degree=2, coefficient_bound=20)
+        if g.is_zero() or a.is_zero() or b.is_zero():
+            continue
+        var f = g.mul(a, work)
+        var h = g.mul(b, work)
+        var expected = _normalized(_sparse_gcd(f, h, work), work)
+        var got = _sparse_brown_gcd(f, h, variables, work)
+        c.check(Bool(got) and _normalized(got.value(), work) == expected, "sparse Brown with skeleton images, random")
+
+
 def main() raises:
     var c = Checker("gcd")
     var work = Budget()
@@ -378,4 +408,5 @@ def main() raises:
     heuristic_cases(c)
     brown_cases(c)
     sparse_brown_cases(c)
+    skeleton_cases(c)
     c.finish()
