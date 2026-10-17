@@ -1,12 +1,13 @@
 """Private arithmetic schedules shared by exact and numerical coefficient vectors."""
 from .coefficient_buffer import _CoefficientView, _view
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
-from .coefficients import ModInt, Modulus
+from .coefficients import ModInt, Modulus, QQ
+from ._series_rational import _compose_rational
 from ._nmod import _field, _to, _from
 from ._multipoint import _compose_series
 
 comptime _NATIVE_COMPOSE = 16
-"""Truncation order from which prime field compositions use native Brent-Kung steps."""
+"""Truncation order from which prime field and rational compositions use Brent-Kung steps."""
 
 
 trait _ScalarOps:
@@ -95,6 +96,18 @@ def _compose_values[O: _ScalarOps, optimized: Bool = True](outer: _CoefficientVi
             for v in values:
                 result.append(rebind_var[O.Scalar](ModInt(_from(v, field), ring)))
             return result^
+    comptime if O.Scalar == QQ and optimized:
+        if length >= _NATIVE_COMPOSE and len(outer) >= _NATIVE_COMPOSE:
+            _allocation[QQ](len(outer) + len(inner), budget)
+            var f = List[QQ](capacity=len(outer))
+            for i in range(len(outer)):
+                f.append(rebind[QQ](outer[i]).copy())
+            var g = List[QQ](capacity=len(inner))
+            for i in range(len(inner)):
+                g.append(rebind[QQ](inner[i]).copy())
+            var composed = _compose_rational(_view(f), _view(g), length, budget)
+            if composed:
+                return rebind_var[List[O.Scalar]](composed.take())
     for i in range(len(outer) - 1, -1, -1):
         budget.charge(1)
         comptime if optimized:

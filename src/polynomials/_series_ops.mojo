@@ -123,17 +123,16 @@ def _newton_revert[O: _ScalarOps](a: _CoefficientView[O.Scalar, _], linear_inver
     while known < length:
         var next = _sum(known, min(known, length - known))
         var prefix = _values[O](_view(a), min(len(a), next), context, budget)
-        var error = _compose_values[O](_view(prefix), _view(result), next, context, budget)
-        var updated_error_1 = _values[O](_view(error), next, context, budget)
-        error = updated_error_1^
-        error[1] = O.apply(error[1], O.integer(1, context, budget), 1, context, budget)
-        var derivative = _derivative_values[O](_view(prefix), context, budget)
-        var slope = _compose_values[O](_view(derivative), _view(result), next - known, context, budget)
+        var composed = _values[O](_view(_compose_values[O](_view(prefix), _view(result), next, context, budget)), next, context, budget)
         _allocation[O.Scalar](next - known, budget)
         var high = List[O.Scalar](capacity=next - known)
         for i in range(known, next):
-            high.append(O.copy(error[i], budget))
-        var correction = _divide_values[O](_view(high), _view(slope), next - known, context, budget)
+            high.append(O.copy(composed[i], budget))
+        # a'(g) = (a o g)' / g', so the correction (a(g) - x) / a'(g) is
+        # high * g' / (a o g)' and needs no second composition.
+        var slope = _values[O](_view(_derivative_values[O](_view(composed), context, budget)), next - known, context, budget)
+        var numerator = _mul_values[O](_view(high), _view(_derivative_values[O](_view(result), context, budget)), next - known, context, budget)
+        var correction = _newton_divide[O](_view(numerator), _view(slope), next - known, context, budget)
         _allocation[O.Scalar](next - known, budget)
         result.reserve(next)
         for value in correction:
