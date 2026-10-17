@@ -203,10 +203,13 @@ def _horner(g: _Grid, x: UInt64, field: _Field, mut budget: Budget) raises PolyE
     var top = (g.extents[0] - 1) * block
     for i in range(block):
         out.append(g.data[top + i])
+    var source = g.data.unsafe_ptr()
+    var target = out.unsafe_ptr()
     for k in range(g.extents[0] - 2, -1, -1):
-        var base = k * block
+        var row = source.unsafe_offset(k * block)
         for i in range(block):
-            out[i] = field.add(field.mul(out[i], x), g.data[base + i])
+            var cell = target.unsafe_offset(i)
+            cell.unsafe_store(field.add(field.mul(cell.unsafe_load(), x), row.unsafe_offset(i).unsafe_load()))
     var extents = List[Int]()
     for i in range(1, len(g.extents)):
         extents.append(g.extents[i])
@@ -375,13 +378,22 @@ def _exponents(m: Monomial, variables: List[Int64]) -> List[Int]:
     return out^
 
 
-def _image(p: SparsePoly[ZZ], variables: List[Int64], extents: List[Int], field: _Field, mut budget: Budget) raises PolyError -> _Grid:
+def _cells(p: SparsePoly[ZZ], variables: List[Int64], extents: List[Int], mut budget: Budget) raises PolyError -> List[Int]:
+    _allocation[Int](len(p.terms), budget)
+    var out = List[Int](capacity=len(p.terms))
+    for t in p.terms:
+        budget.charge(1)
+        out.append(_encode(_exponents(t.monomial, variables), extents))
+    return out^
+
+
+def _image(p: SparsePoly[ZZ], cells: List[Int], extents: List[Int], field: _Field, mut budget: Budget) raises PolyError -> _Grid:
     var size = _size(extents, 0)
     _allocation[UInt64](size, budget)
     var data = List[UInt64](length=size, fill=0)
-    for t in p.terms:
+    for i in range(len(p.terms)):
         budget.charge(1)
-        data[_encode(_exponents(t.monomial, variables), extents)] = field.enter(_residue(t.coefficient.value, field.p, budget))
+        data[cells[i]] = field.enter(_residue(p.terms[i].coefficient.value, field.p, budget))
     return _Grid(data^, extents.copy())
 
 
@@ -433,6 +445,8 @@ def _brown_gcd(f: SparsePoly[ZZ], h: SparsePoly[ZZ], variables: List[Int64], mut
     ref lf = pf.terms[_lead_term(pf, variables)].coefficient
     ref lh = ph.terms[_lead_term(ph, variables)].coefficient
     var gamma = _gcd_coefficient(lf, lh, budget)
+    var where_f = _cells(pf, variables, ef, budget)
+    var where_h = _cells(ph, variables, eh, budget)
     var shape = List[Int]()
     for i in range(len(ef)):
         shape.append(min(ef[i], eh[i]))
@@ -447,7 +461,7 @@ def _brown_gcd(f: SparsePoly[ZZ], h: SparsePoly[ZZ], variables: List[Int64], mut
         if _residue(lf.value, p, budget) == 0 or _residue(lh.value, p, budget) == 0:
             continue
         var field = _Field.of(p)
-        var image = _brown(_image(pf, variables, ef, field, budget), _image(ph, variables, eh, field, budget), field, budget)
+        var image = _brown(_image(pf, where_f, ef, field, budget), _image(ph, where_h, eh, field, budget), field, budget)
         if not image:
             return None
         ref g = image.value()
@@ -469,7 +483,9 @@ def _brown_gcd(f: SparsePoly[ZZ], h: SparsePoly[ZZ], variables: List[Int64], mut
             residues[cell] = field.leave(field.mul(g.data[i], scale))
         var changed = values.merge(residues, p, budget)
         primes += 1
-        if primes < 2 or changed:
+        # Small coefficients are exact after one prime: try the first image, then
+        # only images that a further prime left unchanged.
+        if primes != 1 and changed:
             continue
         var terms = List[Term[ZZ]]()
         for cell in range(count):
@@ -484,6 +500,8 @@ def _brown_gcd(f: SparsePoly[ZZ], h: SparsePoly[ZZ], variables: List[Int64], mut
         var candidate = _primitive(SparsePoly[ZZ].from_terms(terms^, f.order, NoContext(), budget), budget)
         if divide_exact(pf, candidate, budget) and divide_exact(ph, candidate, budget):
             return candidate.scale(common, budget)
+        if primes == 1:
+            continue
         failures += 1
         if failures >= 3:
             return None
