@@ -136,11 +136,13 @@ def _build_tree(factors: List[DensePoly[ModInt]], mut state: _HenselState, mut b
 
 
 comptime _FAST_DIVISION = 64
-"""Divisor and quotient lengths from which division multiplies by a power
-series inverse instead of eliminating one coefficient at a time."""
-comptime _FAST_DIVISION_BITS = 1000
-"""Measured: above this modulus size, transform products of these lengths
-lose to long division."""
+"""Divisor length from which division multiplies by a power series inverse
+instead of eliminating one coefficient at a time."""
+comptime _FAST_QUOTIENT = 128
+"""Quotient length from which the switch pays at any modulus size: measured
+at 300 to 4000 bits. Shorter quotients, down to the divisor threshold, pay
+only for moduli up to _FAST_BITS."""
+comptime _FAST_BITS = 1000
 
 
 def _low_product(a: DensePoly[ZZ], b: DensePoly[ZZ], length: Int, mut budget: Budget) raises PolyError -> DensePoly[ZZ]:
@@ -207,15 +209,49 @@ def _series_inverse(h: DensePoly[ZZ], length: Int, modulus: ZZ, mut budget: Budg
 def _divmod_monic(a: DensePoly[ZZ], h: DensePoly[ZZ], modulus: ZZ, mut budget: Budget) raises PolyError -> Tuple[DensePoly[ZZ], DensePoly[ZZ]]:
     var n = h.degree()
     var m = len(a.coefficients) - n
-    if n >= _FAST_DIVISION and m >= _FAST_DIVISION and modulus.value.magnitude_bit_length() <= _FAST_DIVISION_BITS:
-        # rev(q) = rev(a) / rev(h) modulo x^m, and the remainder is a - q h
-        # below x^n. Both are unique modulo the modulus, as long division's.
-        var inverse = _series_inverse(h, m, modulus, budget)
-        var head = _low(_reverse(a, len(a.coefficients), budget), m, budget)
-        var quotient = _truncate(_reverse(_low_product(head, inverse, m, budget), m, budget), modulus, budget)
-        var remainder = _truncate(_low(a, n, budget).sub(_low_product(quotient, h, n, budget), budget), modulus, budget)
-        return (quotient^, remainder^)
+    if n >= _FAST_DIVISION and m >= _FAST_DIVISION and (m >= _FAST_QUOTIENT or modulus.value.magnitude_bit_length() <= _FAST_BITS):
+        return _block_divmod_monic(a, h, modulus, budget)
     return _long_divmod_monic(a, h, modulus, budget)
+
+
+def _block_divmod_monic(a: DensePoly[ZZ], h: DensePoly[ZZ], modulus: ZZ, mut budget: Budget) raises PolyError -> Tuple[DensePoly[ZZ], DensePoly[ZZ]]:
+    # The quotient comes from the top in blocks of at most n coefficients:
+    # with the top k coefficients of the current remainder reversed, times
+    # the inverse of rev(h) modulo x^k, a block clears them. Quotient and
+    # remainder are unique modulo the modulus, as long division's are.
+    var n = h.degree()
+    var m = len(a.coefficients) - n
+    var inverse = _series_inverse(h, min(n, m), modulus, budget)
+    var r = _slice(_view(a.coefficients), 0, len(a.coefficients), budget)
+    _allocation[ZZ](m, budget)
+    var q = List[ZZ](length=m, fill=ZZ.zero(NoContext()))
+    var top = len(r)
+    while top > n:
+        budget.charge(1)
+        var k = min(n, top - n)
+        var shift = top - n - k
+        _allocation[ZZ](k, budget)
+        var head = List[ZZ](capacity=k)
+        for i in range(k):
+            budget.charge(1)
+            head.append(_copy_coefficient(r[top - 1 - i], budget))
+        var reversed_head = DensePoly[ZZ].from_coefficients(a.variable, NoContext(), head^, budget)
+        var block = _truncate(_reverse(_low_product(reversed_head, _low(inverse, k, budget), k, budget), k, budget), modulus, budget)
+        # The top k coefficients of block * h cancel those of r by construction.
+        var product = _low_product(block, h, n, budget)
+        for i in range(len(product.coefficients)):
+            budget.charge(1)
+            r[shift + i] = r[shift + i].sub(product.coefficients[i], budget)
+        for i in range(len(block.coefficients)):
+            budget.charge(1)
+            q[shift + i] = _copy_coefficient(block.coefficients[i], budget)
+        for i in range(shift, top - k):
+            budget.charge(1)
+            r[i] = ZZ(_symmetric(r[i].value, modulus.value, budget))
+        top -= k
+    var quotient = _truncate(DensePoly[ZZ].from_coefficients(a.variable, NoContext(), q^, budget), modulus, budget)
+    var remainder = _truncate(_low(DensePoly[ZZ].from_coefficients(a.variable, NoContext(), r^, budget), n, budget), modulus, budget)
+    return (quotient^, remainder^)
 
 
 def _long_divmod_monic(a: DensePoly[ZZ], h: DensePoly[ZZ], modulus: ZZ, mut budget: Budget) raises PolyError -> Tuple[DensePoly[ZZ], DensePoly[ZZ]]:
