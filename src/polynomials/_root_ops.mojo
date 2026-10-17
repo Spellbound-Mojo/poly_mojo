@@ -1,13 +1,34 @@
 """Exact scalar comparisons and sign-variation checks, independent of producers."""
+from apn_mojo import Rational
 from ._coefficient_ops import _copy
 from .coefficients import QQ, NoContext
 from .dense import DensePoly
-from .errors import Budget, PolyError
+from .errors import Budget, PolyError, PolyErrorKind
 from .evaluate import evaluate_dense, _derivative_dense
 
 
 def _compare(a: QQ, b: QQ, mut budget: Budget) raises PolyError -> Int:
-    return a.sub(b, budget).value.sign()
+    # Exact ordering without forming the normalized difference.
+    budget.charge(1)
+    try:
+        return _order(a.value, b.value)
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+def _order(a: Rational, b: Rational) raises -> Int:
+    # sign(a - b) by cross-multiplication: two products, no gcd, and no
+    # continued-fraction expansion of nearly equal operands.
+    var sa = a.sign()
+    var sb = b.sign()
+    if sa != sb:
+        return -1 if sa < sb else 1
+    var da = a.denominator()
+    var db = b.denominator()
+    if da == db:
+        var difference = a.numerator() - b.numerator()
+        return difference.sign()
+    return (a.numerator() * db - b.numerator() * da).sign()
 
 
 def _midpoint(a: QQ, b: QQ, mut budget: Budget) raises PolyError -> QQ:
