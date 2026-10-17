@@ -1,5 +1,6 @@
 """Corpus factors and exhaustive small-field irreducibles across explicit seeds."""
 from polynomials import Budget, PolyErrorKind, ModInt, Modulus, DensePoly, MonomialOrder, factor_mod_p, divmod
+from polynomials.finite_field import factor_finite_field
 from support.corpus import read_cases, parse_polynomial, as_mod
 from support.check import Checker
 from polynomials._nmod import _field, _to, _modulus, _Modulus, _rem, _mulmod, _composer, _Composer, _compose
@@ -173,6 +174,33 @@ def spectral_kernels(mut c: Checker) raises:
         c.check(_compose(g, composer, m, field, work) == _compose(g, flat, plain, field, work), "transform composition matches the plain one")
 
 
+def small_field_products(mut c: Checker) raises:
+    """Degree-400 inputs over GF(3) and GF(5), factored through the 32-bit transforms: products rebuild the input, seed independently."""
+    var work = Budget()
+    var state = UInt64(4242)
+    var primes: List[UInt64] = [3, 5]
+    for prime in primes:
+        var ctx = Modulus(prime, work)
+        var values = List[ModInt]()
+        for _ in range(400):
+            state = state * 6364136223846793005 + 1442695040888963407
+            values.append(ModInt((state >> 33) % prime, ctx))
+        values.append(ModInt.one(ctx))
+        var f = DensePoly[ModInt].from_coefficients(0, ctx, values^, work)
+        var first = factor_finite_field(f, work, 0)
+        var rebuilt = DensePoly[ModInt].from_coefficients(0, ctx, [first.unit.copy()], work)
+        for entry in first.factors:
+            for _ in range(entry[1]):
+                rebuilt = rebuilt.mul(entry[0], work)
+        c.check(rebuilt == f, "small-field factor product")
+        var again = factor_finite_field(f, work, 1)
+        var same = len(again.factors) == len(first.factors)
+        if same:
+            for i in range(len(first.factors)):
+                same = same and again.factors[i][0] == first.factors[i][0] and again.factors[i][1] == first.factors[i][1]
+        c.check(same, "small-field factors are seed independent")
+
+
 def planted_binomials(mut c: Checker) raises:
     """Degree 280 over GF(65521) from planted irreducibles: distinct linears and x^r - a for primes r | p - 1 with a no r-th power."""
     var work = Budget()
@@ -248,5 +276,6 @@ def main() raises:
     exhaustive(5, c)
     large_prime(c)
     spectral_kernels(c)
+    small_field_products(c)
     planted_binomials(c)
     c.finish()
