@@ -14,7 +14,7 @@ from .dense import DensePoly
 from .primes import prime, _residue
 from .coefficient_buffer import _view
 from ._ntt import _PRIMES, _PRIME_BITS, _PRIME_COUNT, _series_inverse, _modular_product, _equal_mod, _reconstruct_zz, _bits_zz, _bit_length
-from ._nmod_euclid import _Field, _gcd_words, _resultant_words, _trim_words
+from ._nmod_euclid import _Field, _gcd_words, _resultant_words, _trim_words, _inverse_mod
 
 
 struct _Reconstruction(Movable):
@@ -207,33 +207,127 @@ def _hadamard_bits(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Int
     return top + (count_bits + 1) // 2
 
 
+comptime _SMALL_TOP = UInt64(1) << 30
+"""Resultant images use primes below this bound, where the Euclidean kernel vectorizes."""
+comptime _SIEVE_SPAN = 1 << 14
+comptime _SMALL_RESULTANT_BITS = 2048
+"""Hadamard bounds above this many bits amortize sieving the small primes."""
+
+
+struct _SmallPrimes(Movable):
+    """The primes between 2^29 and 2^30 in descending order, found by a segmented sieve as needed."""
+    var base: List[UInt64]
+    var found: List[UInt64]
+    var position: Int
+    var top: UInt64
+
+    def __init__(out self):
+        """An empty sequence, for callers that will not draw from it."""
+        self.base = List[UInt64]()
+        self.found = List[UInt64]()
+        self.position = 0
+        self.top = 0
+
+    def __init__(out self, mut budget: Budget) raises PolyError:
+        # Odd primes up to 2^15, enough to sieve any segment below 2^30.
+        comptime limit = 1 << 15
+        _charge_size(limit, budget)
+        var composite = List[Bool](length=limit + 1, fill=False)
+        self.base = List[UInt64]()
+        for i in range(3, limit + 1, 2):
+            if composite[i]:
+                continue
+            self.base.append(UInt64(i))
+            for j in range(i * i, limit + 1, 2 * i):
+                composite[j] = True
+        self.found = List[UInt64]()
+        self.position = 0
+        self.top = _SMALL_TOP
+
+    def next(mut self, mut budget: Budget) raises PolyError -> UInt64:
+        while self.position == len(self.found):
+            # Callers count 29 bits per prime, so the sequence stops at 2^29.
+            if self.top <= (UInt64(1) << 29) + UInt64(_SIEVE_SPAN):
+                raise PolyError(PolyErrorKind.CAPACITY, "small prime sequence exhausted")
+            var low = self.top - UInt64(_SIEVE_SPAN)
+            _charge_size(_SIEVE_SPAN + len(self.base), budget)
+            var composite = List[Bool](length=_SIEVE_SPAN, fill=False)
+            for q in self.base:
+                var start = ((low + q - 1) // q) * q
+                var j = Int(start - low)
+                while j < _SIEVE_SPAN:
+                    composite[j] = True
+                    j += Int(q)
+            self.found.clear()
+            self.position = 0
+            for j in range(_SIEVE_SPAN - 1, -1, -1):
+                if not composite[j] and ((low + UInt64(j)) & 1):
+                    self.found.append(low + UInt64(j))
+            self.top = low
+        var p = self.found[self.position]
+        self.position += 1
+        return p
+
+
 def _modular_resultant(fd: DensePoly[ZZ], gd: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Integer:
-    """The resultant of two integer polynomials of positive degree, by CRT up to the Hadamard bound."""
+    """The resultant of two integer polynomials of positive degree, by CRT up to the Hadamard bound.
+
+    Bounds above _SMALL_RESULTANT_BITS take images modulo primes below 2^30,
+    whose Euclidean kernel vectorizes, combining pairs of images in one word
+    before each big-integer merge; smaller ones use the cached 62-bit primes
+    and skip the sieve.
+    """
     var m = fd.degree()
     var n = gd.degree()
     # |res| <= ||f||^n ||g||^m; the symmetric range needs one more bit.
     var bits = _sum(_sum(n * _hadamard_bits(fd, budget), m * _hadamard_bits(gd, budget)), 2)
+    var small = bits > _SMALL_RESULTANT_BITS
     var values = _Reconstruction(1, budget)
     var covered = 0
     var index = 0
+    var primes = _SmallPrimes()
+    if small:
+        primes = _SmallPrimes(budget)
     var residue = List[UInt64](length=1, fill=0)
     var fw = _Words(fd, budget)
     var gw = _Words(gd, budget)
+    var pending = UInt64(0)
+    var pending_prime = UInt64(0)
     while covered < bits:
         budget.charge(1)
-        var p = prime(index, budget)
-        index = _sum(index, 1)
+        var p: UInt64
+        if small:
+            p = primes.next(budget)
+        else:
+            p = prime(index, budget)
+            index = _sum(index, 1)
         var field = _Field.of(p)
         var a = fw.residues(field, budget)
         var b = gw.residues(field, budget)
         if a[m] == 0 or b[n] == 0:
             continue
-        residue[0] = field.leave(_resultant_words(a^, b^, field, budget))
-        _ = values.merge(residue, p, budget)
+        var r = field.leave(_resultant_words(a^, b^, field, budget))
         var floor_log = 0
         while (p >> UInt64(floor_log + 1)) != 0:
             floor_log += 1
         covered = _sum(covered, floor_log)
+        if not small:
+            residue[0] = r
+            _ = values.merge(residue, p, budget)
+            continue
+        if pending_prime == 0:
+            pending = r
+            pending_prime = p
+            continue
+        # x = pending + q t with t = (r - pending) / q mod p, below q p < 2^60.
+        var q = pending_prime
+        var t = ((r + p - pending % p) % p) * _inverse_mod(q % p, p) % p
+        residue[0] = pending + q * t
+        _ = values.merge(residue, q * p, budget)
+        pending_prime = 0
+    if pending_prime:
+        residue[0] = pending
+        _ = values.merge(residue, pending_prime, budget)
     return values.values[0].copy()
 
 
