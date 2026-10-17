@@ -2163,17 +2163,53 @@ struct _LaneRow(Movable):
         self.columns.clear()
         self.residues.clear()
 
-    def add(mut self, columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factor: _Lanes, squares: _Lanes, skip: Int):
+    def add(mut self, columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factor: SIMD[DType.uint32, _LANES], squares: _Lanes, skip: Int):
         """Add factor times a row of residues, after its first `skip` entries; entries stay below p^2."""
-        var data = self.data.unsafe_ptr()
-        var marks = self.marks.unsafe_ptr()
-        for k in range(skip, n):
-            var c = Int(columns.unsafe_offset(k).unsafe_load())
-            var at = data.unsafe_offset(_LANES * c)
-            var x = at.unsafe_load[width=_LANES]() + factor * values.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
+        _lanes_add[_LANES, True](self.data.unsafe_ptr(), self.marks.unsafe_ptr(), columns, values, n, factor, squares, skip)
+
+
+@no_inline
+def _lanes_add[S: Int, reduce: Bool](data: Pointer[mut=True, UInt64, _], marks: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factors: SIMD[DType.uint32, _LANES], squares: _Lanes, skip: Int):
+    """Add factors times a row of residues, after its first `skip` entries, to every lane of a dense row whose columns are S apart, and mark the columns.
+
+    With `reduce` each entry is brought below p^2 again. Both factors widen
+    from 32 bits, so each product is one 32 by 32 bit multiplication; this
+    stays out of line, since inlined the widening is lost before instructions
+    are selected.
+    """
+    var factor = factors.cast[DType.uint64]()
+    for k in range(skip, n):
+        var c = Int(columns.unsafe_offset(k).unsafe_load())
+        var at = data.unsafe_offset(S * c)
+        var x = at.unsafe_load[width=_LANES]() + factor * values.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
+        comptime if reduce:
             at.unsafe_store[width=_LANES](x.ge(squares).select(x - squares, x))
-            var word = marks.unsafe_offset(c >> 6)
-            word.unsafe_store(word.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
+        else:
+            at.unsafe_store[width=_LANES](x)
+        var mw = marks.unsafe_offset(c >> 6)
+        mw.unsafe_store(mw.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
+
+
+@no_inline
+def _lanes_add_two[reduce: Bool](data: Pointer[mut=True, UInt64, _], marks: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], others: Pointer[mut=False, UInt32, _], n: Int, factors: SIMD[DType.uint32, _LANES], more: SIMD[DType.uint32, _LANES], squares: _Lanes, more_squares: _Lanes, skip: Int):
+    """As `_lanes_add` for two batches, `_LANES` apart in each column."""
+    comptime S = 2 * _LANES
+    var f0 = factors.cast[DType.uint64]()
+    var f1 = more.cast[DType.uint64]()
+    for k in range(skip, n):
+        var c = Int(columns.unsafe_offset(k).unsafe_load())
+        var at = data.unsafe_offset(S * c)
+        var x = at.unsafe_load[width=_LANES]() + f0 * values.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
+        var at1 = at.unsafe_offset(_LANES)
+        var y = at1.unsafe_load[width=_LANES]() + f1 * others.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
+        comptime if reduce:
+            at.unsafe_store[width=_LANES](x.ge(squares).select(x - squares, x))
+            at1.unsafe_store[width=_LANES](y.ge(more_squares).select(y - more_squares, y))
+        else:
+            at.unsafe_store[width=_LANES](x)
+            at1.unsafe_store[width=_LANES](y)
+        var mw = marks.unsafe_offset(c >> 6)
+        mw.unsafe_store(mw.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
 
 
 def _lane_pass_two[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], values: List[List[UInt32]], others: List[List[UInt32]], primes: _Primes, more: _Primes, a: Int, b: Int, batch: Int, limit: Int, mut budget: Budget) raises PolyError -> Bool:
@@ -2187,18 +2223,9 @@ def _lane_pass_two[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[
         var s = matrix.starts[r]
         var n = matrix.starts[r + 1] - s
         var columns = matrix.entries.unsafe_ptr().unsafe_offset(s)
-        var v0 = values[matrix.sources[r]].unsafe_ptr()
-        var v1 = others[matrix.sources[r]].unsafe_ptr()
-        var f0 = _Lanes(1) if half == 0 else primes.primes - 1
-        var f1 = _Lanes(1) if half == 0 else more.primes - 1
-        for k in range(n):
-            var c = Int(columns.unsafe_offset(k).unsafe_load())
-            var at = data.unsafe_offset(S * c)
-            at.unsafe_store[width=_LANES](at.unsafe_load[width=_LANES]() + f0 * v0.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]())
-            var at1 = at.unsafe_offset(_LANES)
-            at1.unsafe_store[width=_LANES](at1.unsafe_load[width=_LANES]() + f1 * v1.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]())
-            var word = marks.unsafe_offset(c >> 6)
-            word.unsafe_store(word.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
+        var f0 = SIMD[DType.uint32, _LANES](1) if half == 0 else (primes.primes - 1).cast[DType.uint32]()
+        var f1 = SIMD[DType.uint32, _LANES](1) if half == 0 else (more.primes - 1).cast[DType.uint32]()
+        _lanes_add_two[False](data, marks, columns, values[matrix.sources[r]].unsafe_ptr(), others[matrix.sources[r]].unsafe_ptr(), n, f0, f1, primes.squares, more.squares, 0)
     budget.charge(UInt64(S * (matrix.starts[a + 1] - matrix.starts[a] + matrix.starts[b + 1] - matrix.starts[b])))
     data.unsafe_offset(S * first).unsafe_store[width=_LANES](_Lanes(0))
     data.unsafe_offset(S * first + _LANES).unsafe_store[width=_LANES](_Lanes(0))
@@ -2228,22 +2255,10 @@ def _lane_pass_two[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[
             var s = matrix.starts.unsafe_get(q)
             var n = matrix.starts.unsafe_get(q + 1) - s
             budget.charge(UInt64(S * n))
-            var f0 = u.eq(0).select(_Lanes(0), primes.primes - u)
-            var f1 = w.eq(0).select(_Lanes(0), more.primes - w)
-            var columns = matrix.entries.unsafe_ptr().unsafe_offset(s)
+            var f0 = u.eq(0).select(_Lanes(0), primes.primes - u).cast[DType.uint32]()
+            var f1 = w.eq(0).select(_Lanes(0), more.primes - w).cast[DType.uint32]()
             var g = matrix.sources.unsafe_get(q)
-            var v0 = values[g].unsafe_ptr()
-            var v1 = others[g].unsafe_ptr()
-            for k in range(1, n):
-                var e = Int(columns.unsafe_offset(k).unsafe_load())
-                var to0 = data.unsafe_offset(S * e)
-                var x = to0.unsafe_load[width=_LANES]() + f0 * v0.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
-                to0.unsafe_store[width=_LANES](x.ge(primes.squares).select(x - primes.squares, x))
-                var to1 = to0.unsafe_offset(_LANES)
-                var y = to1.unsafe_load[width=_LANES]() + f1 * v1.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
-                to1.unsafe_store[width=_LANES](y.ge(more.squares).select(y - more.squares, y))
-                var word = marks.unsafe_offset(e >> 6)
-                word.unsafe_store(word.unsafe_load() | (UInt64(1) << UInt64(e & 63)))
+            _lanes_add_two[True](data, marks, matrix.entries.unsafe_ptr().unsafe_offset(s), values[g].unsafe_ptr(), others[g].unsafe_ptr(), n, f0, f1, primes.squares, more.squares, 1)
         c = lanes.next_marked(c + 1)
     return True
 
@@ -2259,8 +2274,8 @@ def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int]
     var data = lanes.data.unsafe_ptr()
     var sa = matrix.starts[a]
     var sb = matrix.starts[b]
-    lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sa), values[matrix.sources[a]].unsafe_ptr(), matrix.starts[a + 1] - sa, _Lanes(1), primes.squares, 0)
-    lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sb), values[matrix.sources[b]].unsafe_ptr(), matrix.starts[b + 1] - sb, primes.primes - 1, primes.squares, 0)
+    lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sa), values[matrix.sources[a]].unsafe_ptr(), matrix.starts[a + 1] - sa, SIMD[DType.uint32, _LANES](1), primes.squares, 0)
+    lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sb), values[matrix.sources[b]].unsafe_ptr(), matrix.starts[b + 1] - sb, (primes.primes - 1).cast[DType.uint32](), primes.squares, 0)
     budget.charge(UInt64(_LANES * (matrix.starts[a + 1] - sa + matrix.starts[b + 1] - sb)))
     var first = Int(matrix.entries[sa])
     data.unsafe_offset(_LANES * first).unsafe_store[width=_LANES](_Lanes(0))
@@ -2287,7 +2302,7 @@ def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int]
             var s = matrix.starts.unsafe_get(q)
             var n = matrix.starts.unsafe_get(q + 1) - s
             budget.charge(UInt64(_LANES * n))
-            var factor = v.eq(0).select(_Lanes(0), primes.primes - v)
+            var factor = v.eq(0).select(_Lanes(0), primes.primes - v).cast[DType.uint32]()
             lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(s), values[matrix.sources.unsafe_get(q)].unsafe_ptr(), n, factor, primes.squares, 1)
         c = lanes.next_marked(c + 1)
     return True
