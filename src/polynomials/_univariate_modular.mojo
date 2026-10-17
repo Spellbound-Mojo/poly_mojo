@@ -27,6 +27,13 @@ struct _Reconstruction(Movable):
         self.values = List[Integer](length=count, fill=Integer(0))
         self.modulus = Integer(1)
 
+    def headroom(self) -> Int:
+        """The bits between the largest value and half the modulus."""
+        var top = 0
+        for i in range(len(self.values)):
+            top = max(top, self.values[i].magnitude_bit_length())
+        return self.modulus.magnitude_bit_length() - 1 - top
+
     def merge(mut self, residues: List[UInt64], p: UInt64, mut budget: Budget) raises PolyError -> Bool:
         """Fold standard residues modulo p into the values; return whether any value changed."""
         var field = _Field.of(p)
@@ -324,7 +331,11 @@ def _univariate_gcd(f: DensePoly[ZZ], h: DensePoly[ZZ], mut budget: Budget) rais
             image[i] = field.leave(field.mul(image[i], scale))
         var changed = values.merge(image, p, budget)
         used = _sum(used, 1)
-        if used > 1 and not changed:
+        # Exact division decides; it is tried once the images agree or every
+        # reconstructed coefficient sits 16 bits inside the symmetric range,
+        # which an incomplete reconstruction of two or more random
+        # coefficients does with probability below 2^-32.
+        if (used > 1 and not changed) or values.headroom() >= 16:
             _allocation[ZZ](best + 1, budget)
             var coefficients = List[ZZ](capacity=best + 1)
             for i in range(best + 1):
