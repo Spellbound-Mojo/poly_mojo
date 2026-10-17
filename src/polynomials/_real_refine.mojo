@@ -17,6 +17,7 @@ from .division import divmod
 from ._images import _integer_dense
 from ._integer_ops import _primitive
 from ._root_ops import _order
+from .certificates import SturmSequence, _IntegerChain, _integer_variations
 
 
 struct _RootOracle(Copyable, Movable):
@@ -276,25 +277,37 @@ def _qir_step(oracle: _RootOracle, mut enclosure: _Enclosure, mut budget: Budget
     return _side(oracle, enclosure, QQ(below^), budget) >= 0
 
 
-def _oracle_split(oracle: _RootOracle, mut enclosure: _Enclosure, low: QQ, high: QQ, degree: Int, mut budget: Budget) raises PolyError -> Tuple[QQ, Int]:
+def _oracle_split(oracle: _RootOracle, mut enclosure: _Enclosure, low: QQ, high: QQ, degree: Int, absolute_bits: Int, mut budget: Budget) raises PolyError -> Tuple[QQ, Int]:
     """The cover's split point for a single-root cell and the side of its root.
 
     The candidates and their order are those of the Sturm path: the first
     k/(k+1) point of the cell that is not a root of f, and the only root of f
-    in the cell is the enclosed root. The enclosure is tightened to below the
-    cell width / 2**32 only when a candidate falls inside it.
+    in the cell is the enclosed root. When a candidate falls inside the
+    enclosure and the cell still needs more than a few halvings for an
+    absolute target of 2^-absolute_bits (or any target when absolute_bits is
+    zero), the enclosure is tightened by QIR to below the cell width / 2^guard,
+    guard = min(32, needed + 2); otherwise one sign evaluation decides.
     """
-    var width = high.sub(low, budget)
+    var width = Optional[QQ]()
     for k in range(1, degree + 2):
         var middle: QQ
         var dyadic = _dyadic_midpoint(low, high) if k == 1 else Optional[QQ]()
         if dyadic:
             middle = dyadic.take()
         else:
+            if not width:
+                width = high.sub(low, budget)
             var fraction = QQ(Rational(k)).mul(QQ(Rational(k + 1)).inverse(budget), budget)
-            middle = low.add(width.mul(fraction, budget), budget)
+            middle = low.add(width.value().mul(fraction, budget), budget)
         if _compare_enclosure(enclosure, middle.value) == 2:
-            _tighten(oracle, enclosure, width, 32, budget)
+            if not width:
+                width = high.sub(low, budget)
+            var needed = 64
+            if absolute_bits > 0:
+                ref span = width.value().value
+                needed = max(0, _bits(span.numerator()) - _bits(span.denominator()) + 1 + absolute_bits)
+            if needed > 4:
+                _tighten(oracle, enclosure, width.value(), min(32, needed + 2), budget)
         var side = _side(oracle, enclosure, middle, budget)
         if side != 0:
             return (middle^, side)
@@ -322,3 +335,108 @@ def _dyadic_midpoint(low: QQ, high: QQ) raises PolyError -> Optional[QQ]:
         return QQ(Rational(_numerator=total >> strip, _denominator=Integer(1) << (e + 1 - strip)))
     except e:
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+@fieldwise_init
+struct _IsolationTask(Movable):
+    var low: QQ
+    var high: QQ
+    var low_variations: Int
+    var high_variations: Int
+
+
+def _isolate_all(oracle: _RootOracle, chain: _IntegerChain, sequence: SturmSequence, mut budget: Budget) raises PolyError -> List[_Enclosure]:
+    """Enclose every distinct real root, in increasing order.
+
+    Bisection of (-2^bound, 2^bound) at dyadic points, whose chain values
+    stay small, until each interval holds one root. Cuts avoid roots (the
+    nearest nonroot point of a finer dyadic grid), so every enclosure has
+    nonroot endpoints and no one-sided variations are needed.
+    """
+    var roots = List[_Enclosure]()
+    var bound: QQ
+    try:
+        bound = QQ(Rational(Integer(1) << chain.bound)) if chain.bound >= 0 else QQ(Rational(Integer(1), Integer(1) << -chain.bound))
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    var low = bound.neg(budget)
+    var tasks = List[_IsolationTask]()
+    tasks.append(_IsolationTask(low.copy(), bound.copy(), _integer_variations(chain, sequence, low, budget), _integer_variations(chain, sequence, bound, budget)))
+    while len(tasks):
+        budget.charge(1)
+        var task = tasks.pop()
+        var count = task.low_variations - task.high_variations
+        if count == 0:
+            continue
+        if count == 1:
+            var left = _check_sign(oracle, task.low.value, budget)
+            roots.append(_Enclosure(task.low.value.copy(), task.high.value.copy(), left, False, 2))
+            continue
+        var m = _nonroot_cut(oracle, task.low, task.high, budget)
+        var at = _integer_variations(chain, sequence, m, budget)
+        tasks.append(_IsolationTask(m.copy(), task.high.copy(), at, task.high_variations))
+        tasks.append(_IsolationTask(task.low.copy(), m^, task.low_variations, at))
+    return roots^
+
+
+def _nonroot_cut(oracle: _RootOracle, low: QQ, high: QQ, mut budget: Budget) raises PolyError -> QQ:
+    # The midpoint, or else the grid point nearest to it on ever finer
+    # dyadic grids that is not a root of g; finitely many roots end the search.
+    var parts = 2
+    while True:
+        var width = high.sub(low, budget)
+        var center = parts // 2
+        for offset in range(parts // 2):
+            for direction in [-1, 1]:
+                if offset == 0 and direction > 0:
+                    continue
+                var j = center + direction * offset
+                if j <= 0 or j >= parts or (j % 2 == 0 and parts > 2):
+                    continue
+                var fraction = QQ(Rational(j)).mul(QQ(Rational(parts)).inverse(budget), budget)
+                var point = low.add(width.mul(fraction, budget), budget)
+                if _check_sign(oracle, point.value, budget) != 0:
+                    return point^
+        parts *= 2
+
+
+def _locate(oracle: _RootOracle, mut roots: List[_Enclosure], start: Int, end: Int, m: QQ, mut budget: Budget) raises PolyError -> Tuple[Int, Bool]:
+    """The index in [start, end] of the first enclosed root above m, and whether a root equals m."""
+    var lo = start
+    var hi = end
+    while lo < hi:
+        budget.charge(1)
+        var middle = (lo + hi) // 2
+        var side = _compare_enclosure(roots[middle], m.value)
+        if side == 2:
+            side = _side(oracle, roots[middle], m, budget)
+        if side == 0:
+            return (middle, True)
+        if side < 0:
+            lo = middle + 1
+        else:
+            hi = middle
+    return (lo, False)
+
+
+def _ranged_split(oracle: _RootOracle, mut roots: List[_Enclosure], start: Int, end: Int, low: QQ, high: QQ, degree: Int, mut budget: Budget) raises PolyError -> Tuple[QQ, Int]:
+    """The cover's split point for a cell holding roots[start:end], and the index splitting them.
+
+    Candidates follow the Sturm path (the first k/(k+1) point that is not a
+    root of f); the roots of f in the cell are exactly the enclosed ones.
+    """
+    var width = Optional[QQ]()
+    for k in range(1, degree + 2):
+        var middle: QQ
+        var dyadic = _dyadic_midpoint(low, high) if k == 1 else Optional[QQ]()
+        if dyadic:
+            middle = dyadic.take()
+        else:
+            if not width:
+                width = high.sub(low, budget)
+            var fraction = QQ(Rational(k)).mul(QQ(Rational(k + 1)).inverse(budget), budget)
+            middle = low.add(width.value().mul(fraction, budget), budget)
+        var found = _locate(oracle, roots, start, end, middle, budget)
+        if not found[1]:
+            return (middle^, found[0])
+    raise PolyError(PolyErrorKind.DOMAIN, "cell has no nonroot split")
