@@ -5,8 +5,7 @@ from .coefficients import QQ, NoContext
 from .dense import DensePoly
 from .certificates import SturmSequence, RootCountCertificate, check_root_count, _check_root_count_parts, _dense_equal
 from ._dense_ops import _copy as _copy_poly
-from ._root_ops import _compare as _compare_q, _copy as _copy_q
-from .evaluate import evaluate_dense
+from ._root_ops import _compare as _compare_q, _copy as _copy_q, _sign_at
 
 
 @fieldwise_init
@@ -75,7 +74,7 @@ def _check_real(a: RealAlgebraic, mut budget: Budget) raises PolyError -> Bool:
     if _compare_q(a.polynomial.coefficients[a.polynomial.degree()], QQ.one(NoContext()), budget) != 0:
         return False
     if a.rational:
-        return a.polynomial.degree() == 1 and _compare_q(a.low, a.high, budget) == 0 and evaluate_dense(a.polynomial, a.low, budget).is_zero() and len(a.sequence.polynomials) == 0 and len(a.sequence.quotients) == 0
+        return a.polynomial.degree() == 1 and _compare_q(a.low, a.high, budget) == 0 and _sign_at(a.polynomial, a.low, budget) == 0 and len(a.sequence.polynomials) == 0 and len(a.sequence.quotients) == 0
     return _check_root_count_parts(a.polynomial, a.sequence, a.low, a.high, 1, budget)
 
 
@@ -104,7 +103,7 @@ def _check_comparison(a: RealAlgebraic, b: RealAlgebraic, proof: AlgebraicCompar
         ref other = proof.right if proof.left.rational else proof.left
         if other.rational:
             return _compare_q(point, other.low, budget) == 0
-        return _compare_q(other.low, point, budget) < 0 and _compare_q(point, other.high, budget) < 0 and evaluate_dense(other.polynomial, point, budget).is_zero()
+        return _compare_q(other.low, point, budget) < 0 and _compare_q(point, other.high, budget) < 0 and _sign_at(other.polynomial, point, budget) == 0
     if not proof.shared:
         return False
     ref shared = proof.shared.value()

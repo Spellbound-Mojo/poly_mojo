@@ -9,8 +9,7 @@ from .algebraic_arithmetic import AlgebraicArithmeticCertificate
 from ._algebraic import _rational, _root_cached, _NormalizationCache, _sturm_index, _refine, _sign
 from ._algebraic_ops import _binary_definitions, _unary_definition, _operation_bounds, _rational_operation
 from ._dense_ops import _exact
-from ._root_ops import _copy as _copy_q, _variations
-from .evaluate import evaluate_dense
+from ._root_ops import _copy as _copy_q, _variations, _sign_at
 from .resultant import resultant
 
 
@@ -53,7 +52,7 @@ def _arithmetic_cached(a: RealAlgebraic, b: RealAlgebraic, op: Int, mut cache: _
             _refine(left, budget)
             continue
         var bounds = _operation_bounds(left, right, op, budget)
-        if not evaluate_dense(h, bounds[0], budget).is_zero() and not evaluate_dense(h, bounds[1], budget).is_zero():
+        if not _sign_at(h, bounds[0], budget) == 0 and not _sign_at(h, bounds[1], budget) == 0:
             if _variations(cache.sequences[sequence_index].polynomials, bounds[0], budget) - _variations(cache.sequences[sequence_index].polynomials, bounds[1], budget) == 1:
                 var value = _root_cached(h, bounds[0], bounds[1], cache, budget)
                 var value_factor = _exact(h, value.polynomial, budget)

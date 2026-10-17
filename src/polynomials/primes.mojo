@@ -29,19 +29,27 @@ def _stop_cache(ctx: _Context):
         dealloc(ThinAllocation(unsafe_owned_ptr=pointer).unsafe_with_layout(Layout[_PrimeCache](count=1)))
 
 
-def _extend(mut values: List[UInt64], i: Int, mut budget: Budget) raises PolyError -> UInt64:
+comptime _PRIME_WORK = UInt64(128)
+"""The work one `prime` call charges, whatever the cache holds."""
+
+
+def _extend(mut values: List[UInt64], i: Int) raises PolyError -> UInt64:
+    # The search is not charged to the caller, whose fixed charge must not
+    # depend on what earlier calls left in the cache; a caller reaches index i
+    # only through calls it paid for, so the search stays bounded by them.
+    var work = Budget()
     var candidate = (UInt64(1) << 62) - 1
     if len(values):
         candidate = values[len(values) - 1] - 1
         if candidate > 2 and candidate % 2 == 0:
             candidate -= 1
     while len(values) <= i:
-        budget.charge(1)
+        work.charge(1)
         if candidate < 2:
             raise PolyError(PolyErrorKind.CAPACITY, "prime sequence exhausted")
-        if _prime(candidate, budget):
+        if _prime(candidate, work):
             _ = _sum(len(values), 1)
-            _allocation[UInt64](1, budget)
+            _allocation[UInt64](1, work)
             values.append(candidate)
         candidate = candidate - 2 if candidate > 3 else candidate - 1
     return values[i]
@@ -49,6 +57,9 @@ def _extend(mut values: List[UInt64], i: Int, mut budget: Budget) raises PolyErr
 
 def prime(i: Int, mut budget: Budget) raises PolyError -> UInt64:
     """Return a cached prime from the fixed descending sequence below 2**62.
+
+    Every call charges the same fixed work, whatever the cache holds, so a
+    computation is charged the same however often it runs.
 
     Args:
         i: The zero-based sequence index.
@@ -60,7 +71,7 @@ def prime(i: Int, mut budget: Budget) raises PolyError -> UInt64:
     Raises:
         PolyError: DOMAIN for a negative index, LIMIT or CAPACITY on work limits.
     """
-    budget.charge(1)
+    budget.charge(_PRIME_WORK)
     if i < 0:
         raise PolyError(PolyErrorKind.DOMAIN, "negative prime index")
     _allocation[_PrimeCache](1, budget)
@@ -69,10 +80,10 @@ def prime(i: Int, mut budget: Budget) raises PolyError -> UInt64:
     if not cache[].busy.compare_exchange[success_ordering=Ordering.ACQUIRE, failure_ordering=Ordering.RELAXED](expected, 1):
         # Contention does not spin or spend an unpredictable wait budget.
         var local = List[UInt64]()
-        return _extend(local, i, budget)
+        return _extend(local, i)
     var result: UInt64
     try:
-        result = _extend(cache[].values, i, budget)
+        result = _extend(cache[].values, i)
     except e:
         cache[].busy.store[ordering=Ordering.RELEASE](0)
         raise e^
