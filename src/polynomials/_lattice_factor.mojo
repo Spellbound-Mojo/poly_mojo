@@ -9,7 +9,8 @@ from .dense import DensePoly
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product, _sum
 from ._coefficient_ops import _exact, _copy as _zcopy
 from ._dense_ops import _copy, _constant
-from ._hensel import _HenselState, _hensel_start, _hensel_extend, _truncate, _primitive, _trial_divide
+from ._hensel import _HenselState, _hensel_start, _hensel_extend, _truncate, _primitive, _trial_divide, _divmod_monic
+from ._dense_ops import _derivative
 from .primes import _symmetric
 from ._lattice import _lll, _lll_knapsack, _q
 from ._root_ops import _compare, _copy as _copy_q
@@ -100,6 +101,78 @@ def _partition(rows: List[List[QQ]], count: Int, mut budget: Budget) raises Poly
     return True
 
 
+def _shifted_upper(value: Integer, shift: Int) raises PolyError -> Integer:
+    """An upper bound on value * 2^shift for value >= 0."""
+    try:
+        if shift >= 0:
+            return value << shift
+        return (value >> (-shift)) + Integer(1)
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+def _cld_bound(f: DensePoly[ZZ], j: Int, mut budget: Budget) raises PolyError -> ZZ:
+    """A bound on |coefficient j of f g'/g| over every factor g of f.
+
+    f g'/g sums f/(x - a) over the roots a of g, and coefficient j of
+    f/(x - a) equals sum_(i>j) f_i a^(i-j-1) = -sum_(i<=j) f_i a^(i-j-1). The
+    first sum grows with |a| and the second shrinks, so for any t = 2^e the
+    larger of the two at t bounds every root; deg(f) times it bounds the sum.
+    The exponent e is chosen near the crossing from bit lengths.
+    """
+    var n = f.degree()
+    var bits = List[Int](capacity=n + 1)
+    for i in range(n + 1):
+        bits.append(f.coefficients[i].value.magnitude_bit_length())
+    var hi = 0
+    for b in bits:
+        hi = max(hi, b + 64)
+    var lo = -hi
+    # Smallest e whose estimated first sum reaches the second.
+    while lo < hi:
+        budget.charge(1)
+        var mid = (lo + hi) // 2 if (lo + hi) >= 0 else -((-(lo + hi) + 1) // 2)
+        var la = -1 << 30
+        var lb = -1 << 30
+        for i in range(n + 1):
+            if bits[i] == 0:
+                continue
+            var size = bits[i] + mid * (i - j - 1)
+            if i > j:
+                la = max(la, size)
+            else:
+                lb = max(lb, size)
+        if la >= lb:
+            hi = mid
+        else:
+            lo = mid + 1
+    var best = ZZ.zero(NoContext())
+    var found = False
+    for e in [lo - 1, lo]:
+        _work(n, 1, False, budget)
+        var first = Integer(0)
+        var second = Integer(0)
+        for i in range(n + 1):
+            var magnitude = f.coefficients[i].value.copy()
+            if magnitude.sign() == 0:
+                continue
+            if magnitude.sign() < 0:
+                magnitude = -magnitude
+            var term = _shifted_upper(magnitude, e * (i - j - 1))
+            try:
+                if i > j:
+                    first = first + term
+                else:
+                    second = second + term
+            except err:
+                raise PolyError(PolyErrorKind.CAPACITY, String(err))
+        var larger = ZZ(first.copy() if first > second else second.copy())
+        if not found or _greater(best, larger, budget):
+            best = larger^
+            found = True
+    return best.mul(ZZ(Integer(n)), budget)
+
+
 def _van_hoeij(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconstruction_bound: ZZ, mut budget: Budget) raises PolyError -> List[DensePoly[ZZ]]:
     var state = _hensel_start(images, budget)
     return _van_hoeij_lifted(f, images, reconstruction_bound, state, budget)
@@ -120,6 +193,11 @@ def _van_hoeij_lifted(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconst
     ref lc = f.coefficients[f.degree()]
     var leading = lc.neg(budget) if lc.value.sign() < 0 else _zcopy(lc, budget)
     root_bound = root_bound.add(leading, budget)
+    # Power sums of the roots need precision about (|lc|+max|f_i|)^k for
+    # the k-th one. With a large leading coefficient and degree, that drives
+    # lifting far beyond the reconstruction bound, and coefficients of the
+    # logarithmic derivative (CLD), bounded near the size of f, are cheaper.
+    var monic = leading.value.magnitude_bit_length() < 1024 or f.degree() < 300
     # Gradual feeding: the reduced basis rows persist, and each round
     # appends only new trace columns, each at its own precision
     # cut_j * padding, so every new entry is about the padding in size. Rows whose exact Gram-Schmidt norm exceeds the bound
@@ -131,6 +209,16 @@ def _van_hoeij_lifted(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconst
     var done = 0
     var data_columns = 0
     var traces_count = min(f.degree(), 2)
+    # CLD indices from both ends inward: 0, n-1, 1, n-2, ...
+    var order = List[Int]()
+    var low_index = 0
+    var high_index = f.degree() - 1
+    while low_index <= high_index:
+        order.append(low_index)
+        if high_index != low_index:
+            order.append(high_index)
+        low_index += 1
+        high_index -= 1
     # Each column must add clearly more than about one bit per modular factor,
     # or LLL cannot push the false indicators above the bound.
     var padding = _zcopy(p, budget)
@@ -139,48 +227,88 @@ def _van_hoeij_lifted(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconst
         padding = padding.mul(p, budget)
     while True:
         budget.charge(1)
-        # For a rational factor, lc(f)^k * Tr_k is an integer with
-        # absolute value at most degree(f)*(|lc(f)|+max |f_i|)^k.
-        _allocation[ZZ](traces_count, budget)
-        var cuts = List[ZZ]()
-        var power = ZZ.one(NoContext())
-        var largest_cut = ZZ.one(NoContext())
-        for _ in range(traces_count):
-            budget.charge(1)
-            power = power.mul(root_bound, budget)
-            var bound = power.mul(ZZ(Integer(_product(2, f.degree()))), budget)
-            var cut = ZZ.one(NoContext())
-            while not _greater(cut, bound, budget):
-                budget.charge(1)
-                cut = cut.mul(p, budget)
-            largest_cut = _zcopy(cut, budget)
-            cuts.append(cut^)
-        var target = largest_cut.mul(padding, budget)
-        var lifting = _zcopy(target, budget)
-        if _greater(reconstruction_bound, lifting, budget):
-            lifting = _zcopy(reconstruction_bound, budget)
-        _hensel_extend(f, images, lifting, state, budget)
-        ref lifted = state.lifted
-        ref modulus = state.modulus
-        # columns[i][j] = (lc^(j+1) Tr_(j+1)(g_i) mod cut_j*padding - low) / cut_j.
         var fresh = traces_count - done
         _allocation[List[ZZ]](count, budget)
         var columns = List[List[ZZ]](capacity=count)
-        for i in range(count):
-            budget.charge(1)
-            var sums = _traces(lifted[i], traces_count, modulus, budget)
-            var scale = ZZ.one(NoContext())
-            var row = List[ZZ](capacity=fresh)
-            for j in range(traces_count):
+        if monic:
+            # For a rational factor, lc(f)^k * Tr_k is an integer with
+            # absolute value at most degree(f)*(|lc(f)|+max |f_i|)^k.
+            _allocation[ZZ](traces_count, budget)
+            var cuts = List[ZZ]()
+            var power = ZZ.one(NoContext())
+            var largest_cut = ZZ.one(NoContext())
+            for _ in range(traces_count):
                 budget.charge(1)
-                scale = ZZ(_symmetric(scale.mul(leading, budget).value, modulus.value, budget))
-                if j < done:
-                    continue
-                var precision = cuts[j].mul(padding, budget)
-                var trace = ZZ(_symmetric(sums[j + 1].mul(scale, budget).value, precision.value, budget))
-                var low = ZZ(_symmetric(trace.value, cuts[j].value, budget))
-                row.append(_exact(trace.sub(low, budget), cuts[j], budget))
-            columns.append(row^)
+                power = power.mul(root_bound, budget)
+                var bound = power.mul(ZZ(Integer(_product(2, f.degree()))), budget)
+                var cut = ZZ.one(NoContext())
+                while not _greater(cut, bound, budget):
+                    budget.charge(1)
+                    cut = cut.mul(p, budget)
+                largest_cut = _zcopy(cut, budget)
+                cuts.append(cut^)
+            var target = largest_cut.mul(padding, budget)
+            var lifting = _zcopy(target, budget)
+            if _greater(reconstruction_bound, lifting, budget):
+                lifting = _zcopy(reconstruction_bound, budget)
+            _hensel_extend(f, images, lifting, state, budget)
+            ref lifted = state.lifted
+            ref modulus = state.modulus
+            # columns[i][j] = (lc^(j+1) Tr_(j+1)(g_i) mod cut_j*padding - low) / cut_j.
+            for i in range(count):
+                budget.charge(1)
+                var sums = _traces(lifted[i], traces_count, modulus, budget)
+                var scale = ZZ.one(NoContext())
+                var row = List[ZZ](capacity=fresh)
+                for j in range(traces_count):
+                    budget.charge(1)
+                    scale = ZZ(_symmetric(scale.mul(leading, budget).value, modulus.value, budget))
+                    if j < done:
+                        continue
+                    var precision = cuts[j].mul(padding, budget)
+                    var trace = ZZ(_symmetric(sums[j + 1].mul(scale, budget).value, precision.value, budget))
+                    var low = ZZ(_symmetric(trace.value, cuts[j].value, budget))
+                    row.append(_exact(trace.sub(low, budget), cuts[j], budget))
+                columns.append(row^)
+        else:
+            # Data columns are coefficients of the logarithmic derivative
+            # f g'/g = g' (f/g), additive over modular factors and bounded by
+            # about the size of f's coefficients for every index (CLD).
+            _allocation[ZZ](traces_count, budget)
+            var cuts = List[ZZ]()
+            var largest_cut = ZZ.one(NoContext())
+            for k in range(traces_count):
+                budget.charge(1)
+                var bound = _cld_bound(f, order[k], budget).mul(ZZ(Integer(2)), budget)
+                var cut = ZZ.one(NoContext())
+                while not _greater(cut, bound, budget):
+                    budget.charge(1)
+                    cut = cut.mul(p, budget)
+                if _greater(cut, largest_cut, budget):
+                    largest_cut = _zcopy(cut, budget)
+                cuts.append(cut^)
+            var target = largest_cut.mul(padding, budget)
+            var lifting = _zcopy(target, budget)
+            if _greater(reconstruction_bound, lifting, budget):
+                lifting = _zcopy(reconstruction_bound, budget)
+            _hensel_extend(f, images, lifting, state, budget)
+            ref lifted = state.lifted
+            ref modulus = state.modulus
+            # columns[i][k] = (coefficient order[k] of g_i' f/g_i mod cut_k*padding - low) / cut_k.
+            for i in range(count):
+                budget.charge(1)
+                var quotient = _divmod_monic(f, lifted[i], modulus, budget)[0].copy()
+                var cld = _truncate(_derivative(lifted[i], budget).mul(quotient, budget), modulus, budget)
+                var row = List[ZZ](capacity=fresh)
+                for k in range(done, traces_count):
+                    budget.charge(1)
+                    var index = order[k]
+                    var value = cld.coefficients[index].copy() if index < len(cld.coefficients) else ZZ.zero(NoContext())
+                    var precision = cuts[k].mul(padding, budget)
+                    var data = ZZ(_symmetric(value.value, precision.value, budget))
+                    var low = ZZ(_symmetric(data.value, cuts[k].value, budget))
+                    row.append(_exact(data.sub(low, budget), cuts[k], budget))
+                columns.append(row^)
         var dimension = _sum(len(rows), fresh)
         var old = len(rows[0])
         var width = _sum(old, fresh)
@@ -230,7 +358,7 @@ def _van_hoeij_lifted(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconst
                 for j in range(count):
                     budget.charge(1)
                     if not row[j].is_zero():
-                        candidate = _truncate(candidate.mul(lifted[j], budget), state.modulus, budget)
+                        candidate = _truncate(candidate.mul(state.lifted[j], budget), state.modulus, budget)
                 candidate = _primitive(candidate, budget)
                 var quotient = _trial_divide(remaining, candidate, budget)
                 if candidate.degree() < 1 or not quotient:
