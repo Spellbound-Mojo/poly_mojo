@@ -5,12 +5,44 @@ from .coefficients import CoefficientRing, ModInt, ZZ
 from .monomial import Monomial, MonomialOrder
 from .sparse import Term, SparsePoly
 from ._ntt import _ntt_product
+from ._nmod import _Field, _field, _to, _from, _mul as _residue_mul
 
 comptime KARATSUBA_THRESHOLD = 32
 """The measured Karatsuba threshold for arbitrary-precision coefficients."""
 
 comptime _NTT_THRESHOLD = 32
 """The shorter operand length from which ZZ and GF(p) products use multi-modular transforms."""
+
+
+comptime _RESIDUE_THRESHOLD = 16
+"""The shorter operand length from which odd prime-field products run on native Montgomery residues."""
+
+
+def _residue_product[C: CoefficientRing](a: _CoefficientView[C, _], b: _CoefficientView[C, _], square: Bool, mut budget: Budget) raises PolyError -> Optional[List[C]]:
+    """The product over an odd prime field by the native residue kernels (SIMD schoolbook, Karatsuba, transforms), or None for p = 2."""
+    ref lead = rebind[ModInt](a[0])
+    if lead.modulus % 2 == 0:
+        return None
+    var f = _field(lead.modulus)
+    _allocation[UInt64](_sum(len(a), len(b)), budget)
+    var x = List[UInt64](capacity=len(a))
+    for i in range(len(a)):
+        x.append(_to(rebind[ModInt](a[i]).value, f))
+    if square:
+        # One list for both operands lets the kernels take their square paths.
+        return _residues[C](lead, _residue_mul(x, x, f, budget), f, budget)
+    var y = List[UInt64](capacity=len(b))
+    for i in range(len(b)):
+        y.append(_to(rebind[ModInt](b[i]).value, f))
+    return _residues[C](lead, _residue_mul(x, y, f, budget), f, budget)
+
+
+def _residues[C: CoefficientRing](lead: ModInt, values: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[C]:
+    _allocation[C](len(values), budget)
+    var result = List[C](capacity=len(values))
+    for v in values:
+        result.append(rebind_var[C](lead._with_residue(_from(v, f))))
+    return result^
 
 
 def _threshold[C: CoefficientRing]() -> Int:
@@ -376,6 +408,11 @@ struct DensePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
         """
         self._same(other)
         var shorter = min(len(self.coefficients), len(other.coefficients))
+        comptime if Self.C == ModInt:
+            if shorter >= _RESIDUE_THRESHOLD:
+                var product = _residue_product(_view(self.coefficients), _view(other.coefficients), self.coefficients == other.coefficients, budget)
+                if product:
+                    return Self._from_canonical(self.variable, self.ring, product.take())
         comptime if Self.C == ZZ or Self.C == ModInt:
             if shorter >= _NTT_THRESHOLD:
                 # Equal operands share their transform.

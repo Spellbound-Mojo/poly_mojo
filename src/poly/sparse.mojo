@@ -1082,18 +1082,9 @@ def power[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable](value
     if exponent == 0:
         return Array[P, k](SparsePoly[_Ring[k]].constant(_Ring[k].one(factor._core[].ring), factor._core[].order, budget), budget)
     # From the leading bit down: square, then multiply by the base alone, so
-    # the last and largest product is a square.
-    var result = factor.copy()
-    var bit = 62
-    while not (exponent >> bit) & 1:
-        bit -= 1
-    while bit > 0:
-        budget.charge(1)
-        bit -= 1
-        result = Array[P, k](result._core[].mul(result._core[], budget), budget)
-        if (exponent >> bit) & 1:
-            result = Array[P, k](result._core[].mul(factor._core[], budget), budget)
-    return result^
+    # the last and largest product is a square. Few-term bases may take the
+    # power recurrence instead.
+    return Array[P, k](factor._core[].pow(UInt64(exponent), budget), budget)
 
 
 def integral[I: Iterable, P: Copyable & Deinitable, C: Copyable & Deinitable](values: I, mut budget: Budget, *, axis: Int = 0) raises PolyError -> Array[P, _FieldKind[_Kind[C]]] where _Element[I] == Tuple[P, C]:
