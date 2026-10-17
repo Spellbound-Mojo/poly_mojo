@@ -14,6 +14,7 @@ from ._prs import _prs
 from ._univariate_modular import _GcdSearch, _next_gcd_candidate, _univariate_gcd
 from .monomial import MonomialOrder
 from ._sparse_gcd import _sparse_gcd
+from ._heuristic_gcd import _heuristic
 from ._multivariate_gcd import _deflation, _deflates, _scaled, _image_coprime
 from .primes import prime, _residue, _merge_residue, _symmetric
 
@@ -67,11 +68,11 @@ def _modular_primitive(f: SparsePoly[ZZ], h: SparsePoly[ZZ], variable: Int64, mu
             return candidate^
 
 
-def _content[C: CoefficientRing](p: SparsePoly[C], variable: Int64, mut budget: Budget) raises PolyError -> SparsePoly[C]:
+def _content[C: CoefficientRing](p: SparsePoly[C], variable: Int64, mut budget: Budget, heuristic: Bool = True) raises PolyError -> SparsePoly[C]:
     var result = _zero(p, budget)
     for coefficient in _split(p, variable, budget):
         budget.charge(1)
-        result = _gcd_value(result, coefficient, budget)
+        result = _gcd_value(result, coefficient, budget, heuristic)
         if _is_unit(result, budget):
             break
     return result^
@@ -96,7 +97,8 @@ def _dense_in_total_degree[C: CoefficientRing](p: SparsePoly[C], n: Int, mut bud
     return True
 
 
-def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budget: Budget) raises PolyError -> SparsePoly[C]:
+def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budget: Budget, heuristic: Bool = True) raises PolyError -> SparsePoly[C]:
+    # heuristic=False skips GCDHEU, for contents of a pair on which it already failed.
     f._same(h, budget)
     if f.is_zero():
         return _normalized(h, budget)
@@ -122,6 +124,7 @@ def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budge
             var fd = DensePoly[ZZ].from_sparse(rebind[SparsePoly[ZZ]](f), budget, variable=variable)
             var hd = DensePoly[ZZ].from_sparse(rebind[SparsePoly[ZZ]](h), budget, variable=variable)
             return rebind_var[SparsePoly[C]](_univariate_gcd(fd, hd, budget).to_sparse(f.order, budget))
+    var use_heuristic = heuristic
     comptime if C == ZZ:
         if len(variables) > 1:
             var exponents = _deflation(f, h, variables, budget)
@@ -132,13 +135,19 @@ def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budge
                 return _normalized(_gcd_value(_content(f, variable, budget), _content(h, variable, budget), budget), budget)
             # Sparse modular interpolation, unless both inputs fill most of their
             # total-degree box, where the subresultant PRS measures faster.
-            if not (_dense_in_total_degree(f, len(variables), budget) and _dense_in_total_degree(h, len(variables), budget)):
+            var dense = _dense_in_total_degree(f, len(variables), budget) and _dense_in_total_degree(h, len(variables), budget)
+            if dense and heuristic:
+                use_heuristic = False
+                var guess = _heuristic(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), budget)
+                if guess:
+                    return _normalized(rebind_var[SparsePoly[C]](guess.take()), budget)
+            if not dense:
                 var lex = MonomialOrder(MonomialOrder.LEX, variables.copy(), budget)
                 var modular = _sparse_gcd(rebind[SparsePoly[ZZ]](f).reorder(lex, budget), rebind[SparsePoly[ZZ]](h).reorder(lex, budget), budget)
                 return _normalized(rebind_var[SparsePoly[C]](modular.reorder(f.order, budget)), budget)
-    var cf = _content(f, variable, budget)
-    var ch = _content(h, variable, budget)
-    var common = _gcd_value(cf, ch, budget)
+    var cf = _content(f, variable, budget, use_heuristic)
+    var ch = _content(h, variable, budget, use_heuristic)
+    var common = _gcd_value(cf, ch, budget, use_heuristic)
     var pf = _exact_poly(f, cf, budget)
     var ph = _exact_poly(h, ch, budget)
     var sequence = _prs(pf, ph, variable, False, budget, history=False)
@@ -149,5 +158,5 @@ def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budge
         last = pf^
     else:
         last = ph^
-    var primitive = _exact_poly(last, _content(last, variable, budget), budget)
+    var primitive = _exact_poly(last, _content(last, variable, budget, use_heuristic), budget)
     return _normalized(common.mul(primitive, budget), budget)

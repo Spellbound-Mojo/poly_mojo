@@ -225,6 +225,28 @@ def shortcut_cases(mut c: Checker) raises:
     c.check(gcd_value(g.mul(k, work), k.mul(x.add(z, work), work), work) == k, "planted gcd after an unlucky point")
 
 
+def heuristic_cases(mut c: Checker) raises:
+    """Dense inputs take GCDHEU; the non-heuristic route must give the same gcd."""
+    var work = Budget()
+    var order = MonomialOrder(MonomialOrder.GREVLEX, [0, 1, 2, 3], work)
+    var one = SparsePoly[ZZ].constant(ZZ.one(NoContext()), order, work)
+    var x = SparsePoly[ZZ].variable(0, order, NoContext(), work)
+    var y = SparsePoly[ZZ].variable(1, order, NoContext(), work)
+    var z = SparsePoly[ZZ].variable(2, order, NoContext(), work)
+    var t = SparsePoly[ZZ].variable(3, order, NoContext(), work)
+    var u = one.add(x, work).add(y.scale(ZZ(Integer(2)), work), work).sub(z, work)
+    var v = one.scale(ZZ(Integer(3)), work).add(x, work).add(y, work).add(z, work).add(t, work)
+    var w = one.scale(ZZ(Integer(-5)), work).add(x.scale(ZZ(Integer(7)), work), work).sub(y, work).add(z, work).sub(t.scale(ZZ(Integer(4)), work), work)
+    for k in range(1, 3):
+        var g = u.pow(UInt64(k), work).scale(ZZ(Integer(6)), work)
+        var f = g.mul(v.pow(UInt64(k), work), work).scale(ZZ(Integer(5)), work)
+        var h = g.mul(w.pow(UInt64(k + 1), work), work).scale(ZZ(Integer(-4)), work)
+        var got = _gcd_value(f, h, work)
+        c.check(got == _gcd_value(f, h, work, heuristic=False), "heuristic gcd equals the PRS gcd")
+        c.check(got == g or got == g.neg(work), "heuristic gcd of planted dense products")
+        c.check(_gcd_value(f, v.pow(UInt64(k + 1), work).mul(w, work), work) == _gcd_value(f, v.pow(UInt64(k + 1), work).mul(w, work), work, heuristic=False), "heuristic gcd of a cofactor power")
+
+
 def main() raises:
     var c = Checker("gcd")
     var work = Budget()
@@ -274,4 +296,5 @@ def main() raises:
     division_cases[QQ](NoContext(), c)
     division_cases[ModInt](Modulus(101, work), c)
     shortcut_cases(c)
+    heuristic_cases(c)
     c.finish()
