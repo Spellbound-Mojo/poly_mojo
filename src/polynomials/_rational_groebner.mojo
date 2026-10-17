@@ -12,10 +12,14 @@ certified, and setting h = 1 then gives the basis of the input ideal.
    full and recorded instead, and the primes after it replay the new run.
    Images whose leading monomials differ from the first one's are set
    aside.
-2. Reconstruction. Each coefficient is lifted by the Chinese remainder
-   theorem over the union of the images' supports and recovered as a
-   fraction, through a running denominator per element; a candidate must
-   also agree with the next image before it is certified.
+2. Reconstruction. The images' residues are kept over the union of their
+   supports, and each attempt recovers every coefficient as a fraction
+   through a running denominator d per element: the coefficient's lift by
+   the Chinese remainder theorem times d must be small, or it is
+   reconstructed and d grows. A small product needs only the residues of
+   the coefficient times d modulo a prefix of the primes, so a full lift is
+   needed only where a denominator shows. A candidate must also agree with
+   the next image before it is certified.
 3. Certification, exactly over the integers, for the homogeneous candidate G:
    (a) every input reduces to zero modulo G, so J is contained in <G>;
    (b) every S-pair kept by the Gebauer–Möller criteria reduces to zero, so
@@ -47,10 +51,19 @@ Uncertified, inhomogeneous inputs are not homogenized: steps 1 and 2 run on
 the input ideal itself, whose reduced basis is often many times smaller than
 that of J, and the first candidate that agrees with the next image is the
 result.
+
+Why certification keeps J. Checks (a), (b), and (d) on an affine candidate
+G show I ⊆ <G> with G reduced, but (c) has no affine analogue: I_{<=d} is
+not spanned by the products m*f of degree at most d, since elements arrive
+through degree falls, so modulo p the affine Hilbert function can exceed
+the rational one even when p divides no leading coefficient. For instance,
+with x > y > z and P a product of many primes, the inputs y^3 + x,
+y^3 + P z^3 + 2x, and x - 1 generate a proper ideal over QQ, yet modulo
+every p dividing P they generate (1). Every image is then {1}, and {1}
+passes (a), (b), and (d).
 """
-from std.bit import count_leading_zeros
 from std.math import max
-from apn_mojo import Integer, Rational, div_rem_euclid, gcd as integer_gcd, isqrt
+from apn_mojo import Integer, Rational, div_rem_euclid, gcd as integer_gcd, inverse_mod, isqrt
 from .coefficients import ModInt, Modulus, NoContext, QQ, ZZ, _prime, _work
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product
 from .monomial import MonomialOrder
@@ -58,8 +71,8 @@ from .sparse import SparsePoly, Term
 from .primes import _residue
 from ._images import _denominator, _scaled_integer
 from ._packed_groebner import _Buckets, _Engine, _Packed, _Term, _compare, _divides, _equal, _monomial, _pack, _packed, _priorities
-from ._f4 import _LANES, _Matrix, _Store, _Trace, _f4_learn, _f4_replay, _f4_replay_lanes
-from ._integer_f4 import _add_mul_1, _divide, _limbs_of, _pairs_reduce_to_zero, _reduced_tails, _remainder, _remainder_limbs, _sub_mul_1, _subtract_limbs
+from ._f4 import _LANES, _LaneBases, _Matrix, _Store, _Trace, _f4_learn, _f4_replay_bases, _lane_basis
+from ._integer_f4 import _add_mul_1, _divide, _magnitude, _pairs_reduce_to_zero, _reduced_tails, _remainder, _sub_mul_1
 
 comptime _PRIME_LIMIT = 4096
 """Primes tried before giving up on reconstruction."""
@@ -70,10 +83,9 @@ comptime _MISMATCH_LIMIT = 3
 comptime _PROBES = 16
 """Elements whose least coefficient is tried before a full reconstruction."""
 comptime _BATCH = 32
-"""Primes whose residues are combined in word arithmetic before joining the accumulated values."""
-comptime _SPREAD = 8
-"""Coefficients whose CRT values are formed together, one per SIMD lane."""
-comptime _Spread = SIMD[DType.uint64, _SPREAD]
+"""Primes in a block of residues, which combine in word arithmetic (`_Crt`)."""
+comptime _TREE = 24
+"""Blocks from which a CRT combines them up a product tree, whose large products are subquadratic."""
 
 
 def _next_prime(previous: UInt64, mut budget: Budget) raises PolyError -> UInt64:
@@ -149,69 +161,25 @@ def _reconstruct(value: Integer, modulus: Integer, bound: Integer, mut budget: B
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
 
 
-def _integer(limbs: Pointer[mut=False, UInt64, _], n: Int, negative: Bool = False) -> Integer:
-    """The Integer with the magnitude limbs[0:n], least significant first, and the sign."""
-    var used = n
-    while used > 0 and limbs.unsafe_offset(used - 1).unsafe_load() == 0:
-        used -= 1
-    var bytes = List[UInt8](length=8 * used, fill=0)
-    for l in range(used):
-        var limb = limbs.unsafe_offset(l).unsafe_load()
-        comptime for shift in range(8):
-            bytes.unsafe_get(8 * l + shift) = UInt8((limb >> UInt64(8 * shift)) & 0xFF)
-    return Integer.from_bytes(bytes, negative=negative)
-
-
-def _compare_limbs(a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int) -> Int:
-    """The sign of a[0:na] - b[0:nb], as magnitudes."""
-    for l in range(max(na, nb) - 1, -1, -1):
-        var x = a.unsafe_offset(l).unsafe_load() if l < na else UInt64(0)
-        var y = b.unsafe_offset(l).unsafe_load() if l < nb else UInt64(0)
-        if x != y:
-            return 1 if x > y else -1
-    return 0
-
-
-def _shifted(limbs: List[UInt64], shift: Int) -> List[UInt64]:
-    """The magnitude limbs times 2^shift for shift below 64, without leading zeros."""
-    var result = List[UInt64](capacity=len(limbs) + 1)
-    var carry = UInt64(0)
-    for limb in limbs:
-        result.append((limb << UInt64(shift)) | carry)
-        carry = limb >> UInt64(64 - shift) if shift > 0 else UInt64(0)
-    result.append(carry)
-    while len(result) and result[len(result) - 1] == 0:
-        _ = result.pop()
-    return result^
-
-
 struct _Crt(Movable):
-    """A batch's CRT basis. For primes p_i with product Q, Q_i = Q / p_i and
-    c_i = Q_i^-1 modulo p_i, the residues r_i give x = sum r_i e_i - k Q with
-    e_i = c_i Q_i and k = floor(sum r_i c_i / p_i), so a value takes word
-    multiples of the basis and one word multiple of Q, in limbs.
-
-    `values` forms `_SPREAD` values at once, one per SIMD lane, from the
-    32-bit digits of the e_i: each digit's products with the residues stay
-    below 2^63, and their low and high halves go into columns that only
-    carry once all of them are in.
-    """
+    """A block's CRT basis. For primes p_i with product Q, Q_i = Q / p_i and
+    c_i = s Q_i^-1 modulo p_i for a scale s, the residues r_i give
+    x = sum r_i e_i - k Q, the number below Q congruent to s times their CRT,
+    with e_i = c_i Q_i and k = floor(sum r_i c_i / p_i): word multiples of the
+    basis and one word multiple of Q, in limbs."""
     var product: List[UInt64]
     var basis: List[UInt64]
     """The e_i, `limbs` limbs each."""
-    var digits: List[UInt64]
-    """The e_i in 32-bit digits, 2 `limbs` each."""
     var weights: List[Float64]
     """The c_i / p_i, whose sum against the residues estimates k."""
     var limbs: Int
-    var work: List[UInt64]
-    var columns: List[UInt64]
-    """`_SPREAD` lanes per 32-bit digit."""
 
-    def __init__(out self, primes: List[UInt64], mut budget: Budget) raises PolyError:
-        var b = len(primes)
+    def __init__(out self, primes: List[UInt64], start: Int, end: Int, scale: Integer, mut budget: Budget) raises PolyError:
+        """The basis for primes[start:end]."""
+        var b = end - start
         self.product = [UInt64(1)]
-        for prime in primes:
+        for i in range(start, end):
+            var prime = primes[i]
             budget.charge(UInt64(len(self.product)))
             var carry = UInt128(0)
             for l in range(len(self.product)):
@@ -224,243 +192,329 @@ struct _Crt(Movable):
         _allocation[UInt64](_product(b, self.limbs) + self.limbs + 2, budget)
         self.basis = List[UInt64](length=b * self.limbs, fill=0)
         self.weights = List[Float64](capacity=b)
-        self.work = List[UInt64](length=self.limbs + 2, fill=0)
-        self.columns = List[UInt64](length=_SPREAD * (2 * self.limbs + 2), fill=0)
+        var scaled = List[UInt64]()
+        _magnitude(scale, scaled)
         for i in range(b):
-            var prime = primes[i]
-            budget.charge(UInt64(3 * self.limbs))
+            var prime = primes[start + i]
+            budget.charge(UInt64(3 * self.limbs + len(scaled)))
             var cofactor = self.product.copy()
             _divide(cofactor, prime)
             var c = ModInt(_remainder(cofactor, prime), Modulus(_prime_value=prime)).inverse(budget).value
+            c = UInt64((UInt128(c) * UInt128(_remainder(scaled, prime))) % UInt128(prime))
             var carry = UInt128(0)
             for l in range(self.limbs):
                 var x = (UInt128(cofactor[l]) if l < len(cofactor) else UInt128(0)) * UInt128(c) + carry
                 self.basis[i * self.limbs + l] = UInt64(x & UInt128(UInt64.MAX))
                 carry = x >> 64
             self.weights.append(Float64(c) / Float64(prime))
-        _allocation[UInt64](_product(2 * b, self.limbs), budget)
-        self.digits = List[UInt64](capacity=2 * b * self.limbs)
-        for limb in self.basis:
-            self.digits.append(limb & 0xFFFFFFFF)
-            self.digits.append(limb >> 32)
 
-    def value(mut self, residues: Pointer[mut=False, UInt32, _], stride: Int, b: Int, target: Pointer[mut=True, UInt64, _], mut budget: Budget) raises PolyError:
-        """Write the `limbs` limbs of the number below Q with the residues residues[i stride] for i below b."""
-        budget.charge(UInt64(_product(b, self.limbs)))
+    def value_into(self, residues: Pointer[mut=False, UInt32, _], target: Pointer[mut=True, UInt64, _]) -> Float64:
+        """Write the value for the residues, `limbs` limbs, to target, which has two limbs more; return it divided by Q, approximately."""
         var n = self.limbs + 2
-        var work = self.work.unsafe_ptr()
         for l in range(n):
-            work.unsafe_offset(l).unsafe_store(0)
+            target.unsafe_offset(l).unsafe_store(0)
         var estimate = Float64(0)
-        for i in range(b):
-            var r = residues.unsafe_offset(i * stride).unsafe_load()
+        for i in range(len(self.weights)):
+            var r = residues.unsafe_offset(i).unsafe_load()
             if r == 0:
                 continue
-            _add_mul_1(work, n, UInt64(r), self.basis.unsafe_ptr().unsafe_offset(i * self.limbs), self.limbs)
+            _add_mul_1(target, n, UInt64(r), self.basis.unsafe_ptr().unsafe_offset(i * self.limbs), self.limbs)
             estimate += Float64(r) * self.weights.unsafe_get(i)
-        self._reduced(estimate, target)
-
-    def values(mut self, residues: Pointer[mut=False, UInt32, _], stride: Int, count: Int, b: Int, target: Pointer[mut=True, UInt64, _], width: Int, mut budget: Budget) raises PolyError:
-        """Write the values of `count` coefficients, the k-th with the residues residues[i stride + k] for i below b, to target[k width : k width + limbs]."""
-        var digits = 2 * self.limbs
-        var columns = self.columns.unsafe_ptr()
-        var mask = _Spread(0xFFFFFFFF)
-        var k = 0
-        while k + _SPREAD <= count:
-            budget.charge(UInt64(_product(_product(b, self.limbs), _SPREAD)))
-            for d in range(digits + 2):
-                columns.unsafe_offset(_SPREAD * d).unsafe_store[width=_SPREAD](_Spread(0))
-            var estimate = SIMD[DType.float64, _SPREAD](0)
-            for i in range(b):
-                var r = residues.unsafe_offset(i * stride + k).unsafe_load[width=_SPREAD]().cast[DType.uint64]()
-                estimate += r.cast[DType.float64]() * self.weights.unsafe_get(i)
-                var e = self.digits.unsafe_ptr().unsafe_offset(i * digits)
-                var high = _Spread(0)
-                for d in range(digits):
-                    # Both factors are below 2^32, which the mask makes plain.
-                    var x = r * (_Spread(e.unsafe_offset(d).unsafe_load()) & mask)
-                    var column = columns.unsafe_offset(_SPREAD * d)
-                    column.unsafe_store[width=_SPREAD](column.unsafe_load[width=_SPREAD]() + (x & mask) + high)
-                    high = x >> 32
-                var column = columns.unsafe_offset(_SPREAD * digits)
-                column.unsafe_store[width=_SPREAD](column.unsafe_load[width=_SPREAD]() + high)
-            var carry = _Spread(0)
-            for d in range(digits + 2):
-                var x = columns.unsafe_offset(_SPREAD * d).unsafe_load[width=_SPREAD]() + carry
-                columns.unsafe_offset(_SPREAD * d).unsafe_store[width=_SPREAD](x & mask)
-                carry = x >> 32
-            var work = self.work.unsafe_ptr()
-            for lane in range(_SPREAD):
-                for l in range(self.limbs + 1):
-                    var low = columns.unsafe_offset(_SPREAD * 2 * l + lane).unsafe_load()
-                    var high = columns.unsafe_offset(_SPREAD * (2 * l + 1) + lane).unsafe_load()
-                    work.unsafe_offset(l).unsafe_store(low | (high << 32))
-                work.unsafe_offset(self.limbs + 1).unsafe_store(0)
-                self._reduced(estimate[lane], target.unsafe_offset((k + lane) * width))
-            k += _SPREAD
-        while k < count:
-            self.value(residues.unsafe_offset(k), stride, b, target.unsafe_offset(k * width), budget)
-            k += 1
-
-    def _reduced(mut self, estimate: Float64, target: Pointer[mut=True, UInt64, _]):
-        """Write the accumulated sum, less the multiple of Q its estimate gives and a correction, to target[0:limbs]."""
-        var n = self.limbs + 2
-        var work = self.work.unsafe_ptr()
         # The estimate's error is far below one, so one correction at most remains.
         var k = UInt64(estimate)
         if k:
-            _sub_mul_1(work, n, k, self.product.unsafe_ptr(), self.limbs)
-        while (work.unsafe_offset(n - 1).unsafe_load() >> 63) != 0:
-            _add_mul_1(work, n, 1, self.product.unsafe_ptr(), self.limbs)
-        while not self._below_product():
-            _sub_mul_1(work, n, 1, self.product.unsafe_ptr(), self.limbs)
-        for l in range(self.limbs):
-            target.unsafe_offset(l).unsafe_store(work.unsafe_offset(l).unsafe_load())
-
-    def _below_product(self) -> Bool:
-        """Whether the nonnegative accumulator is below Q."""
-        var n = self.limbs + 2
-        for l in range(n - 1, self.limbs - 1, -1):
-            if self.work.unsafe_get(l) != 0:
-                return False
-        for l in range(self.limbs - 1, -1, -1):
-            var x = self.work.unsafe_get(l)
-            var y = self.product.unsafe_get(l)
-            if x != y:
-                return x < y
-        return False
+            _sub_mul_1(target, n, k, self.product.unsafe_ptr(), self.limbs)
+        var fraction = estimate - Float64(k)
+        while (target.unsafe_offset(n - 1).unsafe_load() >> 63) != 0:
+            _add_mul_1(target, n, 1, self.product.unsafe_ptr(), self.limbs)
+            fraction += 1
+        while not _below(target, n, self.product.unsafe_ptr(), self.limbs):
+            _sub_mul_1(target, n, 1, self.product.unsafe_ptr(), self.limbs)
+            fraction -= 1
+        return fraction
 
 
-struct _Join(Movable):
-    """Joins values modulo M with a batch's residues modulo Q, in limbs.
+def _below(x: Pointer[mut=False, UInt64, _], n: Int, y: Pointer[mut=False, UInt64, _], m: Int) -> Bool:
+    """Whether the nonnegative x of n limbs is below y of m <= n limbs."""
+    for l in range(n - 1, m - 1, -1):
+        if x.unsafe_offset(l).unsafe_load() != 0:
+            return False
+    for l in range(m - 1, -1, -1):
+        var a = x.unsafe_offset(l).unsafe_load()
+        var b = y.unsafe_offset(l).unsafe_load()
+        if a != b:
+            return a < b
+    return False
 
-    For v below M, the number below M Q that is v modulo M and r_i modulo
-    each prime p_i of the batch is v + M t, where t is the number below Q
-    with t = (r_i - v) M^-1 modulo each p_i. The residues of v come from the
-    powers of 2^64 modulo p_i, and t from the batch's CRT basis.
+
+def _integer(limbs: Pointer[mut=False, UInt64, _], n: Int) -> Integer:
+    """The nonnegative number with the n limbs, least significant first."""
+    var bytes = List[UInt8](length=8 * n, fill=0)
+    for l in range(n):
+        var limb = limbs.unsafe_offset(l).unsafe_load()
+        comptime for shift in range(8):
+            bytes.unsafe_get(8 * l + shift) = UInt8((limb >> UInt64(8 * shift)) & 0xFF)
+    return Integer.from_bytes(bytes)
+
+
+def _end(primes: List[UInt64], b: Int) -> Int:
+    """The end of block b in primes."""
+    return min(len(primes), (b + 1) * _BATCH)
+
+
+def _times(a: Integer, b: Integer) raises PolyError -> Integer:
+    try:
+        return a * b
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+struct _Lift(Movable):
+    """CRT over the first blocks of `_BATCH` primes, for many values.
+
+    For block products q_b with product M, a value is
+    x = sum_b u_b M / q_b - k M, where u_b < q_b is the CRT of block b's
+    residues times (M / q_b)^-1 modulo q_b, in word arithmetic (`_Crt`), and
+    k = floor(sum_b u_b / q_b), which the blocks' estimates give. Below
+    `_TREE` blocks the sum takes word multiples of the M / q_b; from it, it
+    combines up a product tree instead: a node's value is its left value
+    times its right product plus its right value times its left product.
     """
-    var crt: _Crt
-    var primes: List[UInt64]
-    var modulus: List[UInt64]
-    """M, `limbs` limbs; no limbs for M = 1."""
-    var limbs: Int
+    var crts: List[_Crt]
+    var factors: List[List[UInt64]]
+    """The M / q_b in limbs, below `_TREE` blocks."""
+    var levels: List[List[Integer]]
+    """From `_TREE` blocks, the tree's products from the q_b up; an odd last node is carried up alone."""
+    var modulus: Integer
     var product: List[UInt64]
-    """M Q, `width` limbs."""
-    var width: Int
+    """M in limbs."""
+    var primes: Int
+    var digits: List[UInt64]
+    var work: List[UInt64]
+
+    def __init__(out self, primes: List[UInt64], blocks: Int, mut budget: Budget) raises PolyError:
+        var products = List[Integer]()
+        self.modulus = Integer(1)
+        self.primes = min(len(primes), blocks * _BATCH)
+        for b in range(blocks):
+            var q = Integer(1)
+            for i in range(b * _BATCH, _end(primes, b)):
+                _work(q.magnitude_bit_length() // 8 + 1, 8, False, budget)
+                q = _times(q, Integer(primes[i]))
+            _work(self.modulus.magnitude_bit_length() // 8 + 1, q.magnitude_bit_length() // 8 + 1, False, budget)
+            self.modulus = _times(self.modulus, q)
+            products.append(q^)
+        self.crts = List[_Crt]()
+        self.factors = List[List[UInt64]]()
+        self.product = List[UInt64]()
+        _magnitude(self.modulus, self.product)
+        var width = 0
+        for b in range(blocks):
+            _work(self.modulus.magnitude_bit_length() // 8 + 1, products[b].magnitude_bit_length() // 8 + 1, True, budget)
+            var factor: Integer
+            var inverse: Integer
+            try:
+                factor = self.modulus // products[b]
+                inverse = inverse_mod(div_rem_euclid(factor, products[b])[1], products[b])
+            except e:
+                raise PolyError(PolyErrorKind.CAPACITY, String(e))
+            self.crts.append(_Crt(primes, b * _BATCH, _end(primes, b), inverse, budget))
+            width = max(width, self.crts[b].limbs)
+            if blocks < _TREE:
+                var limbs = List[UInt64]()
+                _magnitude(factor, limbs)
+                self.factors.append(limbs^)
+        self.levels = [products^]
+        while blocks >= _TREE and len(self.levels[len(self.levels) - 1]) > 1:
+            ref below = self.levels[len(self.levels) - 1]
+            var level = List[Integer]()
+            for i in range(0, len(below), 2):
+                if i + 1 < len(below):
+                    _work(below[i].magnitude_bit_length() // 8 + 1, below[i + 1].magnitude_bit_length() // 8 + 1, False, budget)
+                    level.append(_times(below[i], below[i + 1]))
+                else:
+                    level.append(below[i].copy())
+            self.levels.append(level^)
+        _allocation[UInt64](width + len(self.product) + 4, budget)
+        self.digits = List[UInt64](length=width + 2, fill=0)
+        self.work = List[UInt64](length=len(self.product) + 2, fill=0)
+
+    def value(mut self, residues: List[UInt32], mut budget: Budget) raises PolyError -> Integer:
+        """The number below M with the residues, block b's at residues[b * _BATCH:]."""
+        if len(self.crts) >= _TREE:
+            return self._tree(residues, budget)
+        var limbs = len(self.product)
+        budget.charge(UInt64(_product(self.primes, limbs + _BATCH)))
+        var n = limbs + 2
+        var work = self.work.unsafe_ptr()
+        for l in range(n):
+            work.unsafe_offset(l).unsafe_store(0)
+        var digits = self.digits.unsafe_ptr()
+        var estimate = Float64(0)
+        for b in range(len(self.crts)):
+            estimate += self.crts[b].value_into(residues.unsafe_ptr().unsafe_offset(b * _BATCH), digits)
+            ref factor = self.factors[b]
+            for l in range(self.crts[b].limbs):
+                var f = digits.unsafe_offset(l).unsafe_load()
+                if f != 0:
+                    _add_mul_1(work.unsafe_offset(l), n - l, f, factor.unsafe_ptr(), len(factor))
+        var k = UInt64(max(estimate, Float64(0)))
+        if k:
+            _sub_mul_1(work, n, k, self.product.unsafe_ptr(), limbs)
+        while (work.unsafe_offset(n - 1).unsafe_load() >> 63) != 0:
+            _add_mul_1(work, n, 1, self.product.unsafe_ptr(), limbs)
+        while not _below(work, n, self.product.unsafe_ptr(), limbs):
+            _sub_mul_1(work, n, 1, self.product.unsafe_ptr(), limbs)
+        return _integer(work, limbs)
+
+    def _tree(mut self, residues: List[UInt32], mut budget: Budget) raises PolyError -> Integer:
+        var bytes = self.modulus.magnitude_bit_length() // 8 + 1
+        _work(bytes, bytes, False, budget)
+        var digits = self.digits.unsafe_ptr()
+        var values = List[Integer](capacity=len(self.crts))
+        var estimate = Float64(0)
+        for b in range(len(self.crts)):
+            budget.charge(UInt64(_product(_BATCH, self.crts[b].limbs)))
+            estimate += self.crts[b].value_into(residues.unsafe_ptr().unsafe_offset(b * _BATCH), digits)
+            values.append(_integer(digits, self.crts[b].limbs))
+        try:
+            var level = 0
+            while len(values) > 1:
+                ref products = self.levels[level]
+                var combined = List[Integer](capacity=(len(values) + 1) // 2)
+                for i in range(0, len(values), 2):
+                    if i + 1 < len(values):
+                        combined.append(values[i] * products[i + 1] + values[i + 1] * products[i])
+                    else:
+                        combined.append(values[i].copy())
+                values = combined^
+                level += 1
+            if len(values) == 0:
+                return Integer(0)
+            var x = values[0] - Integer(Int(max(estimate, Float64(0)))) * self.modulus
+            while x.sign() < 0:
+                x += self.modulus
+            while x >= self.modulus:
+                x -= self.modulus
+            return x^
+        except e:
+            raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+struct _Check(Movable):
+    """Residues of limb strings modulo a prime, through the powers of 2^64."""
+    var prime: UInt64
     var powers: List[UInt64]
-    """2^(64 j) modulo p_i, at i limbs + j."""
-    var inverses: List[UInt64]
-    """M^-1 modulo p_i."""
 
-    def __init__(out self, primes: List[UInt64], modulus: List[UInt64], mut budget: Budget) raises PolyError:
-        self.crt = _Crt(primes, budget)
-        self.primes = primes.copy()
-        self.modulus = modulus.copy()
-        self.limbs = len(modulus)
-        var b = len(primes)
-        var q = self.crt.limbs
-        _allocation[UInt64](_product(self.limbs, b) + self.limbs + q + b + 1, budget)
-        budget.charge(UInt64(_product(self.limbs, q) + _product(self.limbs, b)))
-        if self.limbs == 0:
-            self.product = self.crt.product.copy()
-        else:
-            self.product = List[UInt64](length=self.limbs + q, fill=0)
-            for l in range(q):
-                _add_mul_1(self.product.unsafe_ptr().unsafe_offset(l), self.limbs + q - l, self.crt.product[l], self.modulus.unsafe_ptr(), self.limbs)
-            while self.product[len(self.product) - 1] == 0:
-                _ = self.product.pop()
-        self.width = len(self.product)
-        self.powers = List[UInt64](capacity=_product(self.limbs, b))
-        self.inverses = List[UInt64](capacity=b)
-        for i in range(b):
-            var p = primes[i]
-            if self.limbs == 0:
-                self.inverses.append(1)
-            else:
-                self.inverses.append(ModInt(_remainder(self.modulus, p), Modulus(_prime_value=p)).inverse(budget).value)
-            var power = UInt64(1)
-            for _ in range(self.limbs):
-                self.powers.append(power)
-                power = UInt64((UInt128(power) << 64) % UInt128(p))
+    def __init__(out self, prime: UInt64, limbs: Int, mut budget: Budget) raises PolyError:
+        """For limb strings of at most `limbs` limbs."""
+        self.prime = prime
+        _allocation[UInt64](limbs, budget)
+        self.powers = List[UInt64](capacity=limbs)
+        var power = UInt64(1)
+        var radix = UInt64((UInt128(1) << 64) % UInt128(prime))
+        for _ in range(limbs):
+            self.powers.append(power)
+            power = UInt64((UInt128(power) * UInt128(radix)) % UInt128(prime))
 
-    def join_all(mut self, values: Pointer[mut=False, UInt64, _], residues: Pointer[mut=False, UInt32, _], count: Int, target: Pointer[mut=True, UInt64, _], mut budget: Budget) raises PolyError:
-        """`join` for `count` coefficients at once: values `limbs` limbs apart, residue rows `count` long, targets `width` limbs apart."""
-        var b = len(self.primes)
-        var n = self.limbs
-        if n == 0:
-            self.crt.values(residues, count, count, b, target, self.width, budget)
-            return
-        budget.charge(UInt64(_product(count, _product(b, n) + _product(n, self.crt.limbs))))
-        var q = self.crt.limbs
-        _allocation[UInt64](_product(count, b + q), budget)
-        var rows = List[UInt32](length=count * b, fill=0)
-        for k in range(count):
-            self._digits(values.unsafe_offset(k * n), residues.unsafe_offset(k), count, rows.unsafe_ptr().unsafe_offset(k), count)
-        var t = List[UInt64](length=count * q, fill=0)
-        self.crt.values(rows.unsafe_ptr(), count, count, b, t.unsafe_ptr(), q, budget)
-        for k in range(count):
-            self._joined(values.unsafe_offset(k * n), t.unsafe_ptr().unsafe_offset(k * q), target.unsafe_offset(k * self.width))
+    def residue(self, limbs: List[UInt64]) -> UInt64:
+        # Each product is below 2^95, so the sum of fewer than 2^32 fits.
+        var sum = UInt128(0)
+        for l in range(len(limbs)):
+            sum += UInt128(limbs.unsafe_get(l)) * UInt128(self.powers.unsafe_get(l))
+        return UInt64(sum % UInt128(self.prime))
 
-    def _digits(self, value: Pointer[mut=False, UInt64, _], residues: Pointer[mut=False, UInt32, _], stride: Int, digits: Pointer[mut=True, UInt32, _], step: Int):
-        """Write the residues of t, (r_i - value) M^-1 modulo p_i, to digits[i step]."""
-        var n = self.limbs
-        for i in range(len(self.primes)):
-            var p = self.primes.unsafe_get(i)
-            var powers = self.powers.unsafe_ptr().unsafe_offset(i * n)
-            var sum = UInt128(0)
-            for j in range(n):
-                sum += UInt128(value.unsafe_offset(j).unsafe_load()) * UInt128(powers.unsafe_offset(j).unsafe_load())
-            var v = UInt64(sum % UInt128(p))
-            var difference = UInt64(residues.unsafe_offset(i * stride).unsafe_load()) + p - v
-            digits.unsafe_offset(i * step).unsafe_store(UInt32((difference * self.inverses.unsafe_get(i)) % p))
 
-    def _joined(self, value: Pointer[mut=False, UInt64, _], t: Pointer[mut=False, UInt64, _], target: Pointer[mut=True, UInt64, _]):
-        """Write value + M t to target[0:width]."""
-        var n = self.limbs
-        for l in range(self.width):
-            target.unsafe_offset(l).unsafe_store(value.unsafe_offset(l).unsafe_load() if l < n else UInt64(0))
-        for l in range(self.crt.limbs):
-            var f = t.unsafe_offset(l).unsafe_load()
-            if f:
-                _add_mul_1(target.unsafe_offset(l), self.width - l, f, self.modulus.unsafe_ptr(), n)
+def _residues(value: Integer, primes: List[UInt64], count: Int, mut residues: List[UInt64], mut budget: Budget) raises PolyError:
+    """Set residues to value modulo each of the first `count` primes, through each block's product."""
+    residues.clear()
+    var b = 0
+    while b * _BATCH < count:
+        var q = Integer(1)
+        for i in range(b * _BATCH, _end(primes, b)):
+            q = _times(q, Integer(primes[i]))
+        _work(value.magnitude_bit_length() // 8 + 1, q.magnitude_bit_length() // 8 + 1, True, budget)
+        var limbs = List[UInt64]()
+        try:
+            _magnitude(div_rem_euclid(value, q)[1], limbs)
+        except e:
+            raise PolyError(PolyErrorKind.CAPACITY, String(e))
+        for i in range(b * _BATCH, _end(primes, b)):
+            budget.charge(UInt64(len(limbs)))
+            residues.append(_remainder(limbs, primes[i]))
+        b += 1
 
-    def join(mut self, value: Pointer[mut=False, UInt64, _], residues: Pointer[mut=False, UInt32, _], stride: Int, target: Pointer[mut=True, UInt64, _], mut budget: Budget) raises PolyError:
-        """Write the `width` limbs of the number below M Q that is value[0:limbs] modulo M and has the residues residues[i stride] for i below b."""
-        var b = len(self.primes)
-        var n = self.limbs
-        if n == 0:
-            self.crt.value(residues, stride, b, target, budget)
-            return
-        budget.charge(UInt64(_product(b, n) + _product(n, self.crt.limbs)))
-        var digits = List[UInt32](length=b, fill=0)
-        var t = List[UInt64](length=self.crt.limbs, fill=0)
-        self._digits(value, residues, stride, digits.unsafe_ptr(), 1)
-        self.crt.value(digits.unsafe_ptr(), 1, b, t.unsafe_ptr(), budget)
-        self._joined(value, t.unsafe_ptr(), target)
+
+struct _Prefix(Movable):
+    """The lift of numerators from a prefix of the primes, with the two checking primes after it.
+
+    A candidate is taken only when it has at most `capacity` bits, 66 fewer
+    than the prefix's product, and agrees with the checking primes.
+    """
+    var lift: _Lift
+    var blocks: Int
+    """The prefix's blocks; 0 when there is no prefix."""
+    var capacity: Int
+    var exhausted: Bool
+    """Whether the capacity asked for would take every block, so no prefix can serve."""
+    var half: Integer
+    var checks: List[_Check]
+    var checked: List[Int]
+    """The checking primes' indices."""
+    var shifts: List[UInt64]
+    """The prefix's product modulo each checking prime."""
+
+    def __init__(out self, primes: List[UInt64], capacity: Int, mut budget: Budget) raises PolyError:
+        """The shortest prefix for numerators of `capacity` bits, or none when it would take every block."""
+        var total = (len(primes) + _BATCH - 1) // _BATCH
+        var blocks = 0
+        var bits = 0
+        while blocks < total and bits < capacity + 66:
+            # Every prime is above 2^30.
+            bits += 30 * (_end(primes, blocks) - blocks * _BATCH)
+            blocks += 1
+        self.blocks = blocks if capacity > 0 and blocks < total else 0
+        self.capacity = bits - 66 if self.blocks > 0 else 0
+        self.exhausted = capacity > 0 and self.blocks == 0
+        self.lift = _Lift(primes, self.blocks, budget)
+        try:
+            self.half = self.lift.modulus // 2
+        except e:
+            raise PolyError(PolyErrorKind.CAPACITY, String(e))
+        self.checks = List[_Check]()
+        self.checked = List[Int]()
+        self.shifts = List[UInt64]()
+        if self.blocks > 0:
+            var limbs = List[UInt64]()
+            _magnitude(self.lift.modulus, limbs)
+            for i in range(len(primes) - 1, max(self.lift.primes, len(primes) - 2) - 1, -1):
+                self.checks.append(_Check(primes[i], len(limbs), budget))
+                self.checked.append(i)
+                self.shifts.append(self.checks[len(self.checks) - 1].residue(limbs))
 
 
 struct _Images[W: Int](Movable):
-    """CRT accumulation of monic modular bases that share their leading monomials.
+    """Monic modular bases that share their leading monomials, and their CRT.
 
-    Residues wait as words in batches of up to `_BATCH` primes. A batch is
-    combined through its CRT basis in word multiples (`_Crt`) and joins the
-    accumulated values in one step (`_Join`), so the large values are
-    touched once per batch rather than once per prime. The values stay in
-    limbs; only the fractions taken from them become Integers.
+    Every image's residues are kept, by blocks of `_BATCH` primes, over the
+    union of the images' supports. A reconstruction attempt combines them
+    (`_Lift`) only for the coefficients it needs: in full for a few probes
+    and wherever a denominator shows, and otherwise, for a coefficient c of
+    an element whose denominator so far is d, the numerator c d alone. It is
+    about as large as the numerators the full lifts have shown, so it needs
+    only the residues of c d modulo a prefix of the primes whose product
+    exceeds those by 2^66 (`_Prefix`), checked against two primes outside
+    the prefix; one that does not fit takes a full lift and grows the prefix.
     """
     var kind: UInt8
     var leads: List[_Packed[Self.W]]
     var monomials: List[List[_Packed[Self.W]]]
     """Each element's monomials so far, in increasing order."""
-    var values: List[List[UInt64]]
-    """Each coefficient modulo `product`, in [0, product), `limbs` limbs each."""
-    var product: List[UInt64]
-    """The product of the primes whose residues have joined `values`, `limbs` limbs; none before the first batch."""
-    var limbs: Int
-    var batch: List[UInt64]
-    """The primes whose residues still wait."""
-    var residues: List[List[UInt32]]
-    """Each element's waiting residues, a row of one per coefficient for each of the `_BATCH` slots."""
+    var verified: List[Int]
+    """For each element, the generation of the recorded run whose final supports are its monomials, or -1."""
+    var primes: List[UInt64]
+    var residues: List[List[List[UInt32]]]
+    """Each element's residues, by block and then by prime: slot j of a block holds the j-th prime's, one per coefficient."""
     var count: Int
     var probe: Tuple[Int, Int]
     """The coefficient that last failed to reconstruct, tried first next time."""
@@ -469,11 +523,9 @@ struct _Images[W: Int](Movable):
         self.kind = kind
         self.leads = List[_Packed[Self.W]]()
         self.monomials = List[List[_Packed[Self.W]]]()
-        self.values = List[List[UInt64]]()
-        self.product = List[UInt64]()
-        self.limbs = 0
-        self.batch = List[UInt64]()
-        self.residues = List[List[UInt32]]()
+        self.verified = List[Int]()
+        self.primes = List[UInt64]()
+        self.residues = List[List[List[UInt32]]]()
         self.count = 0
         self.probe = (0, 0)
 
@@ -485,37 +537,51 @@ struct _Images[W: Int](Movable):
                 return False
         return True
 
+    def matches_supports(self, supports: List[List[_Packed[Self.W]]]) -> Bool:
+        """As `matches` for a replayed basis on the supports, by decreasing monomial."""
+        if len(supports) != len(self.leads):
+            return False
+        for i in range(len(supports)):
+            if not _equal(supports[i][0], self.leads[i]):
+                return False
+        return True
+
     def reset(mut self):
         self.leads = List[_Packed[Self.W]]()
         self.monomials = List[List[_Packed[Self.W]]]()
-        self.values = List[List[UInt64]]()
-        self.product = List[UInt64]()
-        self.limbs = 0
-        self.batch = List[UInt64]()
-        self.residues = List[List[UInt32]]()
+        self.verified = List[Int]()
+        self.primes = List[UInt64]()
+        self.residues = List[List[List[UInt32]]]()
         self.count = 0
         self.probe = (0, 0)
 
-    def _cover(mut self, e: Int, image: List[_Term[ModInt, Self.W]], mut budget: Budget) raises PolyError:
-        """Give element e every monomial of the image, new ones with value and residues zero."""
+    def _start(mut self, leads: List[_Packed[Self.W]]):
+        for lead in leads:
+            self.leads.append(lead)
+            self.monomials.append(List[_Packed[Self.W]]())
+            self.verified.append(-1)
+            self.residues.append(List[List[UInt32]]())
+
+    def _cover(mut self, e: Int, image: List[_Packed[Self.W]], mut budget: Budget) raises PolyError:
+        """Give element e every monomial of the image, in increasing order, new ones with residues zero."""
         var missing = 0
         var i = 0
         for j in range(len(image)):
             budget.charge(1)
-            while i < len(self.monomials[e]) and _compare(self.kind, self.monomials[e][i], image[j].monomial) < 0:
+            while i < len(self.monomials[e]) and _compare(self.kind, self.monomials[e][i], image[j]) < 0:
                 i += 1
-            if i < len(self.monomials[e]) and _equal(self.monomials[e][i], image[j].monomial):
+            if i < len(self.monomials[e]) and _equal(self.monomials[e][i], image[j]):
                 i += 1
             else:
                 missing += 1
         if missing == 0:
             return
+        self.verified[e] = -1
         var n = len(self.monomials[e]) + missing
-        var limbs = self.limbs
-        _allocation[UInt64](_product(n, limbs), budget)
-        _allocation[UInt32](n * _BATCH, budget)
+        _allocation[UInt32](_product(n * _BATCH, len(self.residues[e])), budget)
+        # A block has room for the primes it has held so far.
         var monomials = List[_Packed[Self.W]](capacity=n)
-        var values = List[UInt64](capacity=n * limbs)
+        # Where each old coefficient goes.
         var places = List[Int](capacity=len(self.monomials[e]))
         i = 0
         var j = 0
@@ -527,142 +593,183 @@ struct _Images[W: Int](Movable):
             elif i == len(self.monomials[e]):
                 comparison = 1
             else:
-                comparison = _compare(self.kind, self.monomials[e][i], image[j].monomial)
+                comparison = _compare(self.kind, self.monomials[e][i], image[j])
             if comparison <= 0:
+                places.append(len(monomials))
                 monomials.append(self.monomials[e][i])
-                for l in range(limbs):
-                    values.append(self.values[e][i * limbs + l])
-                places.append(len(monomials) - 1)
                 i += 1
                 if comparison == 0:
                     j += 1
             else:
-                monomials.append(image[j].monomial)
-                for _ in range(limbs):
-                    values.append(0)
+                monomials.append(image[j])
                 j += 1
-        # Each slot's row, with the old coefficients in their new places.
-        var old = len(self.monomials[e])
-        var residues = List[UInt32](length=n * _BATCH, fill=0)
-        for slot in range(len(self.batch)):
-            for k in range(old):
-                residues[slot * n + places[k]] = self.residues[e][slot * old + k]
+        var old = len(places)
+        for b in range(len(self.residues[e])):
+            var slots = len(self.residues[e][b]) // old
+            var residues = List[UInt32](length=n * slots, fill=0)
+            for slot in range(slots):
+                budget.charge(UInt64(old))
+                for k in range(old):
+                    residues[slot * n + places[k]] = self.residues[e][b][slot * old + k]
+            self.residues[e][b] = residues^
         self.monomials[e] = monomials^
-        self.values[e] = values^
-        self.residues[e] = residues^
+
+    def _block(mut self, e: Int, slot: Int, mut budget: Budget) raises PolyError:
+        """Make room for slot `slot` of element e's last block, starting a new block at its first slot.
+
+        Blocks grow with their primes, doubling their slots up to `_BATCH`,
+        so that bases a few images settle do not pay for whole blocks.
+        """
+        var n = len(self.monomials[e])
+        if slot == 0:
+            self.residues[e].append(List[UInt32]())
+        ref block = self.residues[e][len(self.residues[e]) - 1]
+        var needed = (slot + 1) * n
+        if needed > block.capacity():
+            var slots = min(_BATCH, max(slot + 1, 2 * slot))
+            _allocation[UInt32](slots * n, budget)
+            block.reserve(slots * n)
+        block.resize(needed, 0)
 
     def add(mut self, basis: List[List[_Term[ModInt, Self.W]]], p: UInt64, mut budget: Budget) raises PolyError:
-        """Add one image: its residues wait in the batch, over the union of supports."""
+        """Add one image: its residues join their block, over the union of supports."""
         if self.count == 0:
+            var leads = List[_Packed[Self.W]]()
             for element in basis:
-                self.leads.append(element[len(element) - 1].monomial)
-                self.monomials.append(List[_Packed[Self.W]]())
-                self.values.append(List[UInt64]())
-                self.residues.append(List[UInt32]())
-        var slot = len(self.batch)
+                leads.append(element[len(element) - 1].monomial)
+            self._start(leads)
+        var slot = self.count % _BATCH
         for e in range(len(basis)):
             ref image = basis[e]
-            # Usually the image has exactly the element's monomials.
-            var n = len(self.monomials[e])
-            var same = len(image) == n
+            # Usually the image has the element's monomials exactly.
+            var same = len(image) == len(self.monomials[e])
             if same:
-                budget.charge(UInt64(n))
-                var row = self.residues[e].unsafe_ptr().unsafe_offset(slot * n)
-                for j in range(n):
-                    if not _equal(self.monomials[e].unsafe_get(j), image[j].monomial):
+                budget.charge(UInt64(len(image)))
+                for j in range(len(image)):
+                    if not _equal(self.monomials[e][j], image[j].monomial):
                         same = False
                         break
-                    row.unsafe_offset(j).unsafe_store(UInt32(image[j].coefficient.value))
+            if not same:
+                var monomials = List[_Packed[Self.W]](capacity=len(image))
+                for t in image:
+                    monomials.append(t.monomial)
+                self._cover(e, monomials, budget)
+            self._block(e, slot, budget)
+            var n = len(self.monomials[e])
+            ref block = self.residues[e][len(self.residues[e]) - 1]
             if same:
+                for j in range(len(image)):
+                    block[slot * n + j] = UInt32(image[j].coefficient.value)
                 continue
-            self._cover(e, image, budget)
             # The image's monomials are now among the element's; both increase.
-            n = len(self.monomials[e])
             var i = 0
             for j in range(len(image)):
                 while not _equal(self.monomials[e][i], image[j].monomial):
                     budget.charge(1)
                     i += 1
-                self.residues[e][slot * n + i] = UInt32(image[j].coefficient.value)
-        self.batch.append(p)
+                block[slot * n + i] = UInt32(image[j].coefficient.value)
+        self.primes.append(p)
         self.count += 1
-        if len(self.batch) == _BATCH:
-            self._flush(budget)
 
-    def _flush(mut self, mut budget: Budget) raises PolyError:
-        """Join the waiting residues to the accumulated values."""
-        if len(self.batch) == 0:
-            return
-        var join = _Join(self.batch, self.product, budget)
-        var width = join.width
-        for e in range(len(self.values)):
-            var n = len(self.monomials[e])
-            _allocation[UInt64](_product(n, width), budget)
-            var values = List[UInt64](length=n * width, fill=0)
-            join.join_all(self.values[e].unsafe_ptr(), self.residues[e].unsafe_ptr(), n, values.unsafe_ptr(), budget)
-            self.values[e] = values^
-            for i in range(len(self.residues[e])):
-                self.residues[e][i] = 0
-        self.product = join.product.copy()
-        self.limbs = width
-        self.batch.clear()
+    def add_lane(mut self, supports: List[List[_Packed[Self.W]]], generation: Int, bases: _LaneBases, lane: Int, p: UInt64, mut budget: Budget) raises PolyError:
+        """Add one lane of a replayed batch, on the supports of the run of the given generation.
 
-    def _probe_ready(mut self, mut budget: Budget) raises PolyError -> Bool:
-        """Whether some probe coefficients, with the waiting residues, have small enough fractions.
-
-        The probes are the coefficient that failed last time and the least
-        term of a spread of elements; one that fails becomes the next probe.
+        An element whose monomials are found to be the supports' keeps that
+        generation, so later lanes of the run take their residues directly.
         """
-        var join = _Join(self.batch, self.product, budget)
-        var total = _integer(join.product.unsafe_ptr(), join.width)
+        if self.count == 0:
+            var leads = List[_Packed[Self.W]]()
+            for support in supports:
+                leads.append(support[0])
+            self._start(leads)
+        var slot = self.count % _BATCH
+        for e in range(len(supports)):
+            ref support = supports[e]
+            var m = len(support)
+            if self.verified[e] != generation:
+                var same = m == len(self.monomials[e])
+                if same:
+                    budget.charge(UInt64(m))
+                    for k in range(m):
+                        if not _equal(self.monomials[e][m - 1 - k], support[k]):
+                            same = False
+                            break
+                if same:
+                    self.verified[e] = generation
+                else:
+                    var monomials = List[_Packed[Self.W]](capacity=m)
+                    for k in range(m - 1, -1, -1):
+                        monomials.append(support[k])
+                    self._cover(e, monomials, budget)
+            self._block(e, slot, budget)
+            var n = len(self.monomials[e])
+            ref block = self.residues[e][len(self.residues[e]) - 1]
+            ref values = bases.values[e]
+            budget.charge(UInt64(m))
+            if self.verified[e] == generation:
+                for k in range(m):
+                    block[slot * n + n - 1 - k] = values[_LANES * k + lane]
+                continue
+            # The supports' monomials are among the element's, which increase.
+            var i = 0
+            for k in range(m - 1, -1, -1):
+                while not _equal(self.monomials[e][i], support[k]):
+                    budget.charge(1)
+                    i += 1
+                block[slot * n + i] = values[_LANES * k + lane]
+        self.primes.append(p)
+        self.count += 1
+
+    def _gather(self, e: Int, k: Int, blocks: Int, scales: List[UInt64], mut into: List[UInt32]):
+        """Set into to the residues of coefficient k of element e in the first blocks, block-major, each times its scale when there are scales."""
+        var n = len(self.monomials[e])
+        for b in range(blocks):
+            ref block = self.residues[e][b]
+            var count = min(_BATCH, len(self.primes) - b * _BATCH)
+            for slot in range(count):
+                var r = block.unsafe_get(slot * n + k)
+                if len(scales):
+                    var i = b * _BATCH + slot
+                    r = UInt32((UInt64(r) * scales.unsafe_get(i)) % self.primes.unsafe_get(i))
+                into.unsafe_get(b * _BATCH + slot) = r
+
+    def reconstruct(mut self, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ZZ, Self.W]]]]:
+        """Every element, as fractions, times the least common denominator of its coefficients; None when a coefficient has no small enough fraction yet.
+
+        Probe coefficients are tried first, so an attempt that is still too
+        early costs a few reconstructions: the coefficient that failed last
+        time and the least term of a spread of elements; one that fails
+        becomes the next probe.
+        """
+        var blocks = (len(self.primes) + _BATCH - 1) // _BATCH
+        var full = _Lift(self.primes, blocks, budget)
         var bound: Integer
+        var half: Integer
         try:
-            bound = isqrt(total // 2)
+            bound = isqrt(full.modulus // 2)
+            half = full.modulus // 2
         except e:
             raise PolyError(PolyErrorKind.CAPACITY, String(e))
-        var value = List[UInt64](length=join.width, fill=0)
+        _allocation[UInt32](blocks * _BATCH, budget)
+        var gathered = List[UInt32](length=blocks * _BATCH, fill=0)
+        var unscaled = List[UInt64]()
         var probes: List[Tuple[Int, Int]] = [self.probe]
-        for e in range(0, len(self.values), max(1, len(self.values) // _PROBES)):
+        for e in range(0, len(self.monomials), max(1, len(self.monomials) // _PROBES)):
             probes.append((e, 0))
         for probe in probes:
             var pe = probe[0]
             var pk = probe[1]
             if pe >= len(self.monomials) or pk >= len(self.monomials[pe]):
                 continue
-            join.join(self.values[pe].unsafe_ptr().unsafe_offset(pk * self.limbs), self.residues[pe].unsafe_ptr().unsafe_offset(pk), len(self.monomials[pe]), value.unsafe_ptr(), budget)
-            if not _reconstruct(_integer(value.unsafe_ptr(), join.width), total, bound, budget):
+            self._gather(pe, pk, blocks, unscaled, gathered)
+            if not _reconstruct(full.value(gathered, budget), full.modulus, bound, budget):
                 self.probe = (pe, pk)
-                return False
-        return True
-
-    def reconstruct(mut self, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ZZ, Self.W]]]]:
-        """Every element, as fractions, times the least common denominator of its coefficients; None when a coefficient has no small enough fraction yet.
-
-        Probe coefficients are tried first, so an attempt that is still too
-        early costs a few reconstructions and leaves the batch waiting.
-        """
-        if not self._probe_ready(budget):
-            return None
-        self._flush(budget)
-        var n = self.limbs
-        var modulus = _integer(self.product.unsafe_ptr(), n)
-        var bound: Integer
-        try:
-            bound = isqrt(modulus // 2)
-        except e:
-            raise PolyError(PolyErrorKind.CAPACITY, String(e))
-        var bound_limbs = _limbs_of(bound)
-        var half = List[UInt64](length=n, fill=0)
-        for l in range(n):
-            half[l] = (self.product[l] >> 1) | (self.product[l + 1] << 63 if l + 1 < n else UInt64(0))
-        # Products by the denominator are reduced by the modulus shifted to a
-        # normalized divisor, and shifted back.
-        var shift = Int(count_leading_zeros(self.product[n - 1]))
-        var divisor = _shifted(self.product, shift)
-        _allocation[UInt64](4 * n + 3, budget)
-        var product = List[UInt64](length=2 * n + 3, fill=0)
-        var residue = List[UInt64](length=n, fill=0)
-        var magnitude = List[UInt64](length=n, fill=0)
+                return None
+        # The prefix for numerators, sized by the largest numerator a full
+        # lift has given so far, and grown when one does not fit.
+        var prefix = _Prefix(self.primes, 0, budget)
+        var limbs = List[UInt64]()
+        var scales = List[UInt64]()
         var result = List[List[_Term[ZZ, Self.W]]](capacity=len(self.leads))
         for e in range(len(self.leads)):
             # A running common denominator: a coefficient whose value times it
@@ -670,64 +777,82 @@ struct _Images[W: Int](Movable):
             # numerator is over the denominator of its time; `changes` marks
             # where the denominator grew, and to what.
             var denominator = Integer(1)
-            var scaled = List[UInt64]()  # The denominator times 2^shift; no limbs while it is 1.
+            scales.clear()
             var numerators = List[Integer](capacity=len(self.monomials[e]))
             var changes = List[Int]()
             var denominators = List[Integer]()
             for k in range(len(self.monomials[e])):
                 budget.charge(1)
-                _work(n * 8 + 1, denominator.magnitude_bit_length() // 8 + 1, True, budget)
-                var value = self.values[e].unsafe_ptr().unsafe_offset(k * n)
-                # The residue of value times the denominator, then the least
-                # numerator in absolute value.
-                if len(scaled) == 0:
-                    for l in range(n):
-                        residue.unsafe_get(l) = value.unsafe_offset(l).unsafe_load()
-                else:
-                    var length = n + len(scaled)
-                    var x = product.unsafe_ptr()
-                    for l in range(length + 1):
-                        x.unsafe_offset(l).unsafe_store(0)
-                    for l in range(len(scaled)):
-                        _add_mul_1(x.unsafe_offset(l), length - l, scaled.unsafe_get(l), value, n)
-                    _remainder_limbs(x, length, divisor.unsafe_ptr(), n)
-                    for l in range(n):
-                        var high = x.unsafe_offset(l + 1).unsafe_load() << UInt64(64 - shift) if shift > 0 and l + 1 < n else UInt64(0)
-                        residue.unsafe_get(l) = (x.unsafe_offset(l).unsafe_load() >> UInt64(shift)) | high
-                var negative = _compare_limbs(residue.unsafe_ptr(), n, half.unsafe_ptr(), n) > 0
-                if negative:
-                    for l in range(n):
-                        magnitude.unsafe_get(l) = self.product.unsafe_get(l)
-                    _ = _subtract_limbs(magnitude.unsafe_ptr(), n, residue.unsafe_ptr(), n)
-                else:
-                    for l in range(n):
-                        magnitude.unsafe_get(l) = residue.unsafe_get(l)
-                var numerator = _integer(magnitude.unsafe_ptr(), n, negative)
-                if _compare_limbs(magnitude.unsafe_ptr(), n, bound_limbs.unsafe_ptr(), len(bound_limbs)) > 0:
-                    var fraction = _reconstruct(numerator, modulus, bound, budget)
-                    if not fraction:
-                        self.probe = (e, k)
-                        return None
-                    var f = fraction.take()
+                var numerator = Optional[Integer](None)
+                if prefix.blocks > 0:
+                    # The numerator from the prefix, if it is within the
+                    # prefix's capacity and agrees with the checking primes.
+                    self._gather(e, k, prefix.blocks, scales, gathered)
+                    var candidate = prefix.lift.value(gathered, budget)
+                    var negative = candidate > prefix.half
+                    limbs.clear()
+                    _magnitude(candidate, limbs)
+                    var agrees = True
+                    for c in range(len(prefix.checks)):
+                        var i = prefix.checked[c]
+                        var p = self.primes[i]
+                        var r = UInt64(self.residues[e][i // _BATCH][(i % _BATCH) * len(self.monomials[e]) + k])
+                        if len(scales):
+                            r = UInt64((UInt128(r) * UInt128(scales[i])) % UInt128(p))
+                        var got = prefix.checks[c].residue(limbs)
+                        if negative:
+                            got = (got + p - prefix.shifts[c]) % p
+                        if got != r:
+                            agrees = False
+                            break
+                    if agrees:
+                        try:
+                            if negative:
+                                candidate -= prefix.lift.modulus
+                        except err:
+                            raise PolyError(PolyErrorKind.CAPACITY, String(err))
+                        if candidate.magnitude_bit_length() <= prefix.capacity and abs(candidate) <= bound:
+                            numerator = Optional(candidate^)
+                if not numerator:
+                    # The coefficient times d modulo M, lifted from the
+                    # residues times d.
+                    self._gather(e, k, blocks, scales, gathered)
+                    var exact = full.value(gathered, budget)
                     try:
-                        denominator = denominator * f.denominator()
+                        if exact > half:
+                            exact -= full.modulus
                     except err:
                         raise PolyError(PolyErrorKind.CAPACITY, String(err))
-                    if denominator > bound:
-                        self.probe = (e, k)
-                        return None
-                    scaled = _shifted(_limbs_of(denominator), shift)
-                    numerator = f.numerator().copy()
-                    changes.append(k)
-                    denominators.append(denominator.copy())
-                numerators.append(numerator^)
+                    if abs(exact) > bound:
+                        var fraction = _reconstruct(exact, full.modulus, bound, budget)
+                        if not fraction:
+                            self.probe = (e, k)
+                            return None
+                        var f = fraction.take()
+                        try:
+                            denominator = denominator * f.denominator()
+                        except err:
+                            raise PolyError(PolyErrorKind.CAPACITY, String(err))
+                        if denominator > bound:
+                            self.probe = (e, k)
+                            return None
+                        exact = f.numerator().copy()
+                        changes.append(k)
+                        denominators.append(denominator.copy())
+                        _residues(denominator, self.primes, len(self.primes), scales, budget)
+                    # Later numerators are about this large: a prefix with a
+                    # block to spare covers them.
+                    var size = exact.magnitude_bit_length()
+                    if not prefix.exhausted and size > prefix.capacity and prefix.capacity < bound.magnitude_bit_length():
+                        prefix = _Prefix(self.primes, min(size + 30 * _BATCH, bound.magnitude_bit_length()), budget)
+                    numerator = Optional(exact^)
+                numerators.append(numerator.take())
             # Over the final denominator: numerators before a change lack the
             # factors that came later.
             _allocation[_Term[ZZ, Self.W]](len(numerators), budget)
             var terms = List[_Term[ZZ, Self.W]](capacity=len(numerators))
             var segment = -1
             var factor = Integer(1)
-            var unit = True
             for k in range(len(numerators)):
                 budget.charge(1)
                 if segment + 1 < len(changes) and changes[segment + 1] == k:
@@ -736,20 +861,15 @@ struct _Images[W: Int](Movable):
                         factor = denominator // denominators[segment]
                     except err:
                         raise PolyError(PolyErrorKind.CAPACITY, String(err))
-                    unit = factor == Integer(1)
                 elif segment < 0 and k == 0:
                     factor = denominator.copy()
-                    unit = factor == Integer(1)
                 if numerators[k].sign() == 0:
                     continue
-                var value = Integer(0)
-                if unit:
-                    swap(value, numerators[k])
-                else:
-                    try:
-                        value = numerators[k] * factor
-                    except err:
-                        raise PolyError(PolyErrorKind.CAPACITY, String(err))
+                var value: Integer
+                try:
+                    value = numerators[k] * factor
+                except err:
+                    raise PolyError(PolyErrorKind.CAPACITY, String(err))
                 terms.append(_Term[ZZ, Self.W](self.monomials[e][k], ZZ(value^)))
             result.append(terms^)
         return result^
@@ -810,16 +930,22 @@ def _copy[W: Int](p: List[_Term[ZZ, W]], mut budget: Budget) raises PolyError ->
     return terms^
 
 
-def _certify[W: Int](kind: UInt8, inputs: List[List[_Term[ZZ, W]]], candidate: List[List[_Term[ZZ, W]]], mut budget: Budget) raises PolyError -> Bool:
-    """Checks (a), (b), and (d) of the module proof; (c) holds by construction."""
+def _certify[W: Int](kind: UInt8, inputs: List[List[_Term[ZZ, W]]], var candidate: List[List[_Term[ZZ, W]]], mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ZZ, W]]]]:
+    """The candidate, primitive with positive leading coefficients, if it passes checks (a), (b), and (d) of the module proof; (c) holds by construction.
+
+    The checks run on the candidate's own elements, moved into an engine
+    rather than copied.
+    """
     var engine = _Engine[ZZ, W, True](kind, NoContext())
-    for g in candidate:
+    for i in range(len(candidate)):
         budget.charge(1)
-        if len(g) == 0:
-            return False
-        engine.insert(_copy(g, budget), budget, heap=False)
+        if len(candidate[i]) == 0:
+            return None
+        var g = List[_Term[ZZ, W]]()
+        swap(g, candidate[i])
+        engine.insert(g^, budget, heap=False)
     if len(engine.active) != len(candidate):
-        return False  # Some leading monomial divides another.
+        return None  # Some leading monomial divides another.
     engine.heapify_pairs(budget)
     engine.sort_active(budget)
     # (d) Reduced: no tail monomial is divisible by a leading monomial. As
@@ -837,19 +963,23 @@ def _certify[W: Int](kind: UInt8, inputs: List[List[_Term[ZZ, W]]], candidate: L
     for r in range(rows):
         for k in range(matrix.starts[r] + 1, matrix.starts[r + 1]):
             if matrix.columns.covered[Int(matrix.entries[k])]:
-                return False
+                return None
     matrix.preprocess(engine, store, budget)
     if len(matrix.sources) != rows:
-        return False
+        return None
     # (a) Every input reduces to zero.
     for f in inputs:
         budget.charge(1)
         var pending = _Buckets[ZZ, W, True](kind, NoContext())
         pending.add(_copy(f, budget), budget)
         if not engine.reduces_to_zero(pending^, engine.active, budget):
-            return False
+            return None
     # (b) Every remaining S-pair reduces to zero.
-    return _pairs_reduce_to_zero(engine, budget)
+    if not _pairs_reduce_to_zero(engine, budget):
+        return None
+    var basis = List[List[_Term[ZZ, W]]]()
+    swap(basis, engine.polys)
+    return basis^
 
 
 def _monic[W: Int](p: List[_Term[ZZ, W]], order: MonomialOrder, by_index: List[Int], mut budget: Budget) raises PolyError -> SparsePoly[QQ]:
@@ -932,10 +1062,12 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
     # prime whose replay departs from it is computed in full and recorded.
     var trace = _Trace[W]()
     var learned = False
+    # Counts the recorded runs, so that images can tell when their supports change.
+    var generation = 0
     # Replays run `_LANES` primes at once: the images of the primes after
-    # this one wait in `ahead`, computed from the same recorded run, and are
-    # dropped whenever the run is recorded anew.
-    var ahead = List[List[List[_Term[ModInt, W]]]]()
+    # this one wait in `ahead`, as residues on the recorded run's final
+    # supports, and are dropped whenever the run is recorded anew.
+    var ahead = _LaneBases()
     var ahead_primes = List[UInt64]()
     var p = (UInt64(1) << 31) + 1
     for _ in range(_PRIME_LIMIT):
@@ -944,12 +1076,12 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
         if not _admissible(inputs, p, budget):
             continue
         var ring = Modulus(_prime_value=p)
-        var replayed = Optional[List[List[_Term[ModInt, W]]]](None)
+        var lane = -1
         if learned:
-            if len(ahead_primes) > 0 and ahead_primes[0] == p:
-                replayed = ahead.pop(0)
-                _ = ahead_primes.pop(0)
-            else:
+            for l in range(ahead.live):
+                if ahead_primes[l] == p:
+                    lane = l
+            if lane < 0:
                 # This prime and the next admissible ones, in one batch.
                 var rings: List[Modulus] = [ring]
                 var batch = List[List[List[_Term[ModInt, W]]]]()
@@ -960,21 +1092,21 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
                     if _admissible(inputs, q, budget):
                         rings.append(Modulus(_prime_value=q))
                         batch.append(_images_of(inputs, rings[len(rings) - 1], budget))
-                ahead = _f4_replay_lanes[W](trace, batch^, kind, rings, budget)
+                ahead = _f4_replay_bases[W](trace, batch^, kind, rings, budget)
                 ahead_primes = List[UInt64]()
-                for i in range(1, len(ahead)):
-                    ahead_primes.append(rings[i].value)
-                if len(ahead) > 0:
-                    replayed = ahead.pop(0)
-        var basis: List[List[_Term[ModInt, W]]]
-        if replayed:
-            basis = replayed.take()
-        else:
+                for ring_l in rings:
+                    ahead_primes.append(ring_l.value)
+                if ahead.live > 0:
+                    lane = 0
+        # A replayed image stays as residues unless its terms are needed.
+        var basis = List[List[_Term[ModInt, W]]]()
+        if lane < 0:
             basis = _f4_learn[W](_images_of(inputs, ring, budget), kind, ring, trace, budget)
             learned = True
-            ahead = List[List[List[_Term[ModInt, W]]]]()
+            generation += 1
+            ahead = _LaneBases()
             ahead_primes = List[UInt64]()
-        if images.count > 0 and not images.matches(basis):
+        if images.count > 0 and not (images.matches_supports(trace.steps[len(trace.steps) - 1].monomials) if lane >= 0 else images.matches(basis)):
             mismatches += 1
             if mismatches < _MISMATCH_LIMIT:
                 continue
@@ -984,19 +1116,33 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
             attempt = 1
         mismatches = 0
         if candidate:
+            if lane >= 0:
+                basis = _lane_basis(trace, ahead, lane, ring, budget)
+                lane = -1
             if _agrees(kind, candidate.value(), basis, p, budget):
                 certifications += 1
-                if not certify or _certify(kind, inputs, candidate.value(), budget):
+                if not certify:
                     return candidate.take()
+                # Certification needs neither the recorded run nor the
+                # waiting lanes, and a failure records the run anew.
+                trace = _Trace[W]()
+                ahead = _LaneBases()
+                ahead_primes = List[UInt64]()
+                var certified = _certify(kind, inputs, candidate.take(), budget)
+                if certified:
+                    return certified.take()
                 if certifications >= _CERTIFY_LIMIT:
                     return None
                 # The images may follow an unlucky recorded run: record anew,
                 # so that differing leading monomials can show.
                 learned = False
-                ahead = List[List[List[_Term[ModInt, W]]]]()
+                ahead = _LaneBases()
                 ahead_primes = List[UInt64]()
             candidate = None
-        images.add(basis, p, budget)
+        if lane >= 0:
+            images.add_lane(trace.steps[len(trace.steps) - 1].monomials, generation, ahead, lane, p, budget)
+        else:
+            images.add(basis, p, budget)
         var count = images.count
         if count >= attempt:
             candidate = images.reconstruct(budget)
@@ -1057,8 +1203,11 @@ def _finish[W: Int](var basis: List[List[_Term[ZZ, W]]], homogeneous: Bool, n: I
     var by_index = _priorities(order, budget)
     var result = List[SparsePoly[QQ]]()
     if homogeneous:
-        for p in basis:
+        for e in range(len(basis)):
             budget.charge(1)
+            # Each integral element goes as soon as it is written out.
+            var p = List[_Term[ZZ, W]]()
+            swap(p, basis[e])
             result.append(_monic(p, order, by_index, budget))
         return result^
     # Set h = 1. Distinct terms of a homogeneous polynomial differ off lane n,
@@ -1069,25 +1218,32 @@ def _finish[W: Int](var basis: List[List[_Term[ZZ, W]]], homogeneous: Bool, n: I
             var exponents = basis[e][k].monomial.exponents()
             exponents[n] = 0
             basis[e][k].monomial = _packed(exponents)
-    # Keep the elements whose leading monomial no other one divides, then reduce tails.
+    # Keep the elements whose leading monomial no other one divides, then
+    # reduce tails. The kept elements move into the engine.
+    var leads = List[_Packed[W]](capacity=len(basis))
+    for e in range(len(basis)):
+        leads.append(basis[e][len(basis[e]) - 1].monomial)
     var engine = _Engine[ZZ, W, True](order.kind, NoContext())
     for e in range(len(basis)):
         budget.charge(1)
-        var lead = basis[e][len(basis[e]) - 1].monomial
         var redundant = False
         for f in range(len(basis)):
             budget.charge(1)
-            if f != e and _divides(basis[f][len(basis[f]) - 1].monomial, lead):
+            if f != e and _divides(leads[f], leads[e]):
                 redundant = True
                 break
         if redundant:
             continue
-        engine.leads.append(lead)
+        engine.leads.append(leads[e])
         engine.active.append(len(engine.polys))
-        engine.polys.append(_copy(basis[e], budget))
+        var p = List[_Term[ZZ, W]]()
+        swap(p, basis[e])
+        engine.polys.append(p^)
     var reduced = _reduced_tails(engine, budget)
-    for p in reduced:
+    for e in range(len(reduced)):
         budget.charge(1)
+        var p = List[_Term[ZZ, W]]()
+        swap(p, reduced[e])
         result.append(_monic(p, order, by_index, budget))
     return result^
 
