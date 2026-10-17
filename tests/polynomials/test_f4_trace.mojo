@@ -85,9 +85,18 @@ def same(a: List[List[_Term[ModInt, 8]]], b: List[List[_Term[ModInt, 8]]]) -> Bo
 
 
 def check_system(generators: List[SparsePoly[QQ]], order: MonomialOrder, name: String, mut c: Checker, mut work: Budget) raises:
+    check_system(generators, order, name, -1, c, work)
+    # Every step symbolic, and only the later ones.
+    check_system(generators, order, name + " (symbolic trace)", 0, c, work)
+    check_system(generators, order, name + " (partly symbolic trace)", 200, c, work)
+
+
+def check_system(generators: List[SparsePoly[QQ]], order: MonomialOrder, name: String, limit: Int, mut c: Checker, mut work: Budget) raises:
     var primes: List[UInt64] = [2147483647, 2147483629, 2147483587, 1000003, 65521, 32749]
     var first = Modulus(primes[0], work)
     var trace = _Trace[8]()
+    if limit >= 0:
+        trace.limit = limit
     var learned = _f4_learn[8](packed_mod(generators, first, order, work), order.kind, first, trace, work)
     c.check(same(learned, _f4_packed[8](packed_mod(generators, first, order, work), order.kind, first, work)), name + ": recording leaves the run unchanged")
     var replays = 0
