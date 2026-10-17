@@ -5,7 +5,7 @@ from .dense import DensePoly
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size
 from .evaluate import _derivative_dense
 from .division import divmod
-from .certificates import SturmSequence, RootCountCertificate, _integer_form, _IntegerChain, _integer_variations
+from .certificates import SturmSequence, RootCountCertificate, _integer_form, _IntegerChain, _integer_variations, _fujiwara_exponent
 from ._dense_ops import _copy as _copy_poly
 from ._root_ops import _copy, _compare, _midpoint, _variations, _chain_variations, _one_sided, _sign_at
 from ._images import _integer_dense
@@ -71,6 +71,8 @@ def _sturm_chain(f: DensePoly[QQ], mut chain: _IntegerChain, mut budget: Budget,
             before = _primitive_form(polynomials[0], budget)
             current = _primitive_form(polynomials[1], budget)
             chain.first = before[0].copy()
+            chain.bounded = True
+            chain.bound = _fujiwara_exponent(before[0])
             chain.second = current[0].copy()
             chain.degrees = [len(before[0]) - 1, len(current[0]) - 1]
             chain.signs = [before[1].sign(), current[1].sign()]

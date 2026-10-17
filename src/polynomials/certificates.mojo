@@ -1,6 +1,6 @@
 """Arithmetic certificates and independent checks of their stated identities."""
 from ._coefficient_ops import _copy as _copy_coefficient
-from apn_mojo import Integer, lcm
+from apn_mojo import Integer, Rational, gcd, lcm
 from .errors import Budget, PolyError, PolyErrorKind, _charge_size, _sum
 from .coefficients import CoefficientRing
 from .dense import DensePoly
@@ -649,30 +649,33 @@ def check_cancellation(p: SparsePoly[QQ], q: SparsePoly[QQ], certificate: Cancel
 
 def _chain_relations(sequence: SturmSequence, mut chain: _IntegerChain, mut budget: Budget) raises PolyError -> Bool:
     # p[i - 1] == q[i - 1] * p[i] - p[i + 1] for every i. With each entry
-    # written as P / L (L the lcm of its denominators, usually one shared
-    # denominator), a linear quotient (B x + A) / E turns every relation into
-    # integer coefficient identities scaled by positive constants, so no
-    # rational normalization is needed. Longer quotients use the rational path.
+    # written as s P (P its primitive integer part, s a rational scalar) and
+    # q = Q / E, a relation is P0 = alpha Q P1 - beta P2 with
+    # alpha = s1 / (E s0) and beta = s2 / s0; clearing their denominators
+    # with D gives the integer identity D P0 = (D alpha) Q P1 - (D beta) P2,
+    # checked on the small primitive parts. Longer quotients are checked as
+    # rational products. The identities are the integer chain steps.
     var n = len(sequence.polynomials)
     _allocation[List[Integer]](n, budget)
-    var forms = List[Tuple[List[Integer], Integer]](capacity=n)
+    var forms = List[Tuple[List[Integer], Rational]](capacity=n)
     for p in sequence.polynomials:
-        forms.append(_integer_form(p, budget))
-    var none = (List[Integer](), Integer(1))
-    # The verified identities are the integer chain steps
-    # s1 P0 = (s2 Q) P1 + (-s3) P2 of _linear_relation; entries P / L keep
-    # the signs of their rational entries.
+        forms.append(_scaled_form(p, budget))
     chain = _IntegerChain()
     chain.first = forms[0][0].copy()
+    if len(forms[0][0]) > 1:
+        chain.bounded = True
+        chain.bound = _fujiwara_exponent(forms[0][0])
     if n > 1:
         chain.second = forms[1][0].copy()
     for i in range(n):
         chain.degrees.append(len(forms[i][0]) - 1)
-        chain.signs.append(1)
+        chain.signs.append(forms[i][1].sign())
+    var none = (List[Integer](), Rational(0))
     for i in range(1, n):
         budget.charge(1)
         ref q = sequence.quotients[i - 1]
         q.check_invariants(budget)
+        var quotient = _integer_form(q, budget)
         if q.degree() > 1:
             var relation = q.mul(sequence.polynomials[i], budget)
             if i + 1 < n:
@@ -680,35 +683,80 @@ def _chain_relations(sequence: SturmSequence, mut chain: _IntegerChain, mut budg
             if not _dense_equal(sequence.polynomials[i - 1], relation, budget):
                 return False
             if i + 1 < n:
-                _chain_step(chain, forms[i - 1][1], forms[i][1], forms[i + 1][1], _integer_form(q, budget), budget)
+                var step = _step_scalars(forms[i - 1][1], forms[i][1], forms[i + 1][1], quotient[1])
+                _chain_step(chain, step, quotient[0], budget)
             continue
         q._same(sequence.polynomials[i])
         if sequence.polynomials[i - 1].variable != q.variable:
             return False
         if i + 1 < n:
             sequence.polynomials[i + 1]._same(q)
-        var quotient = _integer_form(q, budget)
-        if i + 1 < n:
-            if not _linear_relation(forms[i - 1], forms[i], forms[i + 1], quotient, budget):
+            var step = _step_scalars(forms[i - 1][1], forms[i][1], forms[i + 1][1], quotient[1])
+            if not _linear_relation(forms[i - 1][0], forms[i][0], forms[i + 1][0], quotient[0], step, budget):
                 return False
-            _chain_step(chain, forms[i - 1][1], forms[i][1], forms[i + 1][1], quotient, budget)
-        elif not _linear_relation(forms[i - 1], forms[i], none, quotient, budget):
-            return False
+            _chain_step(chain, step, quotient[0], budget)
+        else:
+            var step = _step_scalars(forms[i - 1][1], forms[i][1], none[1], quotient[1])
+            if not _linear_relation(forms[i - 1][0], forms[i][0], none[0], quotient[0], step, budget):
+                return False
     return True
 
 
-def _chain_step(mut chain: _IntegerChain, l0: Integer, l1: Integer, l2: Integer, quotient: Tuple[List[Integer], Integer], mut budget: Budget) raises PolyError:
-    # P0 / l0 = (Q / E) P1 / l1 - P2 / l2 becomes
-    # (l1 l2 E) P0 = (l0 l2 Q) P1 + (-E l0 l1) P2.
-    budget.charge(UInt64(len(quotient[0]) + 1))
+def _step_scalars(s0: Rational, s1: Rational, s2: Rational, denominator: Integer) raises PolyError -> Tuple[Integer, Integer, Integer]:
+    # (D, D alpha, D beta) for alpha = s1 / (denominator s0), beta = s2 / s0.
     try:
-        var middle = l0 * l2
-        var scaled = List[Integer](capacity=len(quotient[0]))
-        for v in quotient[0]:
-            scaled.append(v * middle)
-        chain.powers.append(l1 * l2 * quotient[1])
+        var alpha = s1 / (s0 * Rational(denominator))
+        var beta = s2 / s0
+        var d = lcm(alpha.denominator(), beta.denominator())
+        return (d.copy(), alpha.numerator() * (d // alpha.denominator()), beta.numerator() * (d // beta.denominator()))
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+def _chain_step(mut chain: _IntegerChain, step: Tuple[Integer, Integer, Integer], quotient: List[Integer], mut budget: Budget) raises PolyError:
+    # D P0 = (A Q) P1 + (-B) P2 is the chain step (powers, quotients, contents).
+    budget.charge(UInt64(len(quotient) + 1))
+    try:
+        var scaled = List[Integer](capacity=len(quotient))
+        for v in quotient:
+            scaled.append(v * step[1])
+        chain.powers.append(step[0].copy())
         chain.quotients.append(scaled^)
-        chain.contents.append(-(quotient[1] * l0 * l1))
+        chain.contents.append(-step[2])
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+def _scaled_form(p: DensePoly[QQ], mut budget: Budget) raises PolyError -> Tuple[List[Integer], Rational]:
+    # p = s P with P primitive: G, the gcd of the numerators, and L, the lcm
+    # of the denominators, usually settle after one or two big gcds; every
+    # other coefficient only needs a divisibility test.
+    _allocation[Integer](len(p.coefficients), budget)
+    var size = 0
+    for c in p.coefficients:
+        budget.charge(1)
+        size += c.size()
+    _charge_size(size, budget)
+    try:
+        var g = Integer(0)
+        var common = Integer(1)
+        for c in p.coefficients:
+            var v = abs(c.value.numerator())
+            if not v:
+                continue
+            if not g:
+                g = v^
+            elif g != Integer(1) and v % g:
+                g = gcd(g, v)
+            var d = c.value.denominator()
+            if d != common and common % d:
+                common = lcm(common, d)
+        var values = List[Integer](capacity=len(p.coefficients))
+        for c in p.coefficients:
+            var d = c.value.denominator()
+            var v = c.value.numerator() // g if g != Integer(1) else c.value.numerator()
+            values.append(v if d == common else v * (common // d))
+        return (values^, Rational(g, common))
     except e:
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
 
@@ -735,31 +783,24 @@ def _integer_form(p: DensePoly[QQ], mut budget: Budget) raises PolyError -> Tupl
     return (values^, common^)
 
 
-def _linear_relation(before: Tuple[List[Integer], Integer], current: Tuple[List[Integer], Integer], after: Tuple[List[Integer], Integer], quotient: Tuple[List[Integer], Integer], mut budget: Budget) raises PolyError -> Bool:
-    # P0 / L0 == (B x + A) / E * P1 / L1 - P2 / L2, multiplied by E L0 L1 L2;
-    # the last relation has no P2 (an empty form with L2 = 1).
-    ref p0 = before[0]
-    ref p1 = current[0]
-    ref p2 = after[0]
+def _linear_relation(p0: List[Integer], p1: List[Integer], p2: List[Integer], quotient: List[Integer], step: Tuple[Integer, Integer, Integer], mut budget: Budget) raises PolyError -> Bool:
+    # D P0 == A (Q1 x + Q0) P1 - B P2, coefficient by coefficient; the last
+    # relation has no P2.
     var length = max(max(len(p0), len(p1) + 1), len(p2))
     var size = 0
     try:
-        var a = quotient[0][0].copy() if len(quotient[0]) > 0 else Integer(0)
-        var b = quotient[0][1].copy() if len(quotient[0]) > 1 else Integer(0)
-        ref l2 = after[1]
-        var left_scale = current[1] * l2 * quotient[1]
-        var middle_scale = before[1] * l2
-        var right_scale = quotient[1] * before[1] * current[1]
+        var a = quotient[0].copy() if len(quotient) > 0 else Integer(0)
+        var b = quotient[1].copy() if len(quotient) > 1 else Integer(0)
         for j in range(length):
             var term = Integer(0)
             if j < len(p1) and a:
                 term = a * p1[j]
             if j >= 1 and j - 1 < len(p1) and b:
                 term = term + b * p1[j - 1]
-            var rhs = term * middle_scale
+            var rhs = term * step[1]
             if j < len(p2):
-                rhs = rhs - p2[j] * right_scale
-            var lhs = p0[j] * left_scale if j < len(p0) else Integer(0)
+                rhs = rhs - p2[j] * step[2]
+            var lhs = p0[j] * step[0] if j < len(p0) else Integer(0)
             size += (lhs.magnitude_bit_length() + rhs.magnitude_bit_length()) // 8 + 1
             if lhs != rhs:
                 return False
@@ -783,8 +824,13 @@ struct _IntegerChain(Copyable, Movable):
     var powers: List[Integer]
     var quotients: List[List[Integer]]
     var contents: List[Integer]
+    var bounded: Bool
+    """Whether every real root lies strictly inside (-2^bound, 2^bound)."""
+    var bound: Int
 
     def __init__(out self):
+        self.bounded = False
+        self.bound = 0
         self.first = List[Integer]()
         self.second = List[Integer]()
         self.degrees = List[Int]()
@@ -792,6 +838,32 @@ struct _IntegerChain(Copyable, Movable):
         self.powers = List[Integer]()
         self.quotients = List[List[Integer]]()
         self.contents = List[Integer]()
+
+
+def _fujiwara_exponent(c: List[Integer]) -> Int:
+    # Every complex root z of sum c_j x^j satisfies |z| < 2^e:
+    # |z| <= 2 max_i |c_{n-i} / c_n|^(1/i) (Fujiwara), and
+    # |c_{n-i} / c_n| < 2^(bits(c_{n-i}) - bits(c_n) + 1).
+    var n = len(c) - 1
+    var top = c[n].magnitude_bit_length()
+    var k = -(1 << 30)
+    for i in range(1, n + 1):
+        if c[n - i]:
+            var e = c[n - i].magnitude_bit_length() - top + 1
+            k = max(k, -((-e) // i))
+    return k + 1
+
+
+def _beyond(a: QQ, exponent: Int) raises PolyError -> Bool:
+    # |a| >= 2^exponent.
+    try:
+        var u = abs(a.value.numerator())
+        var v = a.value.denominator()
+        if exponent >= 0:
+            return u >= (v << exponent)
+        return (u << -exponent) >= v
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
 
 
 def _homogeneous(c: List[Integer], degree: Int, u: Integer, v: Integer, shift: Int) raises -> Integer:
@@ -823,6 +895,21 @@ def _integer_variations(chain: _IntegerChain, sequence: SturmSequence, a: QQ, mu
     var n = len(chain.degrees)
     if n < 2 or n != len(sequence.polynomials):
         return _chain_variations(sequence.polynomials, sequence.quotients, a, budget, side)
+    if chain.bounded and _beyond(a, chain.bound):
+        # Variations change only at roots of f (Sturm), so beyond every root
+        # they are those at infinity: the leading-coefficient signs, with
+        # (-1)^degree on the left.
+        var previous = 0
+        var count = 0
+        for p in sequence.polynomials:
+            budget.charge(1)
+            var sign = p.coefficients[p.degree()].value.sign()
+            if a.value.sign() < 0 and p.degree() % 2:
+                sign = -sign
+            if previous != 0 and previous != sign:
+                count += 1
+            previous = sign
+        return count
     var previous = 0
     var count = 0
     var before = Integer(0)

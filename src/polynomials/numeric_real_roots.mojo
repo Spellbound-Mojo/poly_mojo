@@ -141,9 +141,9 @@ def _family_cell(coefficients: List[NumericBox], derivative: List[NumericBox], i
         bits = _next_precision(bits, options.max_precision)
 
 
-def _real_cell(coefficients: List[NumericBox], derivative: List[NumericBox], exact: Optional[DensePoly[QQ]], sequence: Optional[SturmSequence], interval: NumericBox, options: NumericOptions, mut budget: Budget) raises PolyError -> RealRootCell:
+def _real_cell(coefficients: List[NumericBox], derivative: List[NumericBox], exact: Optional[DensePoly[QQ]], sequence: Optional[SturmSequence], interval: NumericBox, options: NumericOptions, mut budget: Budget, integer: _IntegerChain = _IntegerChain()) raises PolyError -> RealRootCell:
     if exact:
-        var count = _chain_variations(sequence.value().polynomials, sequence.value().quotients, interval.real_low, budget) - _chain_variations(sequence.value().polynomials, sequence.value().quotients, interval.real_high, budget)
+        var count = _integer_variations(integer, sequence.value(), interval.real_low, budget) - _integer_variations(integer, sequence.value(), interval.real_high, budget)
         return RealRootCell(interval.copy(), count, 0, List[EnclosureEvaluation[BallDomain]]())
     return _family_cell(coefficients, derivative, interval, options, budget)
 
@@ -198,7 +198,7 @@ def _real_roots(coefficients: List[NumericBox], options: NumericOptions, mut bud
     var interval = NumericBox.real_interval(bound.neg(budget), bound, budget)
     var derivative = _derivative_boxes(coefficients, budget)
     _allocation[RealRootCell](1, budget)
-    var pending: List[RealRootCell] = [_real_cell(coefficients, derivative, exact, sequence, interval, options, budget)]
+    var pending: List[RealRootCell] = [_real_cell(coefficients, derivative, exact, sequence, interval, options, budget, integer)]
     return _refine_real_cells(coefficients, derivative, exact, sequence^, pending^, degree.value(), options, budget, complete_only, integer)
 
 
@@ -442,7 +442,7 @@ def _real_roots_to[S: RealRootSink](coefficients: List[NumericBox], options: Num
     var interval = NumericBox.real_interval(bound.neg(budget), bound, budget)
     var derivative = _derivative_boxes(coefficients, budget)
     _allocation[RealRootCell](1, budget)
-    var pending: List[RealRootCell] = [_real_cell(coefficients, derivative, exact, sequence, interval, options, budget)]
+    var pending: List[RealRootCell] = [_real_cell(coefficients, derivative, exact, sequence, interval, options, budget, integer)]
     sink.begin(sequence, budget)
     return _refine_real_cells_to(coefficients, derivative, exact, sequence, pending^, degree.value(), options, budget, complete_only, sink, integer)
 
