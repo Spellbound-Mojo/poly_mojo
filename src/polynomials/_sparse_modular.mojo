@@ -98,14 +98,35 @@ def _at(f: SparsePoly[ModInt], variable: Int64, value: ModInt, mut budget: Budge
     _allocation[Term[ModInt]](len(f.terms), budget)
     var terms = List[Term[ModInt]](capacity=len(f.terms))
     var powers = _powers(value, budget)
+    # The variable is the last of the LEX order, so dropping it keeps the
+    # remaining monomials in order and equal ones adjacent: merge in one
+    # pass. Any other order is detected and sorted as before.
+    var ordered = True
     for term in f.terms:
         budget.charge(1)
         var parts = _separate(term.monomial, variable, budget)
         var coefficient = term.coefficient.mul(powers.power(UInt64(parts[0]), budget), budget)
         var monomial = Monomial()
         swap(monomial, parts[1])
+        if len(terms):
+            var last = len(terms) - 1
+            if terms[last].monomial == monomial:
+                terms[last].coefficient = terms[last].coefficient.add(coefficient, budget)
+                continue
+            if ordered and f.order._compare(terms[last].monomial, monomial, budget) > 0:
+                ordered = False
         terms.append(Term[ModInt](monomial^, coefficient^))
-    return SparsePoly[ModInt].from_terms(terms^, f.order, f.ring, budget)
+    if not ordered:
+        return SparsePoly[ModInt].from_terms(terms^, f.order, f.ring, budget)
+    var kept = List[Term[ModInt]](capacity=len(terms))
+    for i in range(len(terms)):
+        if not terms[i].coefficient.is_zero():
+            var t = Term[ModInt](Monomial(), ModInt.zero(f.ring))
+            swap(t, terms[i])
+            kept.append(t^)
+    var result = SparsePoly[ModInt].zero(f.order, f.ring, budget)
+    result.terms = kept^
+    return result^
 
 
 def _support_interpolate(support: List[Monomial], variable: Int64, points: List[ModInt], images: List[SparsePoly[ModInt]], mut budget: Budget) raises PolyError -> Optional[SparsePoly[ModInt]]:

@@ -236,10 +236,12 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
         var known = variations.pop()
         var enclosed = enclosures.pop()
         var span = ranges.pop()
-        var enough = cell.count == 0 or (cell.count > 0 and _accurate(cell.interval, options, budget) and (not options.require_isolation or cell.count == 1))
+        # One accuracy test per positive cell serves both decisions below.
+        var narrow = cell.count > 0 and _accurate(cell.interval, options, budget)
+        var enough = cell.count == 0 or (narrow and (not options.require_isolation or cell.count == 1))
         if enough or splits == options.max_subdivisions:
             complete = complete and cell.count >= 0
-            accurate = accurate and (cell.count == 0 or (cell.count > 0 and _accurate(cell.interval, options, budget)))
+            accurate = accurate and (cell.count == 0 or narrow)
             isolated = isolated and cell.count >= 0 and cell.count <= 1
             items = _sum(items, 1)
             sink.write(cell^, budget)
@@ -252,8 +254,9 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
             var enclosure = enclosed.take() if enclosed else _enclosure(oracle.value(), cell.interval.real_low, cell.interval.real_high, budget)
             var cut = _oracle_split(oracle.value(), enclosure, cell.interval.real_low, cell.interval.real_high, degree, options.absolute_bits, budget)
             var below = cut[1] < 0
-            var lower = NumericBox.real_interval(cell.interval.real_low, cut[0], budget)
-            var upper = NumericBox.real_interval(cut[0], cell.interval.real_high, budget)
+            # The cut lies strictly inside the cell, so both halves are ordered.
+            var lower = NumericBox(cell.interval.real_low.copy(), cut[0].copy(), QQ(Rational(0)), QQ(Rational(0)))
+            var upper = NumericBox(cut[0].copy(), cell.interval.real_high.copy(), QQ(Rational(0)), QQ(Rational(0)))
             _allocation[RealRootCell](2, budget)
             pending.append(RealRootCell(upper^, 0 if below else 1, 0, List[EnclosureEvaluation[BallDomain]]()))
             pending.append(RealRootCell(lower^, 1 if below else 0, 0, List[EnclosureEvaluation[BallDomain]]()))
@@ -280,8 +283,9 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
             if span[1] - span[0] != cell.count:
                 raise PolyError(PolyErrorKind.DOMAIN, "root enclosures disagree with the Sturm count")
             var cut = _ranged_split(oracle.value(), roots, span[0], span[1], cell.interval.real_low, cell.interval.real_high, degree, budget)
-            var lower = NumericBox.real_interval(cell.interval.real_low, cut[0], budget)
-            var upper = NumericBox.real_interval(cut[0], cell.interval.real_high, budget)
+            # The cut lies strictly inside the cell, so both halves are ordered.
+            var lower = NumericBox(cell.interval.real_low.copy(), cut[0].copy(), QQ(Rational(0)), QQ(Rational(0)))
+            var upper = NumericBox(cut[0].copy(), cell.interval.real_high.copy(), QQ(Rational(0)), QQ(Rational(0)))
             _allocation[RealRootCell](2, budget)
             pending.append(RealRootCell(upper^, span[1] - cut[1], 0, List[EnclosureEvaluation[BallDomain]]()))
             pending.append(RealRootCell(lower^, cut[1] - span[0], 0, List[EnclosureEvaluation[BallDomain]]()))

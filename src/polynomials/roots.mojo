@@ -5,7 +5,7 @@ from .dense import DensePoly
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size
 from .evaluate import _derivative_dense
 from .division import divmod
-from .certificates import SturmSequence, RootCountCertificate, _integer_form, _IntegerChain, _integer_variations, _fujiwara_exponent
+from .certificates import SturmSequence, RootCountCertificate, _integer_form, _IntegerChain, _integer_variations, _fujiwara_exponent, _SHORT
 from ._dense_ops import _copy as _copy_poly
 from ._root_ops import _copy, _compare, _midpoint, _variations, _chain_variations, _one_sided, _sign_at
 from ._images import _integer_dense
@@ -71,6 +71,7 @@ def _sturm_chain(f: DensePoly[QQ], mut chain: _IntegerChain, mut budget: Budget,
             before = _primitive_form(polynomials[0], budget)
             current = _primitive_form(polynomials[1], budget)
             chain.first = before[0].copy()
+            chain.entries = [before[0].copy(), current[0].copy()]
             chain.bounded = True
             chain.bound = _fujiwara_exponent(before[0])
             chain.second = current[0].copy()
@@ -109,6 +110,8 @@ def _sturm_chain(f: DensePoly[QQ], mut chain: _IntegerChain, mut budget: Budget,
                     _integer_step(chain, quotient, before[1], current[1], form[1], budget)
                     chain.degrees.append(len(form[0]) - 1)
                     chain.signs.append(form[1].sign())
+                    if len(chain.entries) <= _SHORT:
+                        chain.entries.append(form[0].copy())
                     _allocation[DensePoly[QQ]](1, budget)
                     polynomials.append(following^)
                     before = current^
@@ -144,10 +147,14 @@ def _sturm_chain(f: DensePoly[QQ], mut chain: _IntegerChain, mut budget: Budget,
                 chain.contents.append(content.copy())
                 chain.degrees.append(len(primitive) - 1)
                 chain.signs.append(next_scale.sign())
+                if len(chain.entries) <= _SHORT:
+                    chain.entries.append(primitive.copy())
             _allocation[DensePoly[QQ]](1, budget)
             polynomials.append(_scaled_poly(primitive, next_scale, f.variable, budget))
             before = current^
             current = (primitive^, next_scale^)
+    if integer and len(chain.entries) != len(chain.degrees):
+        chain.entries = List[List[Integer]]()
     return SturmSequence(polynomials^, quotients^)
 
 

@@ -2,7 +2,7 @@
 from apn_mojo import Integer, Rational
 from .coefficients import QQ
 from .errors import Budget, PolyError, PolyErrorKind, _charge_size
-from ._root_ops import _compare
+from ._root_ops import _compare, _power_of_two, _twos
 from .numeric_bounds import NumericBox, _box_valid
 
 
@@ -126,5 +126,38 @@ def _target_width(box: NumericBox, options: NumericOptions, mut budget: Budget) 
 def _accurate(box: NumericBox, options: NumericOptions, mut budget: Budget) raises PolyError -> Bool:
     if not _box_valid(box, budget):
         return False
+    if options.relative_bits == 0 and box.imag_low.is_zero() and box.imag_high.is_zero():
+        var fast = _dyadic_accurate(box.real_low, box.real_high, options.absolute_bits)
+        if fast >= 0:
+            return fast == 1
     var target = _target_width(box, options, budget)
     return _compare(box.real_high.sub(box.real_low, budget), target, budget) <= 0 and _compare(box.imag_high.sub(box.imag_low, budget), target, budget) <= 0
+
+
+def _dyadic_accurate(low: QQ, high: QQ, bits: Int) raises PolyError -> Int:
+    """Whether high - low <= 2^-bits for dyadic endpoints (1 or 0), or -1 otherwise.
+
+    With low = a / 2^p and high = b / 2^q, the width is d / 2^e for
+    e = max(p, q), and d <= 2^(e - bits) is a bit-length test.
+    """
+    var p = _power_of_two(low.value.denominator())
+    var q = _power_of_two(high.value.denominator())
+    if p < 0 or q < 0:
+        return -1
+    var e = max(p, q)
+    var d: Integer
+    try:
+        d = (high.value.numerator() << (e - q)) - (low.value.numerator() << (e - p))
+    except err:
+        raise PolyError(PolyErrorKind.CAPACITY, String(err))
+    if d.sign() <= 0:
+        return 1
+    var limit = e - bits
+    if limit < 0:
+        return 0
+    var length = d.magnitude_bit_length()
+    if length <= limit:
+        return 1
+    if length > limit + 1:
+        return 0
+    return 1 if _twos(d) == limit else 0

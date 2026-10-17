@@ -16,7 +16,7 @@ from .errors import Budget, PolyError, PolyErrorKind, _charge_size
 from .division import divmod
 from ._images import _integer_dense
 from ._integer_ops import _primitive
-from ._root_ops import _order
+from ._root_ops import _order, _twos, _power_of_two, _bits, _power_shift, _error_bits, _fixed, _exact_sign, _sign
 from .certificates import SturmSequence, _IntegerChain, _integer_variations
 
 
@@ -58,71 +58,6 @@ def _root_oracle(f: DensePoly[QQ], last: DensePoly[QQ], mut budget: Budget) rais
     except e:
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
     return _RootOracle(g^, dg^)
-
-
-def _bits(x: Integer) -> Int:
-    return x.magnitude_bit_length()
-
-
-def _power_shift(q: Integer) raises -> Int:
-    var b = _bits(q)
-    return b - 1 if (Integer(1) << (b - 1)) == q else -1
-
-
-def _error_bits(n: Int, p: Integer, q: Integer) -> Int:
-    # Floor rounding in each of the n Horner steps errs by less than one unit,
-    # and later steps scale it by |x|, so the total is below
-    # sum_{j<n} |x|^j <= n max(1, |x|)^(n-1) units.
-    var lx = max(0, _bits(p) - _bits(q) + 1)
-    var log_n = 0
-    while (1 << log_n) < n:
-        log_n += 1
-    return log_n + (n - 1) * lx + 1
-
-
-def _fixed(c: List[Integer], p: Integer, q: Integer, shift: Int, scale: Int) raises -> Integer:
-    # 2^scale * c(p/q) within the error of _error_bits, by floor-rounded Horner.
-    var n = len(c) - 1
-    var t = c[n] << scale
-    for i in range(n - 1, -1, -1):
-        var product = t * p
-        if shift >= 0:
-            t = product >> shift
-        else:
-            t = product // q
-        t = t + (c[i] << scale)
-    return t^
-
-
-def _exact_sign(c: List[Integer], p: Integer, q: Integer) raises -> Int:
-    # sign(q^n c(p/q)) by homogeneous Horner; q is positive.
-    var n = len(c) - 1
-    var t = c[n].copy()
-    var power = Integer(1)
-    for i in range(n - 1, -1, -1):
-        power = power * q
-        t = t * p + c[i] * power
-    return t.sign()
-
-
-def _sign(c: List[Integer], x: Rational) raises -> Int:
-    var n = len(c) - 1
-    if n <= 0:
-        return c[0].sign() if n == 0 else 0
-    var p = x.numerator()
-    var q = x.denominator()
-    if not p:
-        return c[0].sign()
-    var shift = _power_shift(q)
-    var error = _error_bits(n, p, q)
-    var exact_bits = n * (_bits(p) + _bits(q))
-    var extra = 64
-    while error + extra < exact_bits:
-        var t = _fixed(c, p, q, shift, error + extra)
-        if t and _bits(t) - 1 > error + 1:
-            return t.sign()
-        extra *= 4
-    return _exact_sign(c, p, q)
 
 
 def _check_sign(oracle: _RootOracle, x: Rational, mut budget: Budget) raises PolyError -> Int:
@@ -285,8 +220,8 @@ def _oracle_split(oracle: _RootOracle, mut enclosure: _Enclosure, low: QQ, high:
     in the cell is the enclosed root. When a candidate falls inside the
     enclosure and the cell still needs more than a few halvings for an
     absolute target of 2^-absolute_bits (or any target when absolute_bits is
-    zero), the enclosure is tightened by QIR to below the cell width / 2^guard,
-    guard = min(32, needed + 2); otherwise one sign evaluation decides.
+    zero), the enclosure is tightened by QIR to below the cell width /
+    2^(needed + 32); otherwise one sign evaluation decides.
     """
     var width = Optional[QQ]()
     for k in range(1, degree + 2):
@@ -307,7 +242,10 @@ def _oracle_split(oracle: _RootOracle, mut enclosure: _Enclosure, low: QQ, high:
                 ref span = width.value().value
                 needed = max(0, _bits(span.numerator()) - _bits(span.denominator()) + 1 + absolute_bits)
             if needed > 4:
-                _tighten(oracle, enclosure, width.value(), min(32, needed + 2), budget)
+                # Straight to the final target, with a 32-bit margin: QIR
+                # converges quadratically, so one tightening per root costs
+                # a few steps instead of one round per 32 halvings.
+                _tighten(oracle, enclosure, width.value(), needed + 32, budget)
         var side = _side(oracle, enclosure, middle, budget)
         if side != 0:
             return (middle^, side)
@@ -329,9 +267,7 @@ def _dyadic_midpoint(low: QQ, high: QQ) raises PolyError -> Optional[QQ]:
         if not total:
             return QQ(Rational(0))
         # Strip the common powers of two from total / 2^(e + 1).
-        var magnitude = abs(total)
-        var twos = _bits(magnitude & -magnitude) - 1
-        var strip = min(twos, e + 1)
+        var strip = min(_twos(total), e + 1)
         return QQ(Rational(_numerator=total >> strip, _denominator=Integer(1) << (e + 1 - strip)))
     except e:
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
