@@ -1390,7 +1390,10 @@ def _axpy_lanes(data: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, 
     for k in range(1, n):
         var at = data.unsafe_offset(_LANES * Int(columns.unsafe_offset(k).unsafe_load()))
         var x = at.unsafe_load[width=_LANES]() + f * values.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
-        at.unsafe_store[width=_LANES](x.ge(squares).select(x - squares, x))
+        # Below 2^63, so the sign of x - p^2 tells, which a signed comparison
+        # reads in one instruction where an unsigned one takes several.
+        var y = x - squares
+        at.unsafe_store[width=_LANES](y.cast[DType.int64]().lt(0).select(x, y))
 
 
 def _scatter_lanes[W: Int](mut dense: List[UInt64], step: _Step[W], values: List[List[UInt32]], row: Int, skip: Int):
@@ -1439,8 +1442,9 @@ def _reduce_lanes[W: Int](mut dense: List[UInt64], ncols: Int, start: Int, pivot
             _axpy_lanes(data, step.entries.unsafe_ptr().unsafe_offset(s), values[step.sources.unsafe_get(q)].unsafe_ptr(), n, factor, lanes.squares)
         else:
             found.columns.append(Int32(c))
-            for l in range(_LANES):
-                found.values.append(UInt32(v[l]))
+            var end = len(found.values)
+            found.values.resize(end + _LANES, 0)
+            found.values.unsafe_ptr().unsafe_offset(end).unsafe_store[width=_LANES](v.cast[DType.uint32]())
 
 
 def _eliminate_lanes[W: Int](step: _Step[W], mut dense: List[UInt64], mut pivot: List[Int], values: List[List[UInt32]], mut found: _LaneRows, mut lanes: _Primes, mut budget: Budget) raises PolyError -> List[Int]:
