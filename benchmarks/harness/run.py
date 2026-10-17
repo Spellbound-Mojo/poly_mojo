@@ -30,14 +30,16 @@ import tempfile
 import time
 import traceback
 
-from . import generate, measure, tools
+from . import arith, generate, measure, tools
 from .polys import canonical_basis, digest
 
 HERE = Path(__file__).resolve().parent.parent
+tools.TOOLS |= arith.TOOLS  # the arithmetic family's adapters live in their own module
 FAMILY_TOOLS = {
     'groebner': ['polymojo', 'polymojo-certified', 'polymojo-uncertified', 'sympy-buchberger', 'sympy-f5b', 'sympy-buchberger-flint',
                  'singular-std', 'singular-slimgb', 'singular-modstd', 'msolve'],
     'streaming': ['polymojo-decompose', 'polymojo-materialized', 'polymojo-streaming'],
+    'arith': ['polymojo-arith', 'flint-arith', 'singular-arith', 'sympy-arith'],
 }
 
 

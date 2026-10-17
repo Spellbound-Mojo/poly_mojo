@@ -269,6 +269,8 @@ def main(argv=None):
     parser.parse_args(argv)
     print(f"groebner: {write(groebner_cases(), 'groebner')} cases")
     print(f"streaming: {write(streaming_cases(), 'streaming')} cases")
+    from .arith import cases as arith_cases
+    print(f"arith: {write(arith_cases(), 'arith')} cases")
 
 
 if __name__ == '__main__':
