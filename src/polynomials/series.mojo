@@ -7,7 +7,11 @@ from .errors import Budget, PolyError, PolyErrorKind, _sum
 from ._toolkit_ops import _values, _add_values, _mul_values, _divide_values, _compose_values, _derivative_values, _integral_values
 from ._series_exact import _exact_log, _exact_exp, _exact_divide
 from ._series_nmod import _native_series
-from .coefficients import ModInt, Modulus
+from ._series_rational import _inverse_rational, _log_rational
+from .coefficients import ModInt, Modulus, QQ
+
+comptime _RATIONAL_NEWTON = 16
+"""Order from which rational inverses and logarithms run on integer numerators."""
 from ._series_ops import _newton_divide, _series_shape, _series_same_order, _series_truncation, _series_composition, _revert_values
 
 
@@ -144,6 +148,13 @@ struct TruncatedSeries[C: CoefficientField](Copyable, Movable):
             if inverse:
                 var quotient = _mul_values[_ExactOps[Self.C]](_view(self.polynomial.coefficients), _view(rebind[List[Self.C]](inverse.value())), self.order, self.polynomial.ring, budget)
                 return Self(DensePoly[Self.C].from_coefficients(self.polynomial.variable, self.polynomial.ring, quotient^, budget), self.order)
+        comptime if Self.C == QQ:
+            if self.order >= _RATIONAL_NEWTON:
+                var divisor = rebind_var[List[QQ]](other.polynomial.coefficients.to_list(budget))
+                var rational = _inverse_rational(_view(divisor), self.order, budget)
+                if rational:
+                    var quotient = _mul_values[_ExactOps[Self.C]](_view(self.polynomial.coefficients), _view(rebind[List[Self.C]](rational.value())), self.order, self.polynomial.ring, budget)
+                    return Self(DensePoly[Self.C].from_coefficients(self.polynomial.variable, self.polynomial.ring, quotient^, budget), self.order)
         var values = _exact_divide(_view(self.polynomial.coefficients), _view(other.polynomial.coefficients), self.order, self.polynomial.ring, budget) if _use_newton[Self.C](self.order, len(other.polynomial.coefficients)) else _divide_values[_ExactOps[Self.C]](_view(self.polynomial.coefficients), _view(other.polynomial.coefficients), self.order, self.polynomial.ring, budget)
         var poly = DensePoly[Self.C].from_coefficients(self.polynomial.variable, self.polynomial.ring, values^, budget)
         return Self(poly^, self.order)
@@ -165,6 +176,12 @@ struct TruncatedSeries[C: CoefficientField](Copyable, Movable):
             var native = _native_series(rebind[List[ModInt]](self.polynomial.coefficients.to_list(budget)), rebind[Modulus](self.polynomial.ring), self.order, 0, budget)
             if native:
                 return Self(DensePoly[Self.C].from_coefficients(self.polynomial.variable, self.polynomial.ring, rebind_var[List[Self.C]](native.take()), budget), self.order)
+        comptime if Self.C == QQ:
+            if self.order >= _RATIONAL_NEWTON:
+                var coefficients = rebind_var[List[QQ]](self.polynomial.coefficients.to_list(budget))
+                var rational = _inverse_rational(_view(coefficients), self.order, budget)
+                if rational:
+                    return Self(DensePoly[Self.C].from_coefficients(self.polynomial.variable, self.polynomial.ring, rebind_var[List[Self.C]](rational.take()), budget), self.order)
         var values: List[Self.C]
         if _use_newton[Self.C](self.order, len(self.polynomial.coefficients)):
             var numerator: List[Self.C] = [_ExactOps[Self.C].integer(1, self.polynomial.ring, budget)]
@@ -244,6 +261,12 @@ struct TruncatedSeries[C: CoefficientField](Copyable, Movable):
             var native = _native_series(rebind[List[ModInt]](self.polynomial.coefficients.to_list(budget)), rebind[Modulus](self.polynomial.ring), self.order, 1, budget)
             if native:
                 return Self(DensePoly[Self.C].from_coefficients(self.polynomial.variable, self.polynomial.ring, rebind_var[List[Self.C]](native.take()), budget), self.order)
+        comptime if Self.C == QQ:
+            if self.order >= _RATIONAL_NEWTON:
+                var coefficients = rebind_var[List[QQ]](self.polynomial.coefficients.to_list(budget))
+                var rational = _log_rational(_view(coefficients), self.order, budget)
+                if rational:
+                    return Self(DensePoly[Self.C].from_coefficients(self.polynomial.variable, self.polynomial.ring, rebind_var[List[Self.C]](rational.take()), budget), self.order)
         var values = _exact_log(_view(self.polynomial.coefficients), self.order, self.polynomial.ring, budget)
         var poly = DensePoly[Self.C].from_coefficients(self.polynomial.variable, self.polynomial.ring, values^, budget)
         return Self(poly^, self.order)

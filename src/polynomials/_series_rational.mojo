@@ -1,4 +1,13 @@
-"""Rational series composition by Brent and Kung's steps over the integers.
+"""Rational series by integer arithmetic: composition, inverses and logarithms.
+
+Inverse and logarithm. With f = F / d and c = F_0, U(x) = F(c x) / c is an
+integer series with constant term one, so G = 1 / U is integral and
+(1 / f)_k = d G_k / c^(k+1). Newton steps for G run on integers through the
+low and middle products of `_ntt`, and only the outputs are reduced. For
+the logarithm f_0 = 1 forces c = d, and f'/f has coefficients
+(F^' G)_k / c^(k+1) with the integer series F^'_j = F'_j c^j.
+
+Composition.
 
 With f = F / d_f and g = G / d_g for integer polynomials F and G,
 f(g) = H / (d_f d_g^(m-1)) where H = sum_i F_i d_g^(m-1-i) G^i over the m
@@ -12,7 +21,7 @@ from apn_mojo import Integer, Rational, lcm
 from .coefficient_buffer import _CoefficientView, _view
 from .coefficients import ZZ, QQ
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product
-from ._ntt import _ntt_low_product
+from ._ntt import _ntt_low_product, _ntt_middle_product
 
 
 def _common(values: _CoefficientView[QQ, _]) raises -> Integer:
@@ -116,3 +125,122 @@ def _compose_rational(outer: _CoefficientView[QQ, _], inner: _CoefficientView[QQ
         return _fractions(result, denominator, min(length, len(result)))
     except e:
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+def _middle(a: List[ZZ], b: List[ZZ], lo: Int, hi: Int, mut budget: Budget) raises PolyError -> Optional[List[ZZ]]:
+    return _ntt_middle_product(_view(a), _view(b), lo, hi, budget)
+
+
+def _unit_inverse(u: List[ZZ], n: Int, mut budget: Budget) raises PolyError -> Optional[List[ZZ]]:
+    """1 / u modulo x^n for an integer series with constant term one, by Newton steps."""
+    var g: List[ZZ] = [ZZ(Integer(1))]
+    var known = 1
+    while known < n:
+        budget.charge(1)
+        var next = min(2 * known, n)
+        var prefix = List[ZZ](capacity=min(len(u), next))
+        for i in range(min(len(u), next)):
+            prefix.append(u[i].copy())
+        # u g = 1 + x^known e + O(x^next); the next coefficients are -g e.
+        var e = _middle(prefix, g, known, next, budget)
+        if not e:
+            return None
+        var t = _low(g, e.take(), next - known, budget)
+        if not t:
+            return None
+        var correction = t.take()
+        for i in range(next - known):
+            g.append(correction[i].neg(budget) if i < len(correction) else ZZ(Integer(0)))
+        known = next
+    return g^
+
+
+@fieldwise_init
+struct _Integral(Movable):
+    """f = F / d with c = F_0 and U(x) = F(c x) / c."""
+    var f: List[ZZ]
+    var d: Integer
+    var c: Integer
+    var powers: List[Integer]
+    """c^0 ... c^n."""
+    var u: List[ZZ]
+
+
+def _integral(values: _CoefficientView[QQ, _], n: Int) raises -> _Integral:
+    var d = _common(values)
+    var f = _scaled(values, d)
+    var c = f[0].value
+    var powers = _powers(c, n + 2) if c != Integer(1) else List[Integer]()
+    var u = List[ZZ](capacity=min(len(f), n))
+    u.append(ZZ(Integer(1)))
+    for k in range(1, min(len(f), n)):
+        u.append(ZZ(f[k].value * powers[k - 1]) if len(powers) else f[k].copy())
+    return _Integral(f^, d^, c^, powers^, u^)
+
+
+def _ratio(value: Integer, scale: Integer, power: Integer) raises -> QQ:
+    return QQ(Rational(value * scale, power))
+
+
+def _inverse_rational(values: _CoefficientView[QQ, _], n: Int, mut budget: Budget) raises PolyError -> Optional[List[QQ]]:
+    """1 / f modulo x^n, or None when f(0) = 0 or a product does not apply."""
+    if n < 1 or len(values) == 0 or values[0].is_zero():
+        return None
+    _charge_size(n, budget)
+    var data: _Integral
+    try:
+        data = _integral(values, n)
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    var g = _unit_inverse(data.u, n, budget)
+    if not g:
+        return None
+    var inverse = g.take()
+    _allocation[QQ](n, budget)
+    var result = List[QQ](capacity=n)
+    try:
+        for k in range(n):
+            var value = inverse[k].value if k < len(inverse) else Integer(0)
+            result.append(_ratio(value, data.d, data.powers[k + 1] if len(data.powers) else Integer(1)))
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    return result^
+
+
+def _log_rational(values: _CoefficientView[QQ, _], n: Int, mut budget: Budget) raises PolyError -> Optional[List[QQ]]:
+    """log f modulo x^n for f(0) = 1, or None for other inputs."""
+    if n < 1 or len(values) == 0 or values[0].value != Rational(1):
+        return None
+    _charge_size(n, budget)
+    var data: _Integral
+    try:
+        data = _integral(values, n)
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    var result = List[QQ](capacity=n)
+    result.append(QQ(Rational(0)))
+    if n == 1:
+        return result^
+    var g = _unit_inverse(data.u, n - 1, budget)
+    if not g:
+        return None
+    # F^'_j = (j + 1) F_(j+1) c^j.
+    var derivative = List[ZZ](capacity=min(len(data.f), n) - 1)
+    for j in range(min(len(data.f), n) - 1):
+        var term = data.f[j + 1].mul(ZZ(Integer(j + 1)), budget)
+        derivative.append(term.mul(ZZ(data.powers[j]), budget) if len(data.powers) else term^)
+    var slope = List[ZZ]()
+    if len(derivative):
+        var product = _low(derivative, g.take(), n - 1, budget)
+        if not product:
+            return None
+        slope = product.take()
+    _allocation[QQ](n, budget)
+    try:
+        for k in range(1, n):
+            var value = slope[k - 1].value if k - 1 < len(slope) else Integer(0)
+            var power = data.powers[k] if len(data.powers) else Integer(1)
+            result.append(QQ(Rational(value, power * Integer(k))))
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    return result^
