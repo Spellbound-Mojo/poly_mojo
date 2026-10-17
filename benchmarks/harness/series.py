@@ -191,9 +191,6 @@ class PolyMojoSeries(SeriesTool, tools.PolyMojo):
     system = 'Poly Mojo'
     algorithm = 'poly.series, poly.dense'
     driver = tools.HERE / 'drivers' / 'poly_mojo' / 'series.mojo'
-    # Series powers and square roots have no public Poly Mojo call yet.
-    unsupported = {('series', 'pow', d) for d in ('QQ', 'GF')} | {('series', 'sqrt', d) for d in ('QQ', 'GF')}
-
     def __init__(self):
         self.mode = 'comparable'
         self.certified = False
