@@ -110,7 +110,8 @@ def word_field_cases(mut c: Checker) raises:
     """The word-size prime-field gcd matches the generic Euclidean loop."""
     var work = Budget()
     var rng = SplitMix64(4271)
-    var moduli: List[UInt64] = [3, 5, 101, 65521, prime(0, work), prime(7, work)]
+    # 1073741789 is the largest prime below 2^30, the bound of the 32-bit Montgomery kernel.
+    var moduli: List[UInt64] = [3, 5, 101, 65521, 1073741789, 1073741827, prime(0, work), prime(7, work)]
     for modulus in moduli:
         var ctx = Modulus(modulus, work)
         for degree in [0, 1, 2, 7, 23, 60]:

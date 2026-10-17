@@ -69,6 +69,15 @@ def value_cases(mut c: Checker) raises:
                 var f = univariate[ModInt](ctx, m, 0, rng, work)
                 var g = univariate[ModInt](ctx, n, 0, rng, work)
                 value_matches(f, g, 0, c, work)
+    # Long remainder sequences through the vectorized small-prime kernel and
+    # the 64-bit one; 1073741789 is the largest prime below 2^30.
+    var long_moduli: List[UInt64] = [7, 65521, 1073741789, prime(0, work)]
+    for modulus in long_moduli:
+        var ctx = Modulus(modulus, work)
+        for pair in [(20, 13), (37, 37), (40, 9), (9, 31)]:
+            var f = univariate[ModInt](ctx, pair[0], 0, rng, work)
+            var g = univariate[ModInt](ctx, pair[1], 0, rng, work)
+            value_matches(f, g, 0, c, work)
     var order = MonomialOrder(MonomialOrder.GREVLEX, [0, 1, 2], work)
     for _ in range(12):
         var f = polynomial[ZZ](NoContext(), order, rng, work, terms=5, variables=3, degree=3)
