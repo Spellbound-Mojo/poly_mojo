@@ -412,6 +412,16 @@ def _subtract_from(m: List[UInt64], mut x: List[UInt64]):
             x.append(d)
 
 
+def _subtract_in_place(mut x: List[UInt64], m: List[UInt64]):
+    """x = x - m in place, for m <= x."""
+    var borrow = UInt64(0)
+    for l in range(len(x)):
+        var a = x[l]
+        var b = m[l] if l < len(m) else UInt64(0)
+        x[l] = a - b - borrow
+        borrow = UInt64(1) if (a < b or (a == b and borrow == 1)) else UInt64(0)
+
+
 def _magnitude(value: Integer, mut limbs: List[UInt64]):
     """Append the magnitude of value in 64-bit limbs, least significant first."""
     var bits = value.magnitude_bit_length()
@@ -545,15 +555,61 @@ def _reconstruct_zz[C: CoefficientRing](residues: List[List[UInt64]], k: Int, co
         half[l] = (half[l] >> 1) | (low << 63)
         low = next_low
         l -= 1
-    var x = List[UInt64](capacity=len(modulus) + 1)
+    # Explicit CRT: x = sum y_i (M / q_i) - t M with y_i = r_i (M / q_i)^-1 mod q_i
+    # and t = floor(sum y_i / q_i). A floating-point estimate of the sum, taken
+    # slightly low, gives t or t - 1, and one subtraction of M corrects the latter.
+    var size = len(modulus)
+    var cofactors = List[List[UInt64]](capacity=k)
+    var inverses = List[UInt64](capacity=k)
+    var inverse_quotients = List[UInt64](capacity=k)
+    var reciprocals = List[Float64](capacity=k)
+    for i in range(k):
+        var q = g.moduli[i]
+        var cofactor: List[UInt64] = [1]
+        for j in range(k):
+            if j != i:
+                _scale_add(cofactor, g.moduli[j], 0)
+        cofactor.resize(size, 0)
+        var residue = UInt64(0)
+        var l = size - 1
+        while l >= 0:
+            residue = UInt64(((UInt128(residue) << 64) | UInt128(cofactor[l])) % UInt128(q))
+            l -= 1
+        var inverse = _power(residue, q - 2, q)
+        cofactors.append(cofactor^)
+        inverses.append(inverse)
+        inverse_quotients.append(_shoup_quotient(inverse, q))
+        reciprocals.append(1.0 / Float64(q))
+    var x = List[UInt64](length=size + 1, fill=0)
     for i in range(count):
-        _digits(g, residues, i, digits)
-        x.clear()
-        x.append(digits[k - 1])
-        var j = k - 2
-        while j >= 0:
-            _scale_add(x, g.moduli[j], digits[j])
-            j -= 1
+        for l in range(size + 1):
+            x.unsafe_get(l) = 0
+        var estimate = Float64(0)
+        for j in range(k):
+            var q = g.moduli[j]
+            var y = _reduce_2q(_shoup(residues[j].unsafe_get(i), inverses[j], inverse_quotients[j], q), q)
+            estimate += Float64(y) * reciprocals[j]
+            ref cofactor = cofactors[j]
+            var carry = UInt128(0)
+            for l in range(size):
+                var t = UInt128(cofactor.unsafe_get(l)) * UInt128(y) + UInt128(x.unsafe_get(l)) + carry
+                x.unsafe_get(l) = UInt64(t)
+                carry = t >> 64
+            x.unsafe_get(size) += UInt64(carry)
+        var multiple = UInt64(estimate - 1e-6) if estimate > 1e-6 else UInt64(0)
+        var carry = UInt128(0)
+        var borrow = UInt64(0)
+        for l in range(size + 1):
+            var t = UInt128(modulus[l] if l < size else UInt64(0)) * UInt128(multiple) + carry
+            carry = t >> 64
+            var a = x.unsafe_get(l)
+            var b = UInt64(t)
+            x.unsafe_get(l) = a - b - borrow
+            borrow = UInt64(1) if (a < b or (a == b and borrow == 1)) else UInt64(0)
+        if _compare(x, modulus) >= 0:
+            _subtract_in_place(x, modulus)
+        while len(x) > size:
+            _ = x.pop()
         var negative = _compare(x, half) > 0
         if negative:
             _subtract_from(modulus, x)
@@ -561,6 +617,7 @@ def _reconstruct_zz[C: CoefficientRing](residues: List[List[UInt64]], k: Int, co
         while used > 1 and x[used - 1] == 0:
             used -= 1
         result.append(rebind_var[C](ZZ(_integer(x, used, negative, bytes))))
+        x.resize(size + 1, 0)
     return result^
 
 
