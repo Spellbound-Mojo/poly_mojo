@@ -1,4 +1,5 @@
 """Exact scalar comparisons and sign-variation checks, independent of producers."""
+from std.bit import count_trailing_zeros
 from apn_mojo import Integer, Rational, lcm as integer_lcm
 from ._coefficient_ops import _copy
 from .coefficients import QQ, NoContext, _work
@@ -28,7 +29,32 @@ def _order(a: Rational, b: Rational) raises -> Int:
     if da == db:
         var difference = a.numerator() - b.numerator()
         return difference.sign()
+    var ea = _power_of_two(da)
+    var eb = _power_of_two(db)
+    if ea >= 0 and eb >= 0:
+        # Dyadic operands compare after one shift instead of two products.
+        if ea < eb:
+            return ((a.numerator() << (eb - ea)) - b.numerator()).sign()
+        return (a.numerator() - (b.numerator() << (ea - eb))).sign()
     return (a.numerator() * db - b.numerator() * da).sign()
+
+
+def _twos(x: Integer) -> Int:
+    """The number of trailing zero bits of a nonzero magnitude, from its words."""
+    for i in range(x._word_count()):
+        var word = x._word(i)
+        if word != 0:
+            return 32 * i + Int(count_trailing_zeros(word))
+    return 0
+
+
+def _power_of_two(x: Integer) -> Int:
+    """k when |x| = 2^k, else -1."""
+    var bits = x.magnitude_bit_length()
+    if bits == 0:
+        return -1
+    var k = _twos(x)
+    return k if k == bits - 1 else -1
 
 
 def _midpoint(a: QQ, b: QQ, mut budget: Budget) raises PolyError -> QQ:

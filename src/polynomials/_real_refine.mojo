@@ -16,7 +16,7 @@ from .errors import Budget, PolyError, PolyErrorKind, _charge_size
 from .division import divmod
 from ._images import _integer_dense
 from ._integer_ops import _primitive
-from ._root_ops import _order
+from ._root_ops import _order, _twos, _power_of_two
 from .certificates import SturmSequence, _IntegerChain, _integer_variations
 
 
@@ -65,8 +65,7 @@ def _bits(x: Integer) -> Int:
 
 
 def _power_shift(q: Integer) raises -> Int:
-    var b = _bits(q)
-    return b - 1 if (Integer(1) << (b - 1)) == q else -1
+    return _power_of_two(q)
 
 
 def _error_bits(n: Int, p: Integer, q: Integer) -> Int:
@@ -285,8 +284,8 @@ def _oracle_split(oracle: _RootOracle, mut enclosure: _Enclosure, low: QQ, high:
     in the cell is the enclosed root. When a candidate falls inside the
     enclosure and the cell still needs more than a few halvings for an
     absolute target of 2^-absolute_bits (or any target when absolute_bits is
-    zero), the enclosure is tightened by QIR to below the cell width / 2^guard,
-    guard = min(32, needed + 2); otherwise one sign evaluation decides.
+    zero), the enclosure is tightened by QIR to below the cell width /
+    2^(needed + 32); otherwise one sign evaluation decides.
     """
     var width = Optional[QQ]()
     for k in range(1, degree + 2):
@@ -307,7 +306,10 @@ def _oracle_split(oracle: _RootOracle, mut enclosure: _Enclosure, low: QQ, high:
                 ref span = width.value().value
                 needed = max(0, _bits(span.numerator()) - _bits(span.denominator()) + 1 + absolute_bits)
             if needed > 4:
-                _tighten(oracle, enclosure, width.value(), min(32, needed + 2), budget)
+                # Straight to the final target, with a 32-bit margin: QIR
+                # converges quadratically, so one tightening per root costs
+                # a few steps instead of one round per 32 halvings.
+                _tighten(oracle, enclosure, width.value(), needed + 32, budget)
         var side = _side(oracle, enclosure, middle, budget)
         if side != 0:
             return (middle^, side)
@@ -329,9 +331,7 @@ def _dyadic_midpoint(low: QQ, high: QQ) raises PolyError -> Optional[QQ]:
         if not total:
             return QQ(Rational(0))
         # Strip the common powers of two from total / 2^(e + 1).
-        var magnitude = abs(total)
-        var twos = _bits(magnitude & -magnitude) - 1
-        var strip = min(twos, e + 1)
+        var strip = min(_twos(total), e + 1)
         return QQ(Rational(_numerator=total >> strip, _denominator=Integer(1) << (e + 1 - strip)))
     except e:
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
