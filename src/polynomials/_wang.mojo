@@ -111,8 +111,14 @@ def _trunc(f: SparsePoly[ZZ], p: Integer, mut budget: Budget) raises PolyError -
     """Symmetric residues modulo p, dropping zero terms; order is preserved."""
     var result = SparsePoly[ZZ].zero(f.order, NoContext(), budget)
     _allocation[Term[ZZ]](len(f.terms), budget)
+    # |c| < 2^(bits(p) - 2) < p / 2 is already its own symmetric residue.
+    var small = p.magnitude_bit_length() - 2
     for term in f.terms:
         budget.charge(1)
+        if term.coefficient.value.magnitude_bit_length() <= small:
+            _charge_size(len(term.monomial.pairs), budget)
+            result.terms.append(term._copy(budget))
+            continue
         var c = _symmetric(term.coefficient.value, p, budget)
         if c.sign() == 0:
             continue
@@ -125,6 +131,8 @@ def _eval(f: SparsePoly[ZZ], variable: Int64, a: Integer, mut budget: Budget) ra
     """Substitute the integer a for one variable."""
     _allocation[Term[ZZ]](len(f.terms), budget)
     var terms = List[Term[ZZ]](capacity=len(f.terms))
+    var powers = List[Integer]()
+    powers.append(Integer(1))
     for term in f.terms:
         budget.charge(1)
         var e = Int(term.monomial.exponent(variable, budget))
@@ -133,40 +141,78 @@ def _eval(f: SparsePoly[ZZ], variable: Int64, a: Integer, mut budget: Budget) ra
             continue
         if a.sign() == 0:
             continue
-        var c = _imul(term.coefficient.value, _int_pow(a, e, budget), budget)
+        while len(powers) <= e:
+            budget.charge(1)
+            powers.append(_imul(powers[len(powers) - 1], a, budget))
+        var c = _imul(term.coefficient.value, powers[e], budget)
         terms.append(Term[ZZ](_without(term.monomial, variable, budget), ZZ(c^)))
     return SparsePoly[ZZ].from_terms(terms^, f.order, NoContext(), budget)
 
 
 def _eval_tail(f: SparsePoly[ZZ], variables: List[Int64], points: List[Integer], start: Int, mut budget: Budget) raises PolyError -> SparsePoly[ZZ]:
-    var result = f._copy(budget)
-    for i in range(start, len(variables)):
+    """Substitute points[i] for variables[i] for every i >= start, in one pass."""
+    if start >= len(variables):
+        return f._copy(budget)
+    var powers = List[List[Integer]]()
+    for _ in range(start, len(variables)):
+        var row = List[Integer]()
+        row.append(Integer(1))
+        powers.append(row^)
+    _allocation[Term[ZZ]](len(f.terms), budget)
+    var terms = List[Term[ZZ]](capacity=len(f.terms))
+    for term in f.terms:
         budget.charge(1)
-        result = _eval(result, variables[i], points[i], budget)
-    return result^
-
-
-def _binomial(n: Int, k: Int, mut budget: Budget) raises PolyError -> Integer:
-    var result = Integer(1)
-    for i in range(k):
-        budget.charge(1)
-        result = _idiv(_imul(result, Integer(n - i), budget), Integer(i + 1), budget)
-    return result^
+        var c = term.coefficient.value.copy()
+        var vanished = False
+        var pairs = List[Tuple[Int64, UInt32]]()
+        for pair in term.monomial.pairs:
+            budget.charge(1)
+            var index = -1
+            for i in range(start, len(variables)):
+                if variables[i] == pair[0]:
+                    index = i - start
+            if index < 0:
+                pairs.append(pair)
+                continue
+            ref a = points[start + index]
+            if a.sign() == 0:
+                vanished = True
+                break
+            var e = Int(pair[1])
+            while len(powers[index]) <= e:
+                budget.charge(1)
+                powers[index].append(_imul(powers[index][len(powers[index]) - 1], a, budget))
+            c = _imul(c, powers[index][e], budget)
+        if vanished:
+            continue
+        terms.append(Term[ZZ](Monomial(pairs^, budget), ZZ(c^)))
+    return SparsePoly[ZZ].from_terms(terms^, f.order, NoContext(), budget)
 
 
 def _taylor(f: SparsePoly[ZZ], variable: Int64, a: Integer, k: Int, mut budget: Budget) raises PolyError -> SparsePoly[ZZ]:
     """The coefficient of (variable - a)^k in f, a polynomial without variable."""
     var terms = List[Term[ZZ]]()
+    # weights[j] = binomial(k + j, k) * a^j
+    var weights = List[Integer]()
+    var binomials = List[Integer]()
+    var powers = List[Integer]()
+    binomials.append(Integer(1))
+    powers.append(Integer(1))
+    weights.append(Integer(1))
     for term in f.terms:
         budget.charge(1)
         var e = Int(term.monomial.exponent(variable, budget))
         if e < k:
             continue
-        var c = _imul(term.coefficient.value, _binomial(e, k, budget), budget)
-        if e > k:
-            if a.sign() == 0:
-                continue
-            c = _imul(c, _int_pow(a, e - k, budget), budget)
+        if e > k and a.sign() == 0:
+            continue
+        while len(weights) <= e - k:
+            budget.charge(1)
+            var j = len(weights)
+            binomials.append(_idiv(_imul(binomials[j - 1], Integer(k + j), budget), Integer(j), budget))
+            powers.append(_imul(powers[j - 1], a, budget))
+            weights.append(_imul(binomials[j], powers[j], budget))
+        var c = _imul(term.coefficient.value, weights[e - k], budget)
         _allocation[Term[ZZ]](1, budget)
         terms.append(Term[ZZ](_without(term.monomial, variable, budget), ZZ(c^)))
     return SparsePoly[ZZ].from_terms(terms^, f.order, NoContext(), budget)
@@ -379,6 +425,264 @@ struct _Diophantine(Movable):
         return s^
 
 
+# ------------------------------------------------ sparse Diophantine steps
+
+def _iadd(a: Integer, b: Integer, mut budget: Budget) raises PolyError -> Integer:
+    _work(a.magnitude_bit_length() // 8 + 1, b.magnitude_bit_length() // 8 + 1, True, budget)
+    try:
+        return a + b
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+def _isub(a: Integer, b: Integer, mut budget: Budget) raises PolyError -> Integer:
+    _work(a.magnitude_bit_length() // 8 + 1, b.magnitude_bit_length() // 8 + 1, True, budget)
+    try:
+        return a - b
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+def _residue_mod(a: Integer, p: Integer, mut budget: Budget) raises PolyError -> Integer:
+    """The residue of a in [0, p)."""
+    var r = _symmetric(a, p, budget)
+    if r.sign() < 0:
+        return _iadd(r, p, budget)
+    return r^
+
+
+def _mulmod(a: Integer, b: Integer, p: Integer, mut budget: Budget) raises PolyError -> Integer:
+    return _residue_mod(_imul(a, b, budget), p, budget)
+
+
+struct _SparseStep(Movable):
+    """Diophantine solves for one lifted variable by sparse interpolation
+    (Monagan and Tuncer's sparse Hensel lifting).
+
+    The correction of F_i is guessed to use only monomials of F_i below its
+    main degree. With z = M(beta) for a monomial M of the inner variables,
+    the images at the points beta^1..beta^T reduce each coefficient to a
+    transposed Vandermonde system in the nodes z. A guess is used only after
+    the caller verifies it exactly.
+    """
+    var main: Int64
+    var p: Integer
+    var inner: List[Int64]
+    var beta: List[Integer]
+    var count: Int
+    var ok: Bool
+    var degrees: List[Int]
+    var supports: List[List[List[Monomial]]]
+    var nodes: List[List[List[Integer]]]
+    var weights: List[List[List[List[Integer]]]]
+    var scales: List[List[List[Integer]]]
+    var images: List[List[DensePoly[ZZ]]]
+    var sigma: List[List[DensePoly[ZZ]]]
+
+    def __init__(out self, factors: List[SparsePoly[ZZ]], main: Int64, inner: List[Int64], p: Integer, mut budget: Budget) raises PolyError:
+        self.main = main
+        self.p = p.copy()
+        self.inner = inner.copy()
+        self.beta = List[Integer]()
+        self.count = 0
+        self.ok = True
+        self.degrees = List[Int]()
+        self.supports = List[List[List[Monomial]]]()
+        self.nodes = List[List[List[Integer]]]()
+        self.weights = List[List[List[List[Integer]]]]()
+        self.scales = List[List[List[Integer]]]()
+        self.images = List[List[DensePoly[ZZ]]]()
+        self.sigma = List[List[DensePoly[ZZ]]]()
+        # A fixed generator keeps the points, and so every charge, reproducible.
+        var state = UInt64(0x9E3779B97F4A7C15)
+        for _ in range(len(inner)):
+            budget.charge(1)
+            state = state * 6364136223846793005 + 1442695040888963407
+            var b = _residue_mod(Integer(Int(state >> 2)), p, budget)
+            if b.sign() == 0:
+                b = Integer(1)
+            self.beta.append(b^)
+        for g in factors:
+            budget.charge(1)
+            var d = g.degree_in(main, budget)
+            self.degrees.append(d)
+            var rows = List[List[Monomial]](length=max(d, 0), fill=List[Monomial]())
+            for term in g.terms:
+                budget.charge(1)
+                var e = Int(term.monomial.exponent(main, budget))
+                if e < d:
+                    rows[e].append(_without(term.monomial, main, budget))
+            var row_nodes = List[List[Integer]]()
+            for row in rows:
+                self.count = max(self.count, len(row))
+                var z = List[Integer]()
+                for m in row:
+                    z.append(self._value(m, budget))
+                row_nodes.append(z^)
+            self.supports.append(rows^)
+            self.nodes.append(row_nodes^)
+        for i in range(len(self.nodes)):
+            var row_weights = List[List[List[Integer]]]()
+            var row_scales = List[List[Integer]]()
+            for z in self.nodes[i]:
+                budget.charge(1)
+                var prepared = self._prepare(z, budget)
+                # A zero or repeated node leaves the system singular.
+                if len(prepared[1]) != len(z):
+                    self.ok = False
+                    return
+                row_weights.append(prepared[0].copy())
+                row_scales.append(prepared[1].copy())
+            self.weights.append(row_weights^)
+            self.scales.append(row_scales^)
+        var pz = ZZ(p.copy())
+        var evaluated = List[List[DensePoly[ZZ]]]()
+        for g in factors:
+            evaluated.append(self._evaluate(g, self.count, budget))
+        for j in range(self.count):
+            budget.charge(1)
+            var row = List[DensePoly[ZZ]]()
+            for i in range(len(factors)):
+                if evaluated[i][j].degree() != self.degrees[i]:
+                    self.ok = False
+                    return
+                row.append(evaluated[i][j].copy())
+            var cofactors = List[DensePoly[ZZ]]()
+            for i in range(len(row)):
+                budget.charge(1)
+                var cofactor = DensePoly[ZZ].from_coefficients(main, NoContext(), [ZZ.one(NoContext())], budget)
+                for k in range(len(row)):
+                    if k != i:
+                        cofactor = _pdivmod(_truncate(cofactor.mul(row[k], budget), pz, budget), row[i], p, budget)[1].copy()
+                try:
+                    cofactors.append(_pinverse(cofactor, row[i], p, budget))
+                except e:
+                    if e.kind != PolyErrorKind.DOMAIN:
+                        raise e^
+                    self.ok = False
+                    return
+            self.images.append(row^)
+            self.sigma.append(cofactors^)
+
+    def _value(self, m: Monomial, mut budget: Budget) raises PolyError -> Integer:
+        var z = Integer(1)
+        for pair in m.pairs:
+            budget.charge(1)
+            var index = -1
+            for k in range(len(self.inner)):
+                if self.inner[k] == pair[0]:
+                    index = k
+            if index < 0:
+                raise PolyError(PolyErrorKind.DOMAIN, "monomial outside the lifted variables")
+            for _ in range(Int(pair[1])):
+                z = _mulmod(z, self.beta[index], self.p, budget)
+        return z^
+
+    def _prepare(self, z: List[Integer], mut budget: Budget) raises PolyError -> Tuple[List[List[Integer]], List[Integer]]:
+        """For each node z_l, the quotient P(x) / (x - z_l) of the master
+        polynomial and 1 / (z_l P_l(z_l)): sum_m q_lm v_(m+1) times that
+        scale solves sum_l c_l z_l^j = v_j for j = 1..t. Fewer scales than
+        nodes mark a singular system."""
+        var t = len(z)
+        var master = List[Integer]()
+        master.append(Integer(1))
+        for l in range(t):
+            budget.charge(1)
+            # master *= (x - z_l), coefficients from the constant term up.
+            var next = List[Integer](length=len(master) + 1, fill=Integer(0))
+            for m in range(len(master)):
+                budget.charge(1)
+                next[m + 1] = _iadd(next[m + 1], master[m], budget)
+                next[m] = _residue_mod(_isub(next[m], _imul(master[m], z[l], budget), budget), self.p, budget)
+            master = next^
+        var quotients = List[List[Integer]]()
+        var scales = List[Integer]()
+        for l in range(t):
+            budget.charge(1)
+            if z[l].sign() == 0:
+                return (quotients^, scales^)
+            var q = List[Integer](length=t, fill=Integer(0))
+            q[t - 1] = Integer(1)
+            var m = t - 1
+            while m > 0:
+                budget.charge(1)
+                q[m - 1] = _residue_mod(_iadd(master[m], _imul(z[l], q[m], budget), budget), self.p, budget)
+                m -= 1
+            var value = Integer(0)
+            m = t - 1
+            while m >= 0:
+                budget.charge(1)
+                value = _residue_mod(_iadd(_imul(value, z[l], budget), q[m], budget), self.p, budget)
+                m -= 1
+            var denominator = _mulmod(value, z[l], self.p, budget)
+            if denominator.sign() == 0:
+                return (quotients^, scales^)
+            scales.append(_inverse(denominator, self.p))
+            quotients.append(q^)
+        return (quotients^, scales^)
+
+    def _evaluate(self, g: SparsePoly[ZZ], count: Int, mut budget: Budget) raises PolyError -> List[DensePoly[ZZ]]:
+        """g(main, beta^j) modulo p for j = 1..count."""
+        var top = max(g.degree_in(self.main, budget), 0)
+        var sums = List[List[Integer]]()
+        for _ in range(count):
+            sums.append(List[Integer](length=top + 1, fill=Integer(0)))
+        for term in g.terms:
+            budget.charge(1)
+            var e = Int(term.monomial.exponent(self.main, budget))
+            var z = self._value(_without(term.monomial, self.main, budget), budget)
+            var power = Integer(1)
+            for j in range(count):
+                power = _mulmod(power, z, self.p, budget)
+                sums[j][e] = _iadd(sums[j][e], _imul(term.coefficient.value, power, budget), budget)
+        var result = List[DensePoly[ZZ]]()
+        for j in range(count):
+            budget.charge(1)
+            var coefficients = List[ZZ]()
+            for c in sums[j]:
+                coefficients.append(ZZ(_residue_mod(c, self.p, budget)))
+            result.append(DensePoly[ZZ].from_coefficients(self.main, NoContext(), coefficients^, budget))
+        return result^
+
+    def solve(self, c: SparsePoly[ZZ], mut budget: Budget) raises PolyError -> List[SparsePoly[ZZ]]:
+        """The guessed corrections s_i with sum_i s_i prod_(k != i) F_k = c."""
+        var pz = ZZ(self.p.copy())
+        var r = len(self.degrees)
+        # values[i][d][j]: coefficient of main^d in s_i at the point beta^(j+1).
+        var values = List[List[List[Integer]]]()
+        for i in range(r):
+            values.append(List[List[Integer]](length=max(self.degrees[i], 0), fill=List[Integer]()))
+        var images = self._evaluate(c, self.count, budget)
+        for j in range(self.count):
+            budget.charge(1)
+            ref image = images[j]
+            for i in range(r):
+                budget.charge(1)
+                var s = _pdivmod(_truncate(image.mul(self.sigma[j][i], budget), pz, budget), self.images[j][i], self.p, budget)[1].copy()
+                for d in range(self.degrees[i]):
+                    var v = Integer(0)
+                    if d <= s.degree():
+                        v = _residue_mod(s.coefficients[d].value, self.p, budget)
+                    values[i][d].append(v^)
+        var result = List[SparsePoly[ZZ]]()
+        for i in range(r):
+            budget.charge(1)
+            var terms = List[Term[ZZ]]()
+            for d in range(self.degrees[i]):
+                var shift = Monomial([(self.main, UInt32(d))], budget) if d > 0 else Monomial()
+                for l in range(len(self.supports[i][d])):
+                    budget.charge(1)
+                    var total = Integer(0)
+                    for m in range(len(self.supports[i][d])):
+                        total = _iadd(total, _imul(self.weights[i][d][l][m], values[i][d][m], budget), budget)
+                    var coefficient = _symmetric(_imul(_residue_mod(total, self.p, budget), self.scales[i][d][l], budget), self.p, budget)
+                    if coefficient.sign() != 0:
+                        _allocation[Term[ZZ]](1, budget)
+                        terms.append(Term[ZZ](self.supports[i][d][l].mul(shift, budget), ZZ(coefficient^)))
+            result.append(SparsePoly[ZZ].from_terms(terms^, c.order, NoContext(), budget))
+        return result^
+
+
 # ------------------------------------------------------------- Wang's steps
 
 struct _Points(Movable):
@@ -578,6 +882,9 @@ def _lift(f: SparsePoly[ZZ], main: Int64, params: List[Int64], points: List[Inte
             var lc = _trunc(_eval_tail(lcs[i], params, points, w, budget), p, budget)
             factors[i] = _replace_lead(factors[i], main, lc, budget)
         var solver = _Diophantine(previous, main, inner_params, inner_points, degree, p, budget)
+        var sparse = Optional[_SparseStep](None)
+        if w >= 2:
+            sparse = _SparseStep(previous, main, inner_params, p, budget)
         var m = _linear(variable, a, order, budget)
         var power = SparsePoly[ZZ].constant(ZZ.one(NoContext()), order, budget)
         var error = _trunc(s.sub(_product_of(factors, -1, order, budget), budget), p, budget)
@@ -590,6 +897,21 @@ def _lift(f: SparsePoly[ZZ], main: Int64, params: List[Int64], points: List[Inte
             var coefficient = _trunc(_taylor(error, variable, a, j + 1, budget), p, budget)
             if coefficient.is_zero():
                 continue
+            if sparse and sparse.value().ok:
+                # The Diophantine solution with these degree bounds is unique,
+                # so a guess that clears this Taylor coefficient is the one
+                # the recursive solver would return.
+                var guess = sparse.value().solve(coefficient, budget)
+                var trial = List[SparsePoly[ZZ]]()
+                for i in range(len(factors)):
+                    budget.charge(1)
+                    trial.append(_trunc(factors[i].add(guess[i].mul(power, budget), budget), p, budget))
+                var remainder = _trunc(s.sub(_product_of(trial, -1, order, budget), budget), p, budget)
+                if _trunc(_taylor(remainder, variable, a, j + 1, budget), p, budget).is_zero():
+                    factors = trial^
+                    error = remainder^
+                    continue
+                sparse.value().ok = False
             var t = solver.solve(w - 1, coefficient, budget)
             for i in range(len(factors)):
                 budget.charge(1)

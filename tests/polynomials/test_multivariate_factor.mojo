@@ -96,6 +96,24 @@ def main() raises:
             if len(alone.factors) == 1 and entry[0] == alone.factors[0][0] and entry[1] == 1:
                 matched += 1
     c.check(matched == 4, "Wang factors match the planted irreducibles")
+    # Sparse factors in six variables: the later variables lift by sparse
+    # interpolation of the corrections on the earlier factors' supports.
+    var sparse_factors = List[SparsePoly[QQ]]()
+    sparse_factors.append(parse_polynomial("x0^3*x1*x5 - 4*x2^2*x3*x0 + x4^2*x1^2 + 7*x5*x3 - 2", order, work))
+    sparse_factors.append(parse_polynomial("x0^2*x2*x4 + 3*x1^3*x5^2 - x3*x4*x0 + x2*x5 + 5", order, work))
+    sparse_factors.append(parse_polynomial("x0*x3^2 - x1*x2*x4 + 2*x5^3 - x0^2*x1 + 1", order, work))
+    var sparse_product = parse_polynomial("1", order, work)
+    for g in sparse_factors:
+        sparse_product = sparse_product.mul(g, work)
+    var sparse_integer = as_zz(sparse_product, work)
+    var sparse_result = factor_multivariate_integer(sparse_integer, work)
+    var sparse_matched = 0
+    for g in sparse_factors:
+        var planted = as_zz(g, work)
+        for entry in sparse_result.factors:
+            if (entry[0] == planted or entry[0] == planted.neg(work)) and entry[1] == 1:
+                sparse_matched += 1
+    c.check(len(sparse_result.factors) == 3 and sparse_matched == 3 and check_multivariate_factorization(sparse_integer, sparse_result, work), "sparse six-variable factors lift to the planted irreducibles")
     var tiny = Budget(1)
     var exhausted = False
     try:

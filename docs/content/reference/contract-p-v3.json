@@ -1,0 +1,3115 @@
+{
+  "contract": "P",
+  "revision": 3,
+  "exports": [
+    {
+      "module": "algebraic_arithmetic",
+      "name": "AlgebraicArithmeticCertificate",
+      "signature": "@fieldwise_init\nstruct AlgebraicArithmeticCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "operation",
+          "signature": "var operation: Int",
+          "members": []
+        },
+        {
+          "name": "left",
+          "signature": "var left: RealAlgebraic",
+          "members": []
+        },
+        {
+          "name": "right",
+          "signature": "var right: RealAlgebraic",
+          "members": []
+        },
+        {
+          "name": "left_factor",
+          "signature": "var left_factor: DensePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "right_factor",
+          "signature": "var right_factor: DensePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "value",
+          "signature": "var value: RealAlgebraic",
+          "members": []
+        },
+        {
+          "name": "annihilator",
+          "signature": "var annihilator: DensePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "value_factor",
+          "signature": "var value_factor: DensePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "elimination",
+          "signature": "var elimination: Optional[ResultantResult[QQ]]",
+          "members": []
+        },
+        {
+          "name": "selection",
+          "signature": "var selection: Optional[RootCountCertificate]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "algebraic_types",
+      "name": "AlgebraicComparisonCertificate",
+      "signature": "@fieldwise_init\nstruct AlgebraicComparisonCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "relation",
+          "signature": "var relation: Int",
+          "members": []
+        },
+        {
+          "name": "left",
+          "signature": "var left: RealAlgebraic",
+          "members": []
+        },
+        {
+          "name": "right",
+          "signature": "var right: RealAlgebraic",
+          "members": []
+        },
+        {
+          "name": "common",
+          "signature": "var common: DensePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "left_cofactor",
+          "signature": "var left_cofactor: DensePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "right_cofactor",
+          "signature": "var right_cofactor: DensePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "shared",
+          "signature": "var shared: Optional[RootCountCertificate]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "algebraic_evaluation",
+      "name": "AlgebraicEvaluationCertificate",
+      "signature": "@fieldwise_init\nstruct AlgebraicEvaluationCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "products",
+          "signature": "var products: List[AlgebraicArithmeticCertificate]",
+          "members": []
+        },
+        {
+          "name": "sums",
+          "signature": "var sums: List[AlgebraicArithmeticCertificate]",
+          "members": []
+        },
+        {
+          "name": "value",
+          "signature": "var value: RealAlgebraic",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "algebraic_specialization",
+      "name": "AlgebraicPolynomialEvaluation",
+      "signature": "@fieldwise_init\nstruct AlgebraicPolynomialEvaluation(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "steps",
+          "signature": "var steps: List[AlgebraicArithmeticCertificate]",
+          "members": []
+        },
+        {
+          "name": "value",
+          "signature": "var value: RealAlgebraic",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "algebraic_specialization",
+      "name": "AlgebraicRootsAtCertificate",
+      "signature": "@fieldwise_init\nstruct AlgebraicRootsAtCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "specialization",
+          "signature": "var specialization: AlgebraicSpecializationCertificate",
+          "members": []
+        },
+        {
+          "name": "isolation",
+          "signature": "var isolation: AlgebraicRootsCertificate",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "algebraic_roots",
+      "name": "AlgebraicRootsCertificate",
+      "signature": "@fieldwise_init\nstruct AlgebraicRootsCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "coefficients",
+          "signature": "var coefficients: List[RealAlgebraic]",
+          "members": []
+        },
+        {
+          "name": "coefficient_factors",
+          "signature": "var coefficient_factors: List[DensePoly[QQ]]",
+          "members": []
+        },
+        {
+          "name": "eliminations",
+          "signature": "var eliminations: List[ResultantResult[QQ]]",
+          "members": []
+        },
+        {
+          "name": "annihilator",
+          "signature": "var annihilator: DensePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "candidates",
+          "signature": "var candidates: List[RealAlgebraic]",
+          "members": []
+        },
+        {
+          "name": "candidate_factors",
+          "signature": "var candidate_factors: List[DensePoly[QQ]]",
+          "members": []
+        },
+        {
+          "name": "all_roots",
+          "signature": "var all_roots: RootCountCertificate",
+          "members": []
+        },
+        {
+          "name": "evaluations",
+          "signature": "var evaluations: List[AlgebraicEvaluationCertificate]",
+          "members": []
+        },
+        {
+          "name": "accepted",
+          "signature": "var accepted: List[Int]",
+          "members": []
+        },
+        {
+          "name": "roots",
+          "signature": "var roots: List[RealAlgebraic]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "algebraic_specialization",
+      "name": "AlgebraicSpecializationCertificate",
+      "signature": "@fieldwise_init\nstruct AlgebraicSpecializationCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "monomials",
+          "signature": "var monomials: List[Monomial]",
+          "members": []
+        },
+        {
+          "name": "evaluations",
+          "signature": "var evaluations: List[AlgebraicPolynomialEvaluation]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "bases",
+      "name": "BasisPolynomial",
+      "signature": "@fieldwise_init\nstruct BasisPolynomial[C: CoefficientField](Copyable, Movable)",
+      "members": [
+        {
+          "name": "NEWTON",
+          "signature": "comptime NEWTON = UInt8(0)",
+          "members": []
+        },
+        {
+          "name": "CHEBYSHEV",
+          "signature": "comptime CHEBYSHEV = UInt8(1)",
+          "members": []
+        },
+        {
+          "name": "BERNSTEIN",
+          "signature": "comptime BERNSTEIN = UInt8(2)",
+          "members": []
+        },
+        {
+          "name": "variable",
+          "signature": "var variable: Int64",
+          "members": []
+        },
+        {
+          "name": "kind",
+          "signature": "var kind: UInt8",
+          "members": []
+        },
+        {
+          "name": "ring",
+          "signature": "var ring: Self.C.Context",
+          "members": []
+        },
+        {
+          "name": "coefficients",
+          "signature": "var coefficients: List[Self.C]",
+          "members": []
+        },
+        {
+          "name": "nodes",
+          "signature": "var nodes: List[Self.C]",
+          "members": []
+        },
+        {
+          "name": "newton",
+          "signature": "@staticmethod\ndef newton(poly: DensePoly[Self.C], nodes: List[Self.C], mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "chebyshev",
+          "signature": "@staticmethod\ndef chebyshev(poly: DensePoly[Self.C], mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "bernstein",
+          "signature": "@staticmethod\ndef bernstein(poly: DensePoly[Self.C], degree: Int, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "to_polynomial",
+          "signature": "def to_polynomial(self, mut budget: Budget) raises PolyError -> DensePoly[Self.C]",
+          "members": []
+        },
+        {
+          "name": "evaluate",
+          "signature": "def evaluate(self, point: Self.C, mut budget: Budget) raises PolyError -> Self.C",
+          "members": []
+        },
+        {
+          "name": "subdivide",
+          "signature": "def subdivide(self, point: Self.C, mut budget: Budget) raises PolyError -> Tuple[Self, Self]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "errors",
+      "name": "Budget",
+      "signature": "struct Budget(ImplicitlyCopyable, Writable)",
+      "members": [
+        {
+          "name": "__init__",
+          "signature": "def __init__(out self, steps: UInt64 = UInt64.MAX)",
+          "members": []
+        },
+        {
+          "name": "charge",
+          "signature": "def charge(mut self, n: UInt64) raises PolyError",
+          "members": []
+        },
+        {
+          "name": "remaining",
+          "signature": "def remaining(self) -> UInt64",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cad_types",
+      "name": "CADCell",
+      "signature": "@fieldwise_init\nstruct CADCell(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "parent",
+          "signature": "var parent: Int",
+          "members": []
+        },
+        {
+          "name": "level",
+          "signature": "var level: Int",
+          "members": []
+        },
+        {
+          "name": "position",
+          "signature": "var position: Int",
+          "members": []
+        },
+        {
+          "name": "sample",
+          "signature": "var sample: RealAlgebraic",
+          "members": []
+        },
+        {
+          "name": "evaluations",
+          "signature": "var evaluations: List[AlgebraicPolynomialEvaluation]",
+          "members": []
+        },
+        {
+          "name": "signs",
+          "signature": "var signs: List[AlgebraicComparisonCertificate]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cad_types",
+      "name": "CADCellCertificate",
+      "signature": "@fieldwise_init\nstruct CADCellCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "projection",
+          "signature": "var projection: CADProjectionCertificate",
+          "members": []
+        },
+        {
+          "name": "stacks",
+          "signature": "var stacks: List[CADStackCertificate]",
+          "members": []
+        },
+        {
+          "name": "positions",
+          "signature": "var positions: List[Int]",
+          "members": []
+        },
+        {
+          "name": "evaluations",
+          "signature": "var evaluations: List[AlgebraicPolynomialEvaluation]",
+          "members": []
+        },
+        {
+          "name": "signs",
+          "signature": "var signs: List[AlgebraicComparisonCertificate]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cad_types",
+      "name": "CADCertificate",
+      "signature": "@fieldwise_init\nstruct CADCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "projection",
+          "signature": "var projection: CADProjectionCertificate",
+          "members": []
+        },
+        {
+          "name": "cells",
+          "signature": "var cells: List[CADCell]",
+          "members": []
+        },
+        {
+          "name": "stacks",
+          "signature": "var stacks: List[CADStackCertificate]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cylindrical_covering",
+      "name": "CADConflict",
+      "signature": "@fieldwise_init\nstruct CADConflict(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "constraint",
+          "signature": "var constraint: Int",
+          "members": []
+        },
+        {
+          "name": "evaluation",
+          "signature": "var evaluation: AlgebraicPolynomialEvaluation",
+          "members": []
+        },
+        {
+          "name": "sign",
+          "signature": "var sign: AlgebraicComparisonCertificate",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cylindrical_covering",
+      "name": "CADConflictInterval",
+      "signature": "@fieldwise_init\nstruct CADConflictInterval(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "parent",
+          "signature": "var parent: Int",
+          "members": []
+        },
+        {
+          "name": "lower",
+          "signature": "var lower: Int",
+          "members": []
+        },
+        {
+          "name": "upper",
+          "signature": "var upper: Int",
+          "members": []
+        },
+        {
+          "name": "position",
+          "signature": "var position: Int",
+          "members": []
+        },
+        {
+          "name": "proof",
+          "signature": "var proof: CADConflict",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cad_types",
+      "name": "CADCoveringCertificate",
+      "signature": "@fieldwise_init\nstruct CADCoveringCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "decomposition",
+          "signature": "var decomposition: CADCertificate",
+          "members": []
+        },
+        {
+          "name": "witness_cell",
+          "signature": "var witness_cell: Int",
+          "members": []
+        },
+        {
+          "name": "violations",
+          "signature": "var violations: List[Int]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cad_fiber",
+      "name": "CADFiber",
+      "signature": "struct CADFiber(Copyable, Movable)",
+      "members": [
+        {
+          "name": "__init__",
+          "signature": "def __init__(out self, fixed: List[RealAlgebraic], mut budget: Budget) raises PolyError",
+          "members": []
+        },
+        {
+          "name": "decompose",
+          "signature": "def decompose(self, inputs: List[SparsePoly[QQ]], variables: List[Int64], mut budget: Budget, lazard: Bool = False) raises PolyError -> CADCertificate",
+          "members": []
+        },
+        {
+          "name": "cover",
+          "signature": "def cover(self, inputs: List[SparsePoly[QQ]], masks: List[UInt8], variables: List[Int64], mut budget: Budget, lazard: Bool = False) raises PolyError -> CADCoveringCertificate",
+          "members": []
+        },
+        {
+          "name": "solve",
+          "signature": "def solve(self, inputs: List[SparsePoly[QQ]], masks: List[UInt8], variables: List[Int64], mut budget: Budget, lazard: Bool = False) raises PolyError -> CylindricalCoveringCertificate",
+          "members": []
+        },
+        {
+          "name": "check",
+          "signature": "def check(self, inputs: List[SparsePoly[QQ]], certificate: CADCertificate, mut budget: Budget) raises PolyError -> Bool",
+          "members": []
+        },
+        {
+          "name": "check",
+          "signature": "def check(self, inputs: List[SparsePoly[QQ]], masks: List[UInt8], certificate: CADCoveringCertificate, mut budget: Budget) raises PolyError -> Bool",
+          "members": []
+        },
+        {
+          "name": "check",
+          "signature": "def check(self, inputs: List[SparsePoly[QQ]], masks: List[UInt8], certificate: CylindricalCoveringCertificate, mut budget: Budget) raises PolyError -> Bool",
+          "members": []
+        },
+        {
+          "name": "decompose_to",
+          "signature": "def decompose_to[S: CADSink](self, inputs: List[SparsePoly[QQ]], variables: List[Int64], mut sink: S, mut budget: Budget, lazard: Bool = False) raises PolyError -> CADStreamReceipt",
+          "members": []
+        },
+        {
+          "name": "checker",
+          "signature": "def checker(self, inputs: List[SparsePoly[QQ]], mut budget: Budget) raises PolyError -> CADStreamChecker",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cad_types",
+      "name": "CADPolynomialLift",
+      "signature": "@fieldwise_init\nstruct CADPolynomialLift(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "ordinary",
+          "signature": "var ordinary: Optional[AlgebraicSpecializationCertificate]",
+          "members": []
+        },
+        {
+          "name": "lazard",
+          "signature": "var lazard: Optional[LazardEvaluationCertificate]",
+          "members": []
+        },
+        {
+          "name": "roots",
+          "signature": "var roots: Optional[AlgebraicRootsCertificate]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cad_projection",
+      "name": "CADProjectionCertificate",
+      "signature": "@fieldwise_init\nstruct CADProjectionCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "variables",
+          "signature": "var variables: List[Int64]",
+          "members": []
+        },
+        {
+          "name": "lazard",
+          "signature": "var lazard: Bool",
+          "members": []
+        },
+        {
+          "name": "levels",
+          "signature": "var levels: List[List[SparsePoly[QQ]]]",
+          "members": []
+        },
+        {
+          "name": "factorizations",
+          "signature": "var factorizations: List[MultivariateFactorization[QQ]]",
+          "members": []
+        },
+        {
+          "name": "resultants",
+          "signature": "var resultants: List[ProjectionResultantCertificate]",
+          "members": []
+        },
+        {
+          "name": "coprimality",
+          "signature": "var coprimality: List[CoprimalityCertificate[QQ]]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cad_stream",
+      "name": "CADSink",
+      "signature": "trait CADSink",
+      "members": [
+        {
+          "name": "begin",
+          "signature": "def begin(mut self, projection: CADProjectionCertificate, mut budget: Budget) raises PolyError",
+          "members": []
+        },
+        {
+          "name": "write",
+          "signature": "def write(mut self, var event: CADStreamEvent, mut budget: Budget) raises PolyError",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cad_types",
+      "name": "CADStackCertificate",
+      "signature": "@fieldwise_init\nstruct CADStackCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "parent",
+          "signature": "var parent: Int",
+          "members": []
+        },
+        {
+          "name": "level",
+          "signature": "var level: Int",
+          "members": []
+        },
+        {
+          "name": "lifts",
+          "signature": "var lifts: List[CADPolynomialLift]",
+          "members": []
+        },
+        {
+          "name": "roots",
+          "signature": "var roots: List[RealAlgebraic]",
+          "members": []
+        },
+        {
+          "name": "sources",
+          "signature": "var sources: List[Tuple[Int, Int]]",
+          "members": []
+        },
+        {
+          "name": "mapping",
+          "signature": "var mapping: List[List[Int]]",
+          "members": []
+        },
+        {
+          "name": "equalities",
+          "signature": "var equalities: List[AlgebraicComparisonCertificate]",
+          "members": []
+        },
+        {
+          "name": "ordering",
+          "signature": "var ordering: List[AlgebraicComparisonCertificate]",
+          "members": []
+        },
+        {
+          "name": "samples",
+          "signature": "var samples: List[RealAlgebraic]",
+          "members": []
+        },
+        {
+          "name": "separations",
+          "signature": "var separations: List[AlgebraicComparisonCertificate]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cad_stream",
+      "name": "CADStreamChecker",
+      "signature": "@fieldwise_init\nstruct CADStreamChecker(CADSink, Movable)",
+      "members": [
+        {
+          "name": "prepare",
+          "signature": "@staticmethod\ndef prepare(inputs: List[SparsePoly[QQ]], mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "begin",
+          "signature": "def begin(mut self, projection: CADProjectionCertificate, mut budget: Budget) raises PolyError",
+          "members": []
+        },
+        {
+          "name": "write",
+          "signature": "def write(mut self, var event: CADStreamEvent, mut budget: Budget) raises PolyError",
+          "members": []
+        },
+        {
+          "name": "accept",
+          "signature": "def accept(mut self, var event: CADStreamEvent, mut budget: Budget) raises PolyError -> Bool",
+          "members": []
+        },
+        {
+          "name": "finish",
+          "signature": "def finish(self, receipt: CADStreamReceipt, mut budget: Budget) raises PolyError -> Bool",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cad_stream",
+      "name": "CADStreamEvent",
+      "signature": "@fieldwise_init\nstruct CADStreamEvent(Copyable, Movable)",
+      "members": [
+        {
+          "name": "stack",
+          "signature": "var stack: Optional[CADStackCertificate]",
+          "members": []
+        },
+        {
+          "name": "evaluations",
+          "signature": "var evaluations: List[AlgebraicPolynomialEvaluation]",
+          "members": []
+        },
+        {
+          "name": "signs",
+          "signature": "var signs: List[AlgebraicComparisonCertificate]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cad_stream",
+      "name": "CADStreamReceipt",
+      "signature": "@fieldwise_init\nstruct CADStreamReceipt(Copyable, Movable)",
+      "members": [
+        {
+          "name": "stacks",
+          "signature": "var stacks: Int",
+          "members": []
+        },
+        {
+          "name": "cells",
+          "signature": "var cells: Int",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "certificates",
+      "name": "CancellationCertificate",
+      "signature": "@fieldwise_init\nstruct CancellationCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "common",
+          "signature": "var common: SparsePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "cofactors",
+          "signature": "var cofactors: Tuple[SparsePoly[QQ], SparsePoly[QQ]]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "coefficient_buffer",
+      "name": "CoefficientBuffer",
+      "signature": "struct CoefficientBuffer[T: Copyable & Deinitable](Copyable, Movable, Sized, Iterable, Equatable where conforms_to(T, Equatable), Writable where conforms_to(T, Writable))",
+      "members": [
+        {
+          "name": "IteratorType",
+          "signature": "comptime IteratorType[iterable_mut: Bool, //, iterable_origin: Origin[mut=iterable_mut]]: Iterator = _BufferIterator[Self.T, ImmOrigin(iterable_origin)]",
+          "members": []
+        },
+        {
+          "name": "__init__",
+          "signature": "def __init__(out self)",
+          "members": []
+        },
+        {
+          "name": "__init__",
+          "signature": "@implicit\ndef __init__(out self, var values: List[Self.T])",
+          "members": []
+        },
+        {
+          "name": "__init__",
+          "signature": "def __init__(out self, *, copy: Self)",
+          "members": []
+        },
+        {
+          "name": "write_to",
+          "signature": "def write_to[W: Writer](self, mut writer: W) where conforms_to(Self.T, Writable)",
+          "members": []
+        },
+        {
+          "name": "capacity",
+          "signature": "def capacity(self) -> Int",
+          "members": []
+        },
+        {
+          "name": "is_contiguous",
+          "signature": "def is_contiguous(self) -> Bool",
+          "members": []
+        },
+        {
+          "name": "clear",
+          "signature": "def clear(mut self)",
+          "members": []
+        },
+        {
+          "name": "pop",
+          "signature": "def pop(mut self) -> Self.T",
+          "members": []
+        },
+        {
+          "name": "append",
+          "signature": "def append(mut self, var value: Self.T)",
+          "members": []
+        },
+        {
+          "name": "to_list",
+          "signature": "def to_list(self, mut budget: Budget) raises PolyError -> List[Self.T]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "coefficients",
+      "name": "CoefficientField",
+      "signature": "trait CoefficientField(CoefficientRing)",
+      "members": [
+        {
+          "name": "inverse",
+          "signature": "def inverse(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "coefficients",
+      "name": "CoefficientRing",
+      "signature": "trait CoefficientRing(Copyable, Equatable, Writable, Deinitable)",
+      "members": [
+        {
+          "name": "Context",
+          "signature": "comptime Context: Copyable & Equatable & Writable & Deinitable",
+          "members": []
+        },
+        {
+          "name": "zero",
+          "signature": "@staticmethod\ndef zero(ctx: Self.Context) -> Self",
+          "members": []
+        },
+        {
+          "name": "one",
+          "signature": "@staticmethod\ndef one(ctx: Self.Context) -> Self",
+          "members": []
+        },
+        {
+          "name": "context",
+          "signature": "def context(self) -> Self.Context",
+          "members": []
+        },
+        {
+          "name": "is_zero",
+          "signature": "def is_zero(self) -> Bool",
+          "members": []
+        },
+        {
+          "name": "size",
+          "signature": "def size(self) -> Int",
+          "members": []
+        },
+        {
+          "name": "add",
+          "signature": "def add(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "sub",
+          "signature": "def sub(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "mul",
+          "signature": "def mul(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "neg",
+          "signature": "def neg(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "certificates",
+      "name": "ContentGcdStep",
+      "signature": "@fieldwise_init\nstruct ContentGcdStep[C: CoefficientRing](Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "gcd",
+          "signature": "var gcd: SparsePoly[Self.C]",
+          "members": []
+        },
+        {
+          "name": "cofactors",
+          "signature": "var cofactors: Tuple[SparsePoly[Self.C], SparsePoly[Self.C]]",
+          "members": []
+        },
+        {
+          "name": "coprimality_node",
+          "signature": "var coprimality_node: Optional[Int]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "certificates",
+      "name": "CoprimalityCertificate",
+      "signature": "@fieldwise_init\nstruct CoprimalityCertificate[C: CoefficientRing](Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "nodes",
+          "signature": "var nodes: List[CoprimalityNode[Self.C]]",
+          "members": []
+        },
+        {
+          "name": "root",
+          "signature": "var root: Int",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "certificates",
+      "name": "CoprimalityNode",
+      "signature": "@fieldwise_init\nstruct CoprimalityNode[C: CoefficientRing](Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "variable",
+          "signature": "var variable: Int64",
+          "members": []
+        },
+        {
+          "name": "u",
+          "signature": "var u: SparsePoly[Self.C]",
+          "members": []
+        },
+        {
+          "name": "v",
+          "signature": "var v: SparsePoly[Self.C]",
+          "members": []
+        },
+        {
+          "name": "s",
+          "signature": "var s: SparsePoly[Self.C]",
+          "members": []
+        },
+        {
+          "name": "left_content_steps",
+          "signature": "var left_content_steps: List[ContentGcdStep[Self.C]]",
+          "members": []
+        },
+        {
+          "name": "right_content_steps",
+          "signature": "var right_content_steps: List[ContentGcdStep[Self.C]]",
+          "members": []
+        },
+        {
+          "name": "contents_node",
+          "signature": "var contents_node: Optional[Int]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "cylindrical_covering",
+      "name": "CylindricalCoveringCertificate",
+      "signature": "@fieldwise_init\nstruct CylindricalCoveringCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "projection",
+          "signature": "var projection: CADProjectionCertificate",
+          "members": []
+        },
+        {
+          "name": "cells",
+          "signature": "var cells: List[CADCell]",
+          "members": []
+        },
+        {
+          "name": "stacks",
+          "signature": "var stacks: List[CADStackCertificate]",
+          "members": []
+        },
+        {
+          "name": "conflicts",
+          "signature": "var conflicts: List[CADConflictInterval]",
+          "members": []
+        },
+        {
+          "name": "root_conflict",
+          "signature": "var root_conflict: Optional[CADConflict]",
+          "members": []
+        },
+        {
+          "name": "witness_cell",
+          "signature": "var witness_cell: Int",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "dense",
+      "name": "DensePoly",
+      "signature": "struct DensePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable)",
+      "members": [
+        {
+          "name": "variable",
+          "signature": "var variable: Int64",
+          "members": []
+        },
+        {
+          "name": "ring",
+          "signature": "var ring: Self.C.Context",
+          "members": []
+        },
+        {
+          "name": "coefficients",
+          "signature": "var coefficients: CoefficientBuffer[Self.C]",
+          "members": []
+        },
+        {
+          "name": "__init__",
+          "signature": "def __init__(out self, variable: Int64, var ring: Self.C.Context)",
+          "members": []
+        },
+        {
+          "name": "from_coefficients",
+          "signature": "@staticmethod\ndef from_coefficients(variable: Int64, ring: Self.C.Context, var coefficients: List[Self.C], mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "from_coefficients",
+          "signature": "@staticmethod\ndef from_coefficients(variable: Int64, ring: Self.C.Context, var coefficients: CoefficientBuffer[Self.C], mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "karatsuba_threshold",
+          "signature": "@staticmethod\ndef karatsuba_threshold() -> Int",
+          "members": []
+        },
+        {
+          "name": "degree",
+          "signature": "def degree(self) -> Int",
+          "members": []
+        },
+        {
+          "name": "is_zero",
+          "signature": "def is_zero(self) -> Bool",
+          "members": []
+        },
+        {
+          "name": "add",
+          "signature": "def add(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "sub",
+          "signature": "def sub(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "neg",
+          "signature": "def neg(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "scale",
+          "signature": "def scale(self, c: Self.C, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "mul_schoolbook",
+          "signature": "def mul_schoolbook(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "mul",
+          "signature": "def mul(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "pow",
+          "signature": "def pow(self, n: UInt64, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "to_sparse",
+          "signature": "def to_sparse(self, order: MonomialOrder, mut budget: Budget) raises PolyError -> SparsePoly[Self.C]",
+          "members": []
+        },
+        {
+          "name": "from_sparse",
+          "signature": "@staticmethod\ndef from_sparse(p: SparsePoly[Self.C], mut budget: Budget, *, variable: Optional[Int64] = None) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "check_invariants",
+          "signature": "def check_invariants(self, mut budget: Budget) raises PolyError",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "determinant",
+      "name": "DeterminantStep",
+      "signature": "@fieldwise_init\nstruct DeterminantStep(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "pivot_row",
+          "signature": "var pivot_row: Int",
+          "members": []
+        },
+        {
+          "name": "trailing",
+          "signature": "var trailing: List[List[SparsePoly[QQ]]]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "certificates",
+      "name": "DivisionResult",
+      "signature": "@fieldwise_init\nstruct DivisionResult[C: CoefficientRing](Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "quotient",
+          "signature": "var quotient: DensePoly[Self.C]",
+          "members": []
+        },
+        {
+          "name": "remainder",
+          "signature": "var remainder: DensePoly[Self.C]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "certificates",
+      "name": "Factorization",
+      "signature": "@fieldwise_init\nstruct Factorization[C: CoefficientRing](Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "unit",
+          "signature": "var unit: Self.C",
+          "members": []
+        },
+        {
+          "name": "factors",
+          "signature": "var factors: List[Tuple[DensePoly[Self.C], Int]]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "certificates",
+      "name": "GcdResult",
+      "signature": "@fieldwise_init\nstruct GcdResult[C: CoefficientRing](Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "gcd",
+          "signature": "var gcd: SparsePoly[Self.C]",
+          "members": []
+        },
+        {
+          "name": "cofactors",
+          "signature": "var cofactors: Tuple[SparsePoly[Self.C], SparsePoly[Self.C]]",
+          "members": []
+        },
+        {
+          "name": "bezout",
+          "signature": "var bezout: Optional[Tuple[SparsePoly[Self.C], SparsePoly[Self.C]]]",
+          "members": []
+        },
+        {
+          "name": "coprimality",
+          "signature": "var coprimality: Optional[CoprimalityCertificate[Self.C]]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "groebner",
+      "name": "GroebnerBasis",
+      "signature": "@fieldwise_init\nstruct GroebnerBasis[C: CoefficientField](Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "order",
+          "signature": "var order: MonomialOrder",
+          "members": []
+        },
+        {
+          "name": "basis",
+          "signature": "var basis: List[SparsePoly[Self.C]]",
+          "members": []
+        },
+        {
+          "name": "cofactors",
+          "signature": "var cofactors: Optional[List[List[SparsePoly[Self.C]]]]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "dense",
+      "name": "KARATSUBA_THRESHOLD",
+      "signature": "comptime KARATSUBA_THRESHOLD = 32",
+      "members": []
+    },
+    {
+      "module": "rational_tools",
+      "name": "LaurentExpansion",
+      "signature": "@fieldwise_init\nstruct LaurentExpansion(Copyable, Movable)",
+      "members": [
+        {
+          "name": "variable",
+          "signature": "var variable: Int64",
+          "members": []
+        },
+        {
+          "name": "center",
+          "signature": "var center: QQ",
+          "members": []
+        },
+        {
+          "name": "valuation",
+          "signature": "var valuation: Int",
+          "members": []
+        },
+        {
+          "name": "coefficients",
+          "signature": "var coefficients: List[QQ]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "lazard",
+      "name": "LazardEvaluationCertificate",
+      "signature": "@fieldwise_init\nstruct LazardEvaluationCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "orders",
+          "signature": "var orders: List[Int]",
+          "members": []
+        },
+        {
+          "name": "evaluations",
+          "signature": "var evaluations: List[AlgebraicSpecializationCertificate]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "certificates",
+      "name": "ListDivision",
+      "signature": "@fieldwise_init\nstruct ListDivision[C: CoefficientRing](Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "quotients",
+          "signature": "var quotients: List[SparsePoly[Self.C]]",
+          "members": []
+        },
+        {
+          "name": "remainder",
+          "signature": "var remainder: SparsePoly[Self.C]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "codec",
+      "name": "MAX_KERNEL_BYTES",
+      "signature": "comptime MAX_KERNEL_BYTES = 1048576",
+      "members": []
+    },
+    {
+      "module": "certificates",
+      "name": "MembershipCertificate",
+      "signature": "@fieldwise_init\nstruct MembershipCertificate[C: CoefficientRing](Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "cofactors",
+          "signature": "var cofactors: List[SparsePoly[Self.C]]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "coefficients",
+      "name": "ModInt",
+      "signature": "struct ModInt(CoefficientField)",
+      "members": [
+        {
+          "name": "value",
+          "signature": "var value: UInt64",
+          "members": []
+        },
+        {
+          "name": "modulus",
+          "signature": "var modulus: UInt64",
+          "members": []
+        },
+        {
+          "name": "Context",
+          "signature": "comptime Context = Modulus",
+          "members": []
+        },
+        {
+          "name": "__init__",
+          "signature": "def __init__(out self, value: UInt64, ctx: Modulus)",
+          "members": []
+        },
+        {
+          "name": "zero",
+          "signature": "@staticmethod\ndef zero(ctx: Modulus) -> Self",
+          "members": []
+        },
+        {
+          "name": "one",
+          "signature": "@staticmethod\ndef one(ctx: Modulus) -> Self",
+          "members": []
+        },
+        {
+          "name": "context",
+          "signature": "def context(self) -> Modulus",
+          "members": []
+        },
+        {
+          "name": "size",
+          "signature": "def size(self) -> Int",
+          "members": []
+        },
+        {
+          "name": "is_zero",
+          "signature": "def is_zero(self) -> Bool",
+          "members": []
+        },
+        {
+          "name": "add",
+          "signature": "def add(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "sub",
+          "signature": "def sub(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "mul",
+          "signature": "def mul(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "neg",
+          "signature": "def neg(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "inverse",
+          "signature": "def inverse(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "coefficients",
+      "name": "Modulus",
+      "signature": "struct Modulus(ImplicitlyCopyable, Equatable, Writable)",
+      "members": [
+        {
+          "name": "value",
+          "signature": "var value: UInt64",
+          "members": []
+        },
+        {
+          "name": "__init__",
+          "signature": "def __init__(out self, value: UInt64, mut budget: Budget) raises PolyError",
+          "members": []
+        },
+        {
+          "name": "__init__",
+          "signature": "def __init__(out self, *, _prime_value: UInt64)",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "monomial",
+      "name": "Monomial",
+      "signature": "struct Monomial(Copyable, Movable, Equatable, Hashable, Writable)",
+      "members": [
+        {
+          "name": "pairs",
+          "signature": "var pairs: List[Tuple[Int64, UInt32]]",
+          "members": []
+        },
+        {
+          "name": "__init__",
+          "signature": "def __init__(out self)",
+          "members": []
+        },
+        {
+          "name": "__init__",
+          "signature": "def __init__(out self, var pairs: List[Tuple[Int64, UInt32]], mut budget: Budget) raises PolyError",
+          "members": []
+        },
+        {
+          "name": "check_invariants",
+          "signature": "def check_invariants(self, mut budget: Budget) raises PolyError",
+          "members": []
+        },
+        {
+          "name": "degree",
+          "signature": "def degree(self, mut budget: Budget) raises PolyError -> UInt64",
+          "members": []
+        },
+        {
+          "name": "exponent",
+          "signature": "def exponent(self, index: Int64, mut budget: Budget) raises PolyError -> UInt32",
+          "members": []
+        },
+        {
+          "name": "mul",
+          "signature": "def mul(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "lcm",
+          "signature": "def lcm(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "divides",
+          "signature": "def divides(self, other: Self, mut budget: Budget) raises PolyError -> Bool",
+          "members": []
+        },
+        {
+          "name": "div",
+          "signature": "def div(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "monomial",
+      "name": "MonomialOrder",
+      "signature": "struct MonomialOrder(Copyable, Movable, Equatable, Writable)",
+      "members": [
+        {
+          "name": "kind",
+          "signature": "var kind: UInt8",
+          "members": []
+        },
+        {
+          "name": "variables",
+          "signature": "var variables: List[Int64]",
+          "members": []
+        },
+        {
+          "name": "KERNEL",
+          "signature": "comptime KERNEL = UInt8(0)",
+          "members": []
+        },
+        {
+          "name": "LEX",
+          "signature": "comptime LEX = UInt8(1)",
+          "members": []
+        },
+        {
+          "name": "GRLEX",
+          "signature": "comptime GRLEX = UInt8(2)",
+          "members": []
+        },
+        {
+          "name": "GREVLEX",
+          "signature": "comptime GREVLEX = UInt8(3)",
+          "members": []
+        },
+        {
+          "name": "__init__",
+          "signature": "def __init__(out self)",
+          "members": []
+        },
+        {
+          "name": "__init__",
+          "signature": "def __init__(out self, kind: UInt8, var variables: List[Int64], mut budget: Budget) raises PolyError",
+          "members": []
+        },
+        {
+          "name": "validate",
+          "signature": "def validate(self, monomial: Monomial, mut budget: Budget) raises PolyError",
+          "members": []
+        },
+        {
+          "name": "compare",
+          "signature": "def compare(self, a: Monomial, b: Monomial, mut budget: Budget) raises PolyError -> Int",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "interpolation",
+      "name": "MultipointPlan",
+      "signature": "@fieldwise_init\nstruct MultipointPlan[C: CoefficientField](Copyable, Movable)",
+      "members": [
+        {
+          "name": "prepare",
+          "signature": "@staticmethod\ndef prepare(variable: Int64, ring: Self.C.Context, points: List[Self.C], mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "prepare_interpolation",
+          "signature": "@staticmethod\ndef prepare_interpolation(variable: Int64, ring: Self.C.Context, points: List[Self.C], mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "point_count",
+          "signature": "def point_count(self) -> Int",
+          "members": []
+        },
+        {
+          "name": "evaluate",
+          "signature": "def evaluate(self, poly: DensePoly[Self.C], mut budget: Budget) raises PolyError -> List[Self.C]",
+          "members": []
+        },
+        {
+          "name": "interpolate",
+          "signature": "def interpolate(self, values: List[Self.C], mut budget: Budget) raises PolyError -> DensePoly[Self.C]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "multivariate_factor",
+      "name": "MultivariateFactorization",
+      "signature": "@fieldwise_init\nstruct MultivariateFactorization[C: CoefficientRing](Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "unit",
+          "signature": "var unit: Self.C",
+          "members": []
+        },
+        {
+          "name": "factors",
+          "signature": "var factors: List[Tuple[SparsePoly[Self.C], Int]]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "coefficients",
+      "name": "NoContext",
+      "signature": "@fieldwise_init\nstruct NoContext(ImplicitlyCopyable, Equatable, Writable)",
+      "members": []
+    },
+    {
+      "module": "rational_tools",
+      "name": "PartialFractionTerm",
+      "signature": "@fieldwise_init\nstruct PartialFractionTerm(Copyable, Movable)",
+      "members": [
+        {
+          "name": "numerator",
+          "signature": "var numerator: DensePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "factor",
+          "signature": "var factor: DensePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "exponent",
+          "signature": "var exponent: Int",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "rational_tools",
+      "name": "PartialFractions",
+      "signature": "@fieldwise_init\nstruct PartialFractions(Copyable, Movable)",
+      "members": [
+        {
+          "name": "polynomial",
+          "signature": "var polynomial: DensePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "terms",
+          "signature": "var terms: List[PartialFractionTerm]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "errors",
+      "name": "PolyError",
+      "signature": "@fieldwise_init\nstruct PolyError(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "kind",
+          "signature": "var kind: PolyErrorKind",
+          "members": []
+        },
+        {
+          "name": "message",
+          "signature": "var message: String",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "errors",
+      "name": "PolyErrorKind",
+      "signature": "@fieldwise_init\nstruct PolyErrorKind(ImplicitlyCopyable, Equatable, Writable)",
+      "members": [
+        {
+          "name": "code",
+          "signature": "var code: UInt8",
+          "members": []
+        },
+        {
+          "name": "LIMIT",
+          "signature": "comptime LIMIT = Self(1)",
+          "members": []
+        },
+        {
+          "name": "CAPACITY",
+          "signature": "comptime CAPACITY = Self(2)",
+          "members": []
+        },
+        {
+          "name": "DOMAIN",
+          "signature": "comptime DOMAIN = Self(3)",
+          "members": []
+        },
+        {
+          "name": "UNSUPPORTED",
+          "signature": "comptime UNSUPPORTED = Self(4)",
+          "members": []
+        },
+        {
+          "name": "ENCODING",
+          "signature": "comptime ENCODING = Self(5)",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "builders",
+      "name": "PolynomialRing",
+      "signature": "@fieldwise_init\nstruct PolynomialRing[C: CoefficientRing](Copyable, Movable)",
+      "members": [
+        {
+          "name": "create",
+          "signature": "@staticmethod\ndef create(names: List[String], ring: Self.C.Context, mut budget: Budget, *, kind: UInt8 = MonomialOrder.LEX) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "variable",
+          "signature": "def variable(self, name: String, mut budget: Budget) raises PolyError -> SparsePoly[Self.C]",
+          "members": []
+        },
+        {
+          "name": "parse",
+          "signature": "def parse(self, text: String, mut budget: Budget) raises PolyError -> SparsePoly[Self.C]",
+          "members": []
+        },
+        {
+          "name": "format",
+          "signature": "def format(self, poly: SparsePoly[Self.C], mut budget: Budget) raises PolyError -> String",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "text_stream",
+      "name": "PolynomialTextSink",
+      "signature": "trait PolynomialTextSink",
+      "members": [
+        {
+          "name": "write",
+          "signature": "def write(mut self, var chunk: String, mut budget: Budget) raises PolyError",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "text_stream",
+      "name": "PolynomialTextSource",
+      "signature": "trait PolynomialTextSource(Movable, Deinitable)",
+      "members": [
+        {
+          "name": "read",
+          "signature": "def read(mut self, mut budget: Budget) raises PolyError -> Optional[String]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "determinant",
+      "name": "ProjectionResultantCertificate",
+      "signature": "@fieldwise_init\nstruct ProjectionResultantCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "variable",
+          "signature": "var variable: Int64",
+          "members": []
+        },
+        {
+          "name": "resultant",
+          "signature": "var resultant: SparsePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "steps",
+          "signature": "var steps: List[DeterminantStep]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "coefficients",
+      "name": "QQ",
+      "signature": "@fieldwise_init\nstruct QQ(CoefficientField)",
+      "members": [
+        {
+          "name": "value",
+          "signature": "var value: Rational",
+          "members": []
+        },
+        {
+          "name": "Context",
+          "signature": "comptime Context = NoContext",
+          "members": []
+        },
+        {
+          "name": "zero",
+          "signature": "@staticmethod\ndef zero(ctx: NoContext) -> Self",
+          "members": []
+        },
+        {
+          "name": "one",
+          "signature": "@staticmethod\ndef one(ctx: NoContext) -> Self",
+          "members": []
+        },
+        {
+          "name": "context",
+          "signature": "def context(self) -> NoContext",
+          "members": []
+        },
+        {
+          "name": "is_zero",
+          "signature": "def is_zero(self) -> Bool",
+          "members": []
+        },
+        {
+          "name": "size",
+          "signature": "def size(self) -> Int",
+          "members": []
+        },
+        {
+          "name": "add",
+          "signature": "def add(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "sub",
+          "signature": "def sub(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "mul",
+          "signature": "def mul(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "neg",
+          "signature": "def neg(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "inverse",
+          "signature": "def inverse(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "exact_complex",
+      "name": "QQi",
+      "signature": "@fieldwise_init\nstruct QQi(CoefficientField)",
+      "members": [
+        {
+          "name": "value",
+          "signature": "var value: ExactComplex",
+          "members": []
+        },
+        {
+          "name": "Context",
+          "signature": "comptime Context = NoContext",
+          "members": []
+        },
+        {
+          "name": "zero",
+          "signature": "@staticmethod\ndef zero(ctx: NoContext) -> Self",
+          "members": []
+        },
+        {
+          "name": "one",
+          "signature": "@staticmethod\ndef one(ctx: NoContext) -> Self",
+          "members": []
+        },
+        {
+          "name": "context",
+          "signature": "def context(self) -> NoContext",
+          "members": []
+        },
+        {
+          "name": "is_zero",
+          "signature": "def is_zero(self) -> Bool",
+          "members": []
+        },
+        {
+          "name": "size",
+          "signature": "def size(self) -> Int",
+          "members": []
+        },
+        {
+          "name": "add",
+          "signature": "def add(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "sub",
+          "signature": "def sub(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "mul",
+          "signature": "def mul(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "neg",
+          "signature": "def neg(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "inverse",
+          "signature": "def inverse(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "fractions",
+      "name": "RationalFunction",
+      "signature": "@fieldwise_init\nstruct RationalFunction(Copyable, Movable, Equatable, Writable)",
+      "members": [
+        {
+          "name": "numerator",
+          "signature": "var numerator: SparsePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "denominator",
+          "signature": "var denominator: SparsePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "normalize",
+          "signature": "@staticmethod\ndef normalize(p: SparsePoly[QQ], q: SparsePoly[QQ], mut budget: Budget) raises PolyError -> Tuple[Self, CancellationCertificate]",
+          "members": []
+        },
+        {
+          "name": "add",
+          "signature": "def add(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "sub",
+          "signature": "def sub(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "mul",
+          "signature": "def mul(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "div",
+          "signature": "def div(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "neg",
+          "signature": "def neg(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "algebraic_types",
+      "name": "RealAlgebraic",
+      "signature": "@fieldwise_init\nstruct RealAlgebraic(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "polynomial",
+          "signature": "var polynomial: DensePoly[QQ]",
+          "members": []
+        },
+        {
+          "name": "low",
+          "signature": "var low: QQ",
+          "members": []
+        },
+        {
+          "name": "high",
+          "signature": "var high: QQ",
+          "members": []
+        },
+        {
+          "name": "sequence",
+          "signature": "var sequence: SturmSequence",
+          "members": []
+        },
+        {
+          "name": "rational",
+          "signature": "var rational: Bool",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "certificates",
+      "name": "ResultantResult",
+      "signature": "@fieldwise_init\nstruct ResultantResult[C: CoefficientRing](Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "resultant",
+          "signature": "var resultant: SparsePoly[Self.C]",
+          "members": []
+        },
+        {
+          "name": "cofactors",
+          "signature": "var cofactors: Tuple[SparsePoly[Self.C], SparsePoly[Self.C]]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "certificates",
+      "name": "RootCountCertificate",
+      "signature": "@fieldwise_init\nstruct RootCountCertificate(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "sequence",
+          "signature": "var sequence: SturmSequence",
+          "members": []
+        },
+        {
+          "name": "a",
+          "signature": "var a: QQ",
+          "members": []
+        },
+        {
+          "name": "b",
+          "signature": "var b: QQ",
+          "members": []
+        },
+        {
+          "name": "count",
+          "signature": "var count: Int",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "roots",
+      "name": "RootInterval",
+      "signature": "@fieldwise_init\nstruct RootInterval(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "low",
+          "signature": "var low: QQ",
+          "members": []
+        },
+        {
+          "name": "high",
+          "signature": "var high: QQ",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "roots",
+      "name": "RootIsolation",
+      "signature": "@fieldwise_init\nstruct RootIsolation(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "exact_roots",
+          "signature": "var exact_roots: List[QQ]",
+          "members": []
+        },
+        {
+          "name": "intervals",
+          "signature": "var intervals: List[RootInterval]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "sparse",
+      "name": "SparsePoly",
+      "signature": "struct SparsePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable)",
+      "members": [
+        {
+          "name": "order",
+          "signature": "var order: MonomialOrder",
+          "members": []
+        },
+        {
+          "name": "ring",
+          "signature": "var ring: Self.C.Context",
+          "members": []
+        },
+        {
+          "name": "terms",
+          "signature": "var terms: List[Term[Self.C]]",
+          "members": []
+        },
+        {
+          "name": "__init__",
+          "signature": "def __init__(out self, var order: MonomialOrder, var ring: Self.C.Context)",
+          "members": []
+        },
+        {
+          "name": "zero",
+          "signature": "@staticmethod\ndef zero(order: MonomialOrder, ring: Self.C.Context, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "constant",
+          "signature": "@staticmethod\ndef constant(c: Self.C, order: MonomialOrder, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "variable",
+          "signature": "@staticmethod\ndef variable(index: Int64, order: MonomialOrder, ring: Self.C.Context, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "from_terms",
+          "signature": "@staticmethod\ndef from_terms(var terms: List[Term[Self.C]], order: MonomialOrder, ring: Self.C.Context, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "is_zero",
+          "signature": "def is_zero(self) -> Bool",
+          "members": []
+        },
+        {
+          "name": "add",
+          "signature": "def add(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "sub",
+          "signature": "def sub(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "neg",
+          "signature": "def neg(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "mul",
+          "signature": "def mul(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "scale",
+          "signature": "def scale(self, c: Self.C, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "pow",
+          "signature": "def pow(self, n: UInt64, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "leading",
+          "signature": "def leading(self, mut budget: Budget) raises PolyError -> Term[Self.C]",
+          "members": []
+        },
+        {
+          "name": "total_degree",
+          "signature": "def total_degree(self, mut budget: Budget) raises PolyError -> Int",
+          "members": []
+        },
+        {
+          "name": "degree_in",
+          "signature": "def degree_in(self, index: Int64, mut budget: Budget) raises PolyError -> Int",
+          "members": []
+        },
+        {
+          "name": "variables",
+          "signature": "def variables(self, mut budget: Budget) raises PolyError -> List[Int64]",
+          "members": []
+        },
+        {
+          "name": "reorder",
+          "signature": "def reorder(self, order: MonomialOrder, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "check_invariants",
+          "signature": "def check_invariants(self, mut budget: Budget) raises PolyError",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "sparse_squarefree",
+      "name": "SparseSquarefreeDecomposition",
+      "signature": "@fieldwise_init\nstruct SparseSquarefreeDecomposition[C: CoefficientRing](Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "unit",
+          "signature": "var unit: Self.C",
+          "members": []
+        },
+        {
+          "name": "factors",
+          "signature": "var factors: List[Tuple[SparsePoly[Self.C], Int]]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "certificates",
+      "name": "SquarefreeDecomposition",
+      "signature": "@fieldwise_init\nstruct SquarefreeDecomposition[C: CoefficientRing](Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "unit",
+          "signature": "var unit: Self.C",
+          "members": []
+        },
+        {
+          "name": "factors",
+          "signature": "var factors: List[Tuple[DensePoly[Self.C], Int]]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "certificates",
+      "name": "SturmSequence",
+      "signature": "@fieldwise_init\nstruct SturmSequence(Copyable, Movable, Writable)",
+      "members": [
+        {
+          "name": "polynomials",
+          "signature": "var polynomials: List[DensePoly[QQ]]",
+          "members": []
+        },
+        {
+          "name": "quotients",
+          "signature": "var quotients: List[DensePoly[QQ]]",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "sparse",
+      "name": "Term",
+      "signature": "@fieldwise_init\nstruct Term[C: CoefficientRing](Copyable, Movable, Equatable, Writable)",
+      "members": [
+        {
+          "name": "monomial",
+          "signature": "var monomial: Monomial",
+          "members": []
+        },
+        {
+          "name": "coefficient",
+          "signature": "var coefficient: Self.C",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "series",
+      "name": "TruncatedSeries",
+      "signature": "@fieldwise_init\nstruct TruncatedSeries[C: CoefficientField](Copyable, Movable)",
+      "members": [
+        {
+          "name": "polynomial",
+          "signature": "var polynomial: DensePoly[Self.C]",
+          "members": []
+        },
+        {
+          "name": "order",
+          "signature": "var order: Int",
+          "members": []
+        },
+        {
+          "name": "from_polynomial",
+          "signature": "@staticmethod\ndef from_polynomial(poly: DensePoly[Self.C], order: Int, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "truncate",
+          "signature": "def truncate(self, order: Int, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "add",
+          "signature": "def add(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "sub",
+          "signature": "def sub(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "mul",
+          "signature": "def mul(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "divide",
+          "signature": "def divide(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "inverse",
+          "signature": "def inverse(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "compose",
+          "signature": "def compose(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "derivative",
+          "signature": "def derivative(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "integrate",
+          "signature": "def integrate(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "log",
+          "signature": "def log(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "exp",
+          "signature": "def exp(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "revert",
+          "signature": "def revert(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "coefficients",
+      "name": "ZZ",
+      "signature": "@fieldwise_init\nstruct ZZ(CoefficientRing)",
+      "members": [
+        {
+          "name": "value",
+          "signature": "var value: Integer",
+          "members": []
+        },
+        {
+          "name": "Context",
+          "signature": "comptime Context = NoContext",
+          "members": []
+        },
+        {
+          "name": "zero",
+          "signature": "@staticmethod\ndef zero(ctx: NoContext) -> Self",
+          "members": []
+        },
+        {
+          "name": "one",
+          "signature": "@staticmethod\ndef one(ctx: NoContext) -> Self",
+          "members": []
+        },
+        {
+          "name": "context",
+          "signature": "def context(self) -> NoContext",
+          "members": []
+        },
+        {
+          "name": "is_zero",
+          "signature": "def is_zero(self) -> Bool",
+          "members": []
+        },
+        {
+          "name": "size",
+          "signature": "def size(self) -> Int",
+          "members": []
+        },
+        {
+          "name": "add",
+          "signature": "def add(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "sub",
+          "signature": "def sub(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "mul",
+          "signature": "def mul(self, other: Self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        },
+        {
+          "name": "neg",
+          "signature": "def neg(self, mut budget: Budget) raises PolyError -> Self",
+          "members": []
+        }
+      ]
+    },
+    {
+      "module": "calculus",
+      "name": "affine_transform",
+      "signature": "def affine_transform[C: CoefficientRing](poly: DensePoly[C], scale: C, shift: C, mut budget: Budget) raises PolyError -> DensePoly[C]",
+      "members": []
+    },
+    {
+      "module": "algebraic",
+      "name": "algebraic_add",
+      "signature": "def algebraic_add(a: RealAlgebraic, b: RealAlgebraic, mut budget: Budget) raises PolyError -> AlgebraicArithmeticCertificate",
+      "members": []
+    },
+    {
+      "module": "algebraic",
+      "name": "algebraic_compare",
+      "signature": "def algebraic_compare(a: RealAlgebraic, b: RealAlgebraic, mut budget: Budget) raises PolyError -> AlgebraicComparisonCertificate",
+      "members": []
+    },
+    {
+      "module": "algebraic_evaluation",
+      "name": "algebraic_evaluate",
+      "signature": "def algebraic_evaluate(coefficients: List[RealAlgebraic], x: RealAlgebraic, mut budget: Budget) raises PolyError -> AlgebraicEvaluationCertificate",
+      "members": []
+    },
+    {
+      "module": "algebraic_specialization",
+      "name": "algebraic_evaluate_sparse",
+      "signature": "def algebraic_evaluate_sparse(f: SparsePoly[QQ], point: List[Tuple[Int64, RealAlgebraic]], mut budget: Budget) raises PolyError -> AlgebraicPolynomialEvaluation",
+      "members": []
+    },
+    {
+      "module": "algebraic",
+      "name": "algebraic_inverse",
+      "signature": "def algebraic_inverse(a: RealAlgebraic, mut budget: Budget) raises PolyError -> AlgebraicArithmeticCertificate",
+      "members": []
+    },
+    {
+      "module": "algebraic",
+      "name": "algebraic_multiply",
+      "signature": "def algebraic_multiply(a: RealAlgebraic, b: RealAlgebraic, mut budget: Budget) raises PolyError -> AlgebraicArithmeticCertificate",
+      "members": []
+    },
+    {
+      "module": "algebraic",
+      "name": "algebraic_negate",
+      "signature": "def algebraic_negate(a: RealAlgebraic, mut budget: Budget) raises PolyError -> AlgebraicArithmeticCertificate",
+      "members": []
+    },
+    {
+      "module": "algebraic_roots",
+      "name": "algebraic_roots",
+      "signature": "def algebraic_roots(coefficients: List[RealAlgebraic], mut budget: Budget) raises PolyError -> AlgebraicRootsCertificate",
+      "members": []
+    },
+    {
+      "module": "algebraic_specialization",
+      "name": "algebraic_roots_at",
+      "signature": "def algebraic_roots_at(f: SparsePoly[QQ], variable: Int64, point: List[Tuple[Int64, RealAlgebraic]], mut budget: Budget) raises PolyError -> AlgebraicRootsAtCertificate",
+      "members": []
+    },
+    {
+      "module": "algebraic",
+      "name": "algebraic_sign",
+      "signature": "def algebraic_sign(value: RealAlgebraic, mut budget: Budget) raises PolyError -> AlgebraicComparisonCertificate",
+      "members": []
+    },
+    {
+      "module": "algebraic_specialization",
+      "name": "algebraic_specialize",
+      "signature": "def algebraic_specialize(f: SparsePoly[QQ], point: List[Tuple[Int64, RealAlgebraic]], mut budget: Budget) raises PolyError -> AlgebraicSpecializationCertificate",
+      "members": []
+    },
+    {
+      "module": "algebraic",
+      "name": "algebraic_subtract",
+      "signature": "def algebraic_subtract(a: RealAlgebraic, b: RealAlgebraic, mut budget: Budget) raises PolyError -> AlgebraicArithmeticCertificate",
+      "members": []
+    },
+    {
+      "module": "cad",
+      "name": "cad",
+      "signature": "def cad(inputs: List[SparsePoly[QQ]], variables: List[Int64], mut budget: Budget, lazard: Bool = False) raises PolyError -> CADCertificate",
+      "members": []
+    },
+    {
+      "module": "cad",
+      "name": "cad_cell",
+      "signature": "def cad_cell(inputs: List[SparsePoly[QQ]], variables: List[Int64], point: List[RealAlgebraic], mut budget: Budget, lazard: Bool = False) raises PolyError -> CADCellCertificate",
+      "members": []
+    },
+    {
+      "module": "cad_covering",
+      "name": "cad_covering",
+      "signature": "def cad_covering(inputs: List[SparsePoly[QQ]], masks: List[UInt8], variables: List[Int64], mut budget: Budget, lazard: Bool = False) raises PolyError -> CADCoveringCertificate",
+      "members": []
+    },
+    {
+      "module": "cad_projection",
+      "name": "cad_projection",
+      "signature": "def cad_projection(inputs: List[SparsePoly[QQ]], variables: List[Int64], mut budget: Budget, lazard: Bool = False) raises PolyError -> CADProjectionCertificate",
+      "members": []
+    },
+    {
+      "module": "cad_stream",
+      "name": "cad_to",
+      "signature": "def cad_to[S: CADSink](inputs: List[SparsePoly[QQ]], variables: List[Int64], mut sink: S, mut budget: Budget, lazard: Bool = False) raises PolyError -> CADStreamReceipt",
+      "members": []
+    },
+    {
+      "module": "algebraic_arithmetic",
+      "name": "check_algebraic_arithmetic",
+      "signature": "def check_algebraic_arithmetic(a: RealAlgebraic, b: Optional[RealAlgebraic], certificate: AlgebraicArithmeticCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "algebraic",
+      "name": "check_algebraic_comparison",
+      "signature": "def check_algebraic_comparison(a: RealAlgebraic, b: RealAlgebraic, certificate: AlgebraicComparisonCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "algebraic_specialization",
+      "name": "check_algebraic_evaluate_sparse",
+      "signature": "def check_algebraic_evaluate_sparse(f: SparsePoly[QQ], point: List[Tuple[Int64, RealAlgebraic]], certificate: AlgebraicPolynomialEvaluation, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "algebraic_evaluation",
+      "name": "check_algebraic_evaluation",
+      "signature": "def check_algebraic_evaluation(coefficients: List[RealAlgebraic], x: RealAlgebraic, certificate: AlgebraicEvaluationCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "algebraic_roots",
+      "name": "check_algebraic_roots",
+      "signature": "def check_algebraic_roots(coefficients: List[RealAlgebraic], certificate: AlgebraicRootsCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "algebraic_specialization",
+      "name": "check_algebraic_roots_at",
+      "signature": "def check_algebraic_roots_at(f: SparsePoly[QQ], variable: Int64, point: List[Tuple[Int64, RealAlgebraic]], certificate: AlgebraicRootsAtCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "algebraic_specialization",
+      "name": "check_algebraic_specialization",
+      "signature": "def check_algebraic_specialization(f: SparsePoly[QQ], point: List[Tuple[Int64, RealAlgebraic]], certificate: AlgebraicSpecializationCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "certificates",
+      "name": "check_bezout",
+      "signature": "def check_bezout[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], result: GcdResult[C], mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "cad",
+      "name": "check_cad",
+      "signature": "def check_cad(inputs: List[SparsePoly[QQ]], certificate: CADCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "cad",
+      "name": "check_cad_cell",
+      "signature": "def check_cad_cell(inputs: List[SparsePoly[QQ]], point: List[RealAlgebraic], certificate: CADCellCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "cad_covering",
+      "name": "check_cad_covering",
+      "signature": "def check_cad_covering(inputs: List[SparsePoly[QQ]], masks: List[UInt8], certificate: CADCoveringCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "cad_projection",
+      "name": "check_cad_projection",
+      "signature": "def check_cad_projection(inputs: List[SparsePoly[QQ]], certificate: CADProjectionCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "certificates",
+      "name": "check_cancellation",
+      "signature": "def check_cancellation(p: SparsePoly[QQ], q: SparsePoly[QQ], certificate: CancellationCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "certificates",
+      "name": "check_common_divisor",
+      "signature": "def check_common_divisor[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], result: GcdResult[C], mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "certificates",
+      "name": "check_coprimality",
+      "signature": "def check_coprimality[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], certificate: CoprimalityCertificate[C], mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "cylindrical_covering",
+      "name": "check_cylindrical_covering",
+      "signature": "def check_cylindrical_covering(inputs: List[SparsePoly[QQ]], masks: List[UInt8], certificate: CylindricalCoveringCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "certificates",
+      "name": "check_division",
+      "signature": "def check_division[C: CoefficientRing](f: DensePoly[C], g: DensePoly[C], result: DivisionResult[C], mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "certificates",
+      "name": "check_factorization",
+      "signature": "def check_factorization[C: CoefficientRing](f: DensePoly[C], factorization: Factorization[C], mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "interpolation",
+      "name": "check_hermite_interpolation",
+      "signature": "def check_hermite_interpolation[C: CoefficientField](poly: DensePoly[C], points: List[C], jets: List[List[C]], mut budget: Budget, *, derivatives: Bool = True) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "interpolation",
+      "name": "check_interpolation",
+      "signature": "def check_interpolation[C: CoefficientField](poly: DensePoly[C], points: List[C], values: List[C], mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "rational_tools",
+      "name": "check_laurent_expansion",
+      "signature": "def check_laurent_expansion(f: RationalFunction, expansion: LaurentExpansion, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "lazard",
+      "name": "check_lazard_evaluation",
+      "signature": "def check_lazard_evaluation(f: SparsePoly[QQ], variable: Int64, point: List[Tuple[Int64, RealAlgebraic]], certificate: LazardEvaluationCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "certificates",
+      "name": "check_list_division",
+      "signature": "def check_list_division[C: CoefficientRing](f: SparsePoly[C], divisors: List[SparsePoly[C]], result: ListDivision[C], mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "certificates",
+      "name": "check_membership",
+      "signature": "def check_membership[C: CoefficientRing](f: SparsePoly[C], generators: List[SparsePoly[C]], certificate: MembershipCertificate[C], mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "multivariate_factor",
+      "name": "check_multivariate_factorization",
+      "signature": "def check_multivariate_factorization[C: CoefficientRing](f: SparsePoly[C], certificate: MultivariateFactorization[C], mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "rational_tools",
+      "name": "check_partial_fractions",
+      "signature": "def check_partial_fractions(f: RationalFunction, variable: Int64, decomposition: PartialFractions, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "determinant",
+      "name": "check_projection_resultant",
+      "signature": "def check_projection_resultant(f: SparsePoly[QQ], g: SparsePoly[QQ], certificate: ProjectionResultantCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "algebraic",
+      "name": "check_real_algebraic",
+      "signature": "def check_real_algebraic(value: RealAlgebraic, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "certificates",
+      "name": "check_resultant_identity",
+      "signature": "def check_resultant_identity[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], result: ResultantResult[C], mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "certificates",
+      "name": "check_root_count",
+      "signature": "def check_root_count(f: DensePoly[QQ], certificate: RootCountCertificate, mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "sparse_squarefree",
+      "name": "check_sparse_squarefree_product",
+      "signature": "def check_sparse_squarefree_product[C: CoefficientRing](f: SparsePoly[C], decomposition: SparseSquarefreeDecomposition[C], mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "certificates",
+      "name": "check_squarefree_product",
+      "signature": "def check_squarefree_product[C: CoefficientRing](f: DensePoly[C], decomposition: SquarefreeDecomposition[C], mut budget: Budget) raises PolyError -> Bool",
+      "members": []
+    },
+    {
+      "module": "calculus",
+      "name": "compose_dense",
+      "signature": "def compose_dense[C: CoefficientRing](outer: DensePoly[C], inner: DensePoly[C], mut budget: Budget) raises PolyError -> DensePoly[C]",
+      "members": []
+    },
+    {
+      "module": "gcd",
+      "name": "content",
+      "signature": "def content[C: CoefficientRing](p: SparsePoly[C], main_variable: Int64, mut budget: Budget) raises PolyError -> SparsePoly[C]",
+      "members": []
+    },
+    {
+      "module": "gcd",
+      "name": "coprimality_certificate",
+      "signature": "def coprimality_certificate[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budget: Budget) raises PolyError -> Optional[CoprimalityCertificate[C]]",
+      "members": []
+    },
+    {
+      "module": "roots",
+      "name": "count_roots",
+      "signature": "def count_roots(f: DensePoly[QQ], a: QQ, b: QQ, mut budget: Budget) raises PolyError -> RootCountCertificate",
+      "members": []
+    },
+    {
+      "module": "primes",
+      "name": "crt",
+      "signature": "def crt(residues: List[UInt64], primes: List[UInt64], mut budget: Budget) raises PolyError -> Integer",
+      "members": []
+    },
+    {
+      "module": "cylindrical_covering",
+      "name": "cylindrical_covering",
+      "signature": "def cylindrical_covering(inputs: List[SparsePoly[QQ]], masks: List[UInt8], variables: List[Int64], mut budget: Budget, lazard: Bool = False) raises PolyError -> CylindricalCoveringCertificate",
+      "members": []
+    },
+    {
+      "module": "calculus",
+      "name": "definite_integral",
+      "signature": "def definite_integral[C: CoefficientRing](poly: DensePoly[C], low: C, high: C, mut budget: Budget) raises PolyError -> C",
+      "members": []
+    },
+    {
+      "module": "evaluate",
+      "name": "derivative",
+      "signature": "def derivative[C: CoefficientRing](p: SparsePoly[C], index: Int64, mut budget: Budget) raises PolyError -> SparsePoly[C]",
+      "members": []
+    },
+    {
+      "module": "calculus",
+      "name": "derivative_dense",
+      "signature": "def derivative_dense[C: CoefficientRing](poly: DensePoly[C], mut budget: Budget) raises PolyError -> DensePoly[C]",
+      "members": []
+    },
+    {
+      "module": "interchange",
+      "name": "deserialize_dense",
+      "signature": "def deserialize_dense[C: CoefficientRing](text: String, ring: C.Context, mut budget: Budget) raises PolyError -> DensePoly[C]",
+      "members": []
+    },
+    {
+      "module": "interchange",
+      "name": "deserialize_dense_from",
+      "signature": "def deserialize_dense_from[C: CoefficientRing, S: PolynomialTextSource](var source: S, ring: C.Context, mut budget: Budget, *, max_field_bytes: Int = 16777216) raises PolyError -> DensePoly[C]",
+      "members": []
+    },
+    {
+      "module": "interchange",
+      "name": "deserialize_sparse",
+      "signature": "def deserialize_sparse[C: CoefficientRing](text: String, ring: C.Context, mut budget: Budget) raises PolyError -> SparsePoly[C]",
+      "members": []
+    },
+    {
+      "module": "interchange",
+      "name": "deserialize_sparse_from",
+      "signature": "def deserialize_sparse_from[C: CoefficientRing, S: PolynomialTextSource](var source: S, ring: C.Context, mut budget: Budget, *, max_field_bytes: Int = 16777216) raises PolyError -> SparsePoly[C]",
+      "members": []
+    },
+    {
+      "module": "division",
+      "name": "divide_by_list",
+      "signature": "def divide_by_list[C: CoefficientField](f: SparsePoly[C], divisors: List[SparsePoly[C]], mut budget: Budget) raises PolyError -> ListDivision[C]",
+      "members": []
+    },
+    {
+      "module": "division",
+      "name": "divide_exact",
+      "signature": "def divide_exact[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], mut budget: Budget) raises PolyError -> Optional[SparsePoly[C]]",
+      "members": []
+    },
+    {
+      "module": "division",
+      "name": "divmod",
+      "signature": "def divmod[C: CoefficientField](f: DensePoly[C], g: DensePoly[C], mut budget: Budget) raises PolyError -> DivisionResult[C]",
+      "members": []
+    },
+    {
+      "module": "evaluate",
+      "name": "evaluate",
+      "signature": "def evaluate[C: CoefficientRing](p: SparsePoly[C], point: List[Tuple[Int64, C]], mut budget: Budget) raises PolyError -> C",
+      "members": []
+    },
+    {
+      "module": "evaluate",
+      "name": "evaluate_dense",
+      "signature": "def evaluate_dense[C: CoefficientRing](p: DensePoly[C], x: C, mut budget: Budget) raises PolyError -> C",
+      "members": []
+    },
+    {
+      "module": "gcd",
+      "name": "extended_gcd",
+      "signature": "def extended_gcd[C: CoefficientField](f: DensePoly[C], h: DensePoly[C], mut budget: Budget) raises PolyError -> GcdResult[C]",
+      "members": []
+    },
+    {
+      "module": "factor",
+      "name": "factor",
+      "signature": "def factor(f: DensePoly[QQ], mut budget: Budget) raises PolyError -> Factorization[QQ]",
+      "members": []
+    },
+    {
+      "module": "finite_field",
+      "name": "factor_finite_field",
+      "signature": "def factor_finite_field(f: DensePoly[ModInt], mut budget: Budget, seed: UInt64 = 0) raises PolyError -> Factorization[ModInt]",
+      "members": []
+    },
+    {
+      "module": "gaussian_factor",
+      "name": "factor_gaussian",
+      "signature": "def factor_gaussian(f: DensePoly[QQi], mut budget: Budget) raises PolyError -> Factorization[QQi]",
+      "members": []
+    },
+    {
+      "module": "factor",
+      "name": "factor_integer",
+      "signature": "def factor_integer(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Factorization[ZZ]",
+      "members": []
+    },
+    {
+      "module": "finite_field",
+      "name": "factor_mod_p",
+      "signature": "def factor_mod_p(f: DensePoly[ModInt], mut budget: Budget, seed: UInt64) raises PolyError -> List[DensePoly[ModInt]]",
+      "members": []
+    },
+    {
+      "module": "multivariate_factor",
+      "name": "factor_multivariate",
+      "signature": "def factor_multivariate(f: SparsePoly[QQ], mut budget: Budget) raises PolyError -> MultivariateFactorization[QQ]",
+      "members": []
+    },
+    {
+      "module": "field_multivariate_factor",
+      "name": "factor_multivariate_finite_field",
+      "signature": "def factor_multivariate_finite_field(f: SparsePoly[ModInt], mut budget: Budget, seed: UInt64 = 0) raises PolyError -> MultivariateFactorization[ModInt]",
+      "members": []
+    },
+    {
+      "module": "field_multivariate_factor",
+      "name": "factor_multivariate_gaussian",
+      "signature": "def factor_multivariate_gaussian(f: SparsePoly[QQi], mut budget: Budget) raises PolyError -> MultivariateFactorization[QQi]",
+      "members": []
+    },
+    {
+      "module": "multivariate_factor",
+      "name": "factor_multivariate_integer",
+      "signature": "def factor_multivariate_integer(f: SparsePoly[ZZ], mut budget: Budget) raises PolyError -> MultivariateFactorization[ZZ]",
+      "members": []
+    },
+    {
+      "module": "codec",
+      "name": "from_kernel_bytes",
+      "signature": "def from_kernel_bytes(data: Span[UInt8, _], mut budget: Budget) raises PolyError -> SparsePoly[QQ]",
+      "members": []
+    },
+    {
+      "module": "gcd",
+      "name": "gcd",
+      "signature": "def gcd[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budget: Budget, certify_maximal: Bool = False) raises PolyError -> GcdResult[C]",
+      "members": []
+    },
+    {
+      "module": "groebner",
+      "name": "groebner",
+      "signature": "def groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: MonomialOrder, mut budget: Budget, track_cofactors: Bool = False) raises PolyError -> GroebnerBasis[C]",
+      "members": []
+    },
+    {
+      "module": "interpolation",
+      "name": "hermite_interpolate",
+      "signature": "def hermite_interpolate[C: CoefficientField](variable: Int64, ring: C.Context, points: List[C], jets: List[List[C]], mut budget: Budget, *, derivatives: Bool = True) raises PolyError -> DensePoly[C]",
+      "members": []
+    },
+    {
+      "module": "calculus",
+      "name": "integrate_dense",
+      "signature": "def integrate_dense[C: CoefficientRing](poly: DensePoly[C], mut budget: Budget) raises PolyError -> DensePoly[C]",
+      "members": []
+    },
+    {
+      "module": "calculus",
+      "name": "integrate_integer_dense",
+      "signature": "def integrate_integer_dense(poly: DensePoly[ZZ], mut budget: Budget) raises PolyError -> DensePoly[QQ]",
+      "members": []
+    },
+    {
+      "module": "calculus",
+      "name": "integrate_integer_sparse",
+      "signature": "def integrate_integer_sparse(poly: SparsePoly[ZZ], variable: Int64, mut budget: Budget) raises PolyError -> SparsePoly[QQ]",
+      "members": []
+    },
+    {
+      "module": "calculus",
+      "name": "integrate_sparse",
+      "signature": "def integrate_sparse[C: CoefficientRing](poly: SparsePoly[C], variable: Int64, mut budget: Budget) raises PolyError -> SparsePoly[C]",
+      "members": []
+    },
+    {
+      "module": "interpolation",
+      "name": "interpolate",
+      "signature": "def interpolate[C: CoefficientField](variable: Int64, ring: C.Context, points: List[C], values: List[C], mut budget: Budget) raises PolyError -> DensePoly[C]",
+      "members": []
+    },
+    {
+      "module": "roots",
+      "name": "isolate_real_roots",
+      "signature": "def isolate_real_roots(f: DensePoly[QQ], mut budget: Budget) raises PolyError -> RootIsolation",
+      "members": []
+    },
+    {
+      "module": "calculus",
+      "name": "jet_evaluate",
+      "signature": "def jet_evaluate[C: CoefficientRing](poly: DensePoly[C], point: C, order: Int, mut budget: Budget) raises PolyError -> List[C]",
+      "members": []
+    },
+    {
+      "module": "rational_tools",
+      "name": "laurent_expansion",
+      "signature": "def laurent_expansion(f: RationalFunction, variable: Int64, center: QQ, terms: Int, mut budget: Budget) raises PolyError -> LaurentExpansion",
+      "members": []
+    },
+    {
+      "module": "lazard",
+      "name": "lazard_evaluate",
+      "signature": "def lazard_evaluate(f: SparsePoly[QQ], variable: Int64, point: List[Tuple[Int64, RealAlgebraic]], mut budget: Budget) raises PolyError -> LazardEvaluationCertificate",
+      "members": []
+    },
+    {
+      "module": "groebner",
+      "name": "membership",
+      "signature": "def membership[C: CoefficientField](f: SparsePoly[C], generators: List[SparsePoly[C]], order: MonomialOrder, mut budget: Budget) raises PolyError -> Optional[MembershipCertificate[C]]",
+      "members": []
+    },
+    {
+      "module": "rational_tools",
+      "name": "partial_fractions",
+      "signature": "def partial_fractions(f: RationalFunction, variable: Int64, mut budget: Budget) raises PolyError -> PartialFractions",
+      "members": []
+    },
+    {
+      "module": "primes",
+      "name": "prime",
+      "signature": "def prime(i: Int, mut budget: Budget) raises PolyError -> UInt64",
+      "members": []
+    },
+    {
+      "module": "gcd",
+      "name": "primitive_part",
+      "signature": "def primitive_part[C: CoefficientRing](p: SparsePoly[C], main_variable: Int64, mut budget: Budget) raises PolyError -> SparsePoly[C]",
+      "members": []
+    },
+    {
+      "module": "determinant",
+      "name": "projection_resultant",
+      "signature": "def projection_resultant(f: SparsePoly[QQ], g: SparsePoly[QQ], variable: Int64, mut budget: Budget) raises PolyError -> ProjectionResultantCertificate",
+      "members": []
+    },
+    {
+      "module": "division",
+      "name": "pseudo_divmod",
+      "signature": "def pseudo_divmod[C: CoefficientRing](f: DensePoly[C], g: DensePoly[C], mut budget: Budget) raises PolyError -> DivisionResult[C]",
+      "members": []
+    },
+    {
+      "module": "rational_tools",
+      "name": "rational_compose",
+      "signature": "def rational_compose(outer: RationalFunction, inner: RationalFunction, variable: Int64, mut budget: Budget) raises PolyError -> RationalFunction",
+      "members": []
+    },
+    {
+      "module": "calculus",
+      "name": "rational_dense",
+      "signature": "def rational_dense(poly: DensePoly[ZZ], mut budget: Budget) raises PolyError -> DensePoly[QQ]",
+      "members": []
+    },
+    {
+      "module": "rational_tools",
+      "name": "rational_derivative",
+      "signature": "def rational_derivative(f: RationalFunction, variable: Int64, mut budget: Budget) raises PolyError -> RationalFunction",
+      "members": []
+    },
+    {
+      "module": "rational_tools",
+      "name": "rational_evaluate",
+      "signature": "def rational_evaluate(f: RationalFunction, assignments: List[Tuple[Int64, QQ]], mut budget: Budget) raises PolyError -> QQ",
+      "members": []
+    },
+    {
+      "module": "rational_tools",
+      "name": "rational_poles",
+      "signature": "def rational_poles(f: RationalFunction, variable: Int64, mut budget: Budget) raises PolyError -> Factorization[QQ]",
+      "members": []
+    },
+    {
+      "module": "rational_tools",
+      "name": "rational_residue",
+      "signature": "def rational_residue(f: RationalFunction, variable: Int64, center: QQ, mut budget: Budget) raises PolyError -> QQ",
+      "members": []
+    },
+    {
+      "module": "calculus",
+      "name": "rational_sparse",
+      "signature": "def rational_sparse(poly: SparsePoly[ZZ], mut budget: Budget) raises PolyError -> SparsePoly[QQ]",
+      "members": []
+    },
+    {
+      "module": "rational_tools",
+      "name": "rational_substitute",
+      "signature": "def rational_substitute(f: RationalFunction, assignments: List[Tuple[Int64, SparsePoly[QQ]]], mut budget: Budget) raises PolyError -> RationalFunction",
+      "members": []
+    },
+    {
+      "module": "algebraic",
+      "name": "real_rational",
+      "signature": "def real_rational(value: QQ, mut budget: Budget) raises PolyError -> RealAlgebraic",
+      "members": []
+    },
+    {
+      "module": "algebraic",
+      "name": "real_root",
+      "signature": "def real_root(f: DensePoly[QQ], low: QQ, high: QQ, mut budget: Budget) raises PolyError -> RealAlgebraic",
+      "members": []
+    },
+    {
+      "module": "groebner",
+      "name": "reduce",
+      "signature": "def reduce[C: CoefficientField](f: SparsePoly[C], basis: GroebnerBasis[C], mut budget: Budget) raises PolyError -> ListDivision[C]",
+      "members": []
+    },
+    {
+      "module": "roots",
+      "name": "refine",
+      "signature": "def refine(f: DensePoly[QQ], interval: RootInterval, width: QQ, mut budget: Budget) raises PolyError -> RootInterval",
+      "members": []
+    },
+    {
+      "module": "resultant",
+      "name": "resultant",
+      "signature": "def resultant[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], variable: Int64, mut budget: Budget) raises PolyError -> ResultantResult[C]",
+      "members": []
+    },
+    {
+      "module": "interchange",
+      "name": "serialize_dense",
+      "signature": "def serialize_dense[C: CoefficientRing](poly: DensePoly[C], mut budget: Budget) raises PolyError -> String",
+      "members": []
+    },
+    {
+      "module": "interchange",
+      "name": "serialize_dense_to",
+      "signature": "def serialize_dense_to[C: CoefficientRing, S: PolynomialTextSink](poly: DensePoly[C], mut sink: S, mut budget: Budget, *, chunk_bytes: Int = 4096) raises PolyError",
+      "members": []
+    },
+    {
+      "module": "interchange",
+      "name": "serialize_sparse",
+      "signature": "def serialize_sparse[C: CoefficientRing](poly: SparsePoly[C], mut budget: Budget) raises PolyError -> String",
+      "members": []
+    },
+    {
+      "module": "interchange",
+      "name": "serialize_sparse_to",
+      "signature": "def serialize_sparse_to[C: CoefficientRing, S: PolynomialTextSink](poly: SparsePoly[C], mut sink: S, mut budget: Budget, *, chunk_bytes: Int = 4096) raises PolyError",
+      "members": []
+    },
+    {
+      "module": "roots",
+      "name": "sign_changes",
+      "signature": "def sign_changes(sequence: SturmSequence, a: QQ, mut budget: Budget) raises PolyError -> Int",
+      "members": []
+    },
+    {
+      "module": "roots",
+      "name": "sign_on_interval",
+      "signature": "def sign_on_interval(f: DensePoly[QQ], low: QQ, high: QQ, mut budget: Budget) raises PolyError -> Optional[Int]",
+      "members": []
+    },
+    {
+      "module": "sparse_gcd",
+      "name": "sparse_gcd",
+      "signature": "def sparse_gcd(f: SparsePoly[QQ], g: SparsePoly[QQ], mut budget: Budget) raises PolyError -> GcdResult[QQ]",
+      "members": []
+    },
+    {
+      "module": "sparse_gcd",
+      "name": "sparse_gcd_integer",
+      "signature": "def sparse_gcd_integer(f: SparsePoly[ZZ], g: SparsePoly[ZZ], mut budget: Budget) raises PolyError -> GcdResult[ZZ]",
+      "members": []
+    },
+    {
+      "module": "squarefree",
+      "name": "squarefree",
+      "signature": "def squarefree[C: CoefficientField](f: DensePoly[C], mut budget: Budget) raises PolyError -> SquarefreeDecomposition[C]",
+      "members": []
+    },
+    {
+      "module": "sparse_squarefree",
+      "name": "squarefree_multivariate",
+      "signature": "def squarefree_multivariate[C: CoefficientField](f: SparsePoly[C], mut budget: Budget) raises PolyError -> SparseSquarefreeDecomposition[C]",
+      "members": []
+    },
+    {
+      "module": "roots",
+      "name": "sturm_sequence",
+      "signature": "def sturm_sequence(f: DensePoly[QQ], mut budget: Budget) raises PolyError -> SturmSequence",
+      "members": []
+    },
+    {
+      "module": "resultant",
+      "name": "subresultants",
+      "signature": "def subresultants[C: CoefficientRing](f: SparsePoly[C], g: SparsePoly[C], variable: Int64, mut budget: Budget) raises PolyError -> List[SparsePoly[C]]",
+      "members": []
+    },
+    {
+      "module": "evaluate",
+      "name": "substitute",
+      "signature": "def substitute[C: CoefficientRing](p: SparsePoly[C], index: Int64, q: SparsePoly[C], mut budget: Budget) raises PolyError -> SparsePoly[C]",
+      "members": []
+    },
+    {
+      "module": "calculus",
+      "name": "substitute_many",
+      "signature": "def substitute_many[C: CoefficientRing](poly: SparsePoly[C], assignments: List[Tuple[Int64, SparsePoly[C]]], mut budget: Budget) raises PolyError -> SparsePoly[C]",
+      "members": []
+    },
+    {
+      "module": "calculus",
+      "name": "taylor_shift",
+      "signature": "def taylor_shift[C: CoefficientRing](poly: DensePoly[C], point: C, mut budget: Budget) raises PolyError -> DensePoly[C]",
+      "members": []
+    },
+    {
+      "module": "codec",
+      "name": "to_kernel_bytes",
+      "signature": "def to_kernel_bytes(p: SparsePoly[QQ], mut budget: Budget) raises PolyError -> List[UInt8]",
+      "members": []
+    }
+  ]
+}

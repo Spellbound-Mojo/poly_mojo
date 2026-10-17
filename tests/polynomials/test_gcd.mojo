@@ -1,5 +1,5 @@
 """Independent gcd corpus, including integer contents and an unlucky prime."""
-from apn_mojo import Integer
+from apn_mojo import Integer, Rational
 from polynomials import Budget, QQ, ZZ, ModInt, Modulus, NoContext, CoefficientRing, SparsePoly, DensePoly, MonomialOrder, prime, PolyErrorKind
 from polynomials._prs import _prs
 from support.gen import coefficient
@@ -13,6 +13,8 @@ from polynomials._dense_ops import _gcd as _field_gcd
 from polynomials.division import divide_exact
 from support.gen import polynomial
 from polynomials.certificates import check_common_divisor, check_bezout, check_coprimality
+from polynomials._univariate_modular import _divides_both, _Words
+from polynomials._ntt import _PRIMES
 
 def generated[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
     var work = Budget()
@@ -110,7 +112,8 @@ def word_field_cases(mut c: Checker) raises:
     """The word-size prime-field gcd matches the generic Euclidean loop."""
     var work = Budget()
     var rng = SplitMix64(4271)
-    var moduli: List[UInt64] = [3, 5, 101, 65521, prime(0, work), prime(7, work)]
+    # 1073741789 is the largest prime below 2^30, the bound of the 32-bit Montgomery kernel.
+    var moduli: List[UInt64] = [3, 5, 101, 65521, 1073741789, 1073741827, prime(0, work), prime(7, work)]
     for modulus in moduli:
         var ctx = Modulus(modulus, work)
         for degree in [0, 1, 2, 7, 23, 60]:
@@ -120,6 +123,29 @@ def word_field_cases(mut c: Checker) raises:
             var expected = _extended(f, h, work, carry=False)[0].copy()
             c.check(_field_gcd(f, h, work) == expected, "word field gcd matches the generic loop")
             c.check(_field_gcd(f, DensePoly[ModInt](0, ctx.copy()), work) == _extended(f, DensePoly[ModInt](0, ctx.copy()), work, carry=False)[0], "word field gcd with zero")
+
+
+def transform_division_cases(mut c: Checker) raises:
+    """Integer divisibility from transform-prime quotients and a size bound matches the construction."""
+    var work = Budget()
+    var rng = SplitMix64(9157)
+    var primes = materialize[_PRIMES]()
+    # A constant divisible by the first twenty transform primes leaves every
+    # one of their quotients exact, so only the size bound can reject it.
+    var product = Integer(1)
+    for i in range(20):
+        product = product * Integer(Int(primes[i]))
+    var constants: List[Integer] = [Integer(1), Integer(-1), product^]
+    for bits in [0, 70, 300]:
+        for degree in [4, 6, 17, 31, 45, 90]:
+            var g = dense_random[ZZ](NoContext(), degree, rng, work, bits)
+            var f = g.mul(dense_random[ZZ](NoContext(), degree // 2 + 3, rng, work, bits), work)
+            var h = g.mul(dense_random[ZZ](NoContext(), degree + 5, rng, work, bits), work)
+            c.check(_divides_both(f, _Words(f, work), h, _Words(h, work), g, work), "transform division accepts two multiples")
+            for constant in constants:
+                var shifted = f.add(DensePoly[ZZ].from_coefficients(0, NoContext(), [ZZ(constant.copy())], work), work)
+                c.check(not _divides_both(shifted, _Words(shifted, work), h, _Words(h, work), g, work), "transform division rejects a multiple plus a constant")
+                c.check(not _divides_both(f, _Words(f, work), shifted, _Words(shifted, work), g, work), "transform division rejects a second dividend off by a constant")
 
 
 def multi_prime_cases(mut c: Checker) raises:
@@ -247,6 +273,40 @@ def heuristic_cases(mut c: Checker) raises:
         c.check(_gcd_value(f, v.pow(UInt64(k + 1), work).mul(w, work), work) == _gcd_value(f, v.pow(UInt64(k + 1), work).mul(w, work), work, heuristic=False), "heuristic gcd of a cofactor power")
 
 
+def brown_cases(mut c: Checker) raises:
+    """Few variables of high degree take Brown's dense modular gcd; QQ inputs take the integer paths."""
+    var work = Budget()
+    var order = MonomialOrder(MonomialOrder.GREVLEX, [0, 1, 2], work)
+    var one = SparsePoly[ZZ].constant(ZZ.one(NoContext()), order, work)
+    var x = SparsePoly[ZZ].variable(0, order, NoContext(), work)
+    var y = SparsePoly[ZZ].variable(1, order, NoContext(), work)
+    var z = SparsePoly[ZZ].variable(2, order, NoContext(), work)
+    var a = one.add(x, work).add(y, work).add(z, work)
+    var b = one.scale(ZZ(Integer(2)), work).add(x, work).sub(y, work).add(z.scale(ZZ(Integer(3)), work), work)
+    var d = x.mul(y, work).sub(z.pow(2, work), work).add(one.scale(ZZ(Integer(5)), work), work)
+    var e = x.pow(3, work).add(y.mul(z, work), work).sub(one.scale(ZZ(Integer(7)), work), work)
+    for k in [8, 9]:
+        var g = a.pow(UInt64(k), work).mul(b.pow(UInt64(k), work), work)
+        var f = g.mul(d, work).scale(ZZ(Integer(6)), work)
+        var h = g.mul(e, work).scale(ZZ(Integer(-4)), work)
+        var got = _gcd_value(f, h, work)
+        c.check(got == g.scale(ZZ(Integer(2)), work), "dense modular gcd of planted high-degree products")
+        var lone = _gcd_value(g.mul(d, work), g.mul(d, work).add(one, work), work)
+        c.check(lone == one, "dense modular gcd of coprime high-degree inputs")
+    # Rational multivariate inputs clear denominators and take the integer paths.
+    var qorder = MonomialOrder(MonomialOrder.GREVLEX, [0, 1, 2], work)
+    var qx = SparsePoly[QQ].variable(0, qorder, NoContext(), work)
+    var qy = SparsePoly[QQ].variable(1, qorder, NoContext(), work)
+    var qone = SparsePoly[QQ].constant(QQ.one(NoContext()), qorder, work)
+    var half = qone.scale(QQ(Rational(1, 2)), work)
+    var common = qx.add(qy.scale(QQ(Rational(2, 3)), work), work).add(half, work)
+    var qf = common.mul(qx.sub(qy, work), work).scale(QQ(Rational(5, 7)), work)
+    var qh = common.mul(qx.mul(qy, work).add(qone, work), work).scale(QQ(Rational(-3, 4)), work)
+    c.check(_gcd_value(qf, qh, work) == common, "monic rational multivariate gcd")
+    var qd = qf.mul(qf, work)
+    c.check(_gcd_value(qd, qf.mul(qh, work), work) == _gcd_value(qd, qf.mul(qh, work), work, heuristic=False), "rational gcd matches the route without the heuristic")
+
+
 def main() raises:
     var c = Checker("gcd")
     var work = Budget()
@@ -291,10 +351,12 @@ def main() raises:
     generated[ModInt](Modulus(101, work), c)
     modular_cases(c)
     word_field_cases(c)
+    transform_division_cases(c)
     multi_prime_cases(c)
     division_cases[ZZ](NoContext(), c)
     division_cases[QQ](NoContext(), c)
     division_cases[ModInt](Modulus(101, work), c)
     shortcut_cases(c)
     heuristic_cases(c)
+    brown_cases(c)
     c.finish()

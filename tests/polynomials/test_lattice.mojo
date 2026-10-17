@@ -2,7 +2,8 @@
 from apn_mojo import Integer, Rational
 from polynomials import Budget, PolyErrorKind, ZZ, QQ, NoContext, DensePoly, Modulus, factor_mod_p, factor_integer, check_factorization
 from polynomials._lattice import _lll, _lll_knapsack, _q, _orthogonal
-from polynomials._lattice_factor import _van_hoeij
+from polynomials._lattice_factor import _van_hoeij, _cld_bound
+from polynomials._dense_ops import _derivative
 from polynomials._hensel import _hensel, _hensel_start, _hensel_extend
 from polynomials._gcd import _mod_image
 from polynomials._dense_ops import _monic
@@ -104,6 +105,22 @@ def main() raises:
         c.check(len(factors) == 2, "expected irreducible factor count")
         if not nonmonic:
             c.check((factors[0] == left and factors[1] == right) or (factors[1] == left and factors[0] == right), "planted irrational quadratics recovered")
+    # The CLD bound dominates every coefficient of g' (f/g) for true factors g.
+    var g1 = DensePoly[ZZ].from_coefficients(0, NoContext(), [ZZ(Integer(-7)), ZZ(Integer(3)), ZZ(Integer(0)), ZZ(Integer(11))], work)
+    var g2 = DensePoly[ZZ].from_coefficients(0, NoContext(), [ZZ(Integer(5)), ZZ(Integer(-2)), ZZ(Integer(9))], work)
+    var g3 = DensePoly[ZZ].from_coefficients(0, NoContext(), [ZZ(Integer(1000)), ZZ(Integer(1)), ZZ(Integer(-40)), ZZ(Integer(0)), ZZ(Integer(13))], work)
+    var planted = g1.mul(g2, work).mul(g3, work)
+    var dominated = True
+    for which in range(3):
+        var g = g1.copy() if which == 0 else (g2.copy() if which == 1 else g3.copy())
+        var h = g2.mul(g3, work) if which == 0 else (g1.mul(g3, work) if which == 1 else g1.mul(g2, work))
+        var cld = _derivative(g, work).mul(h, work)
+        for j in range(planted.degree()):
+            var value = cld.coefficients[j].value.copy() if j < len(cld.coefficients) else Integer(0)
+            if value.sign() < 0:
+                value = -value
+            dominated = dominated and not (value > _cld_bound(planted, j, work).value)
+    c.check(dominated, "CLD bound dominates logarithmic derivative coefficients")
     var split = polynomial(1, 0, 0, work)
     for i in range(1, 21):
         split = split.mul(polynomial(-i, 1, 0, work), work)

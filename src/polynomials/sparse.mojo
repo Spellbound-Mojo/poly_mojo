@@ -4,7 +4,7 @@ from .errors import Budget, PolyError, PolyErrorKind, _sum, _product, _charge_si
 from .coefficients import CoefficientRing, ZZ, ModInt
 from .monomial import Monomial, MonomialOrder
 from ._ordering import _IndexedOrder, _stable_indices, _sift_min
-from ._packed_products import _packed_product
+from ._packed_products import _packed_power, _packed_product
 
 @fieldwise_init
 struct Term[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
@@ -417,6 +417,11 @@ struct SparsePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
         """
         if n == 0:
             return Self.constant(Self.C.one(self.ring), self.order, budget)
+        comptime if Self.C == ZZ:
+            if self.order.kind == MonomialOrder.LEX and n >= 3 and n <= UInt64(1 << 20):
+                var packed = _packed_power(self, Int(n), budget)
+                if packed:
+                    return packed.take()
         var result = self._copy(budget)
         var bit = 63
         while not (n >> UInt64(bit)) & 1:

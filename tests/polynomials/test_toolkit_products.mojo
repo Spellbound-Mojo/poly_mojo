@@ -3,7 +3,8 @@ from apn_mojo import Rational, ExactComplex
 from polynomials import *
 from support.check import Checker
 from polynomials._toolkit_exact import _exact_product
-from polynomials._ntt import _ntt_middle_product, _ks_range, _zz_range, _transform_quotient, _shoup_quotient, _PRIMES, _PRIME_COUNT
+from polynomials._fntt import _fconvolve, _FPRIMES, _FPRIME_COUNT
+from polynomials._ntt import _transform_length, _ntt_middle_product, _ks_range, _zz_range, _transform_quotient, _shoup_quotient, _PRIMES, _PRIME_COUNT
 from polynomials.coefficient_buffer import _view
 from apn_mojo import Integer
 
@@ -108,8 +109,42 @@ def transform_quotients(mut check: Checker):
     check.check(valid, "transform quotients")
 
 
+def float_convolutions(mut check: Checker):
+    """Double-precision transforms reproduce exact cyclic-free convolutions for every float prime, below and above the vector width."""
+    var primes = materialize[_FPRIMES]()
+    for index in range(_FPRIME_COUNT):
+        var q = primes[index]
+        var valid = True
+        for la in [1, 3, 8, 9, 17, 100, 300]:
+            for lb in [1, 7, 64]:
+                var a = List[UInt64]()
+                var b = List[UInt64]()
+                var x = UInt64(la * 1000 + lb + index)
+                for k in range(la):
+                    x = x * 6364136223846793005 + 1442695040888963407
+                    a.append(q - 1 if k % 5 == 0 else (x >> 14) % q)
+                for k in range(lb):
+                    x = x * 6364136223846793005 + 1442695040888963407
+                    b.append(q - 1 if k % 3 == 0 else (x >> 14) % q)
+                var count = la + lb - 1
+                var got = _fconvolve(a, b, count, False, index, _transform_length(count))
+                var square = _fconvolve(a, a, 2 * la - 1, True, index, _transform_length(2 * la - 1))
+                for k in range(count):
+                    var e = UInt128(0)
+                    for i in range(max(0, k - lb + 1), min(k, la - 1) + 1):
+                        e = (e + UInt128(a[i]) * UInt128(b[k - i])) % UInt128(q)
+                    valid = valid and UInt64(e) == got[k]
+                for k in range(2 * la - 1):
+                    var e = UInt128(0)
+                    for i in range(max(0, k - la + 1), min(k, la - 1) + 1):
+                        e = (e + UInt128(a[i]) * UInt128(a[k - i])) % UInt128(q)
+                    valid = valid and UInt64(e) == square[k]
+        check.check(valid, String("float convolution modulo ", q))
+
+
 def main() raises:
     var check = Checker("toolkit_products")
+    float_convolutions(check)
     transform_quotients(check)
     segmented(check)
     var work = Budget()
