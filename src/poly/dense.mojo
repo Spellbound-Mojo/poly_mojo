@@ -14,7 +14,7 @@ from ._common import _CoreKind
 from ._interop import _dense_copy
 from polynomials import SparsePoly, gcd as _gcd, gcd_value as _gcd_value, content as _content, primitive_part as _primitive_part, extended_gcd as _extended_gcd, resultant as _resultant, resultant_value as _resultant_value, subresultants as _subresultants, divide_exact as _divide_exact, pseudo_divmod as _pseudo_divmod
 from ._interop import _dense_sparse, _take_dense
-from polynomials import interpolate as _interpolate, hermite_interpolate as _hermite_interpolate, MultipointPlan, affine_transform as _affine_transform, taylor_shift as _taylor_shift, jet_evaluate as _jet_evaluate, definite_integral as _definite_integral
+from polynomials import interpolate as _interpolate, hermite_interpolate as _hermite_interpolate, MultipointPlan, evaluate_modular as _evaluate_modular, affine_transform as _affine_transform, taylor_shift as _taylor_shift, jet_evaluate as _jet_evaluate, definite_integral as _definite_integral
 from ._common import _sequence, _sequence_coefficients, _values_from_core, _data_context, _Nested, _rows
 from polynomials import QQi, factor_gaussian as _factor_gaussian, factor_finite_field as _factor_finite_field
 from polynomials import ZZ, QQ, Factorization, factor_integer as _factor_integer, factor as _factor, squarefree as _squarefree
@@ -24,6 +24,8 @@ from polynomials import divide_by_list as _divide_by_list
 comptime _BLOCK = CoefficientBuffer[ZZ]._block_size
 comptime _FIRST = CoefficientBuffer[ZZ]._initial_size
 comptime _SECOND = CoefficientBuffer[ZZ]._second_size
+comptime _TREE_POINTS = 64
+"""Prime field point and coefficient counts from which evaluate_many uses a subproduct tree."""
 
 
 struct Array[k: Int](Copyable, Movable, Iterable, Sized, _WithModulus, _Record):
@@ -1001,6 +1003,8 @@ def evaluate_many[I: Iterable, X: Iterable](values: I, points: X, mut budget: Bu
         context.observe(modulus, budget)
     var prepared = Optional[Array[k]]()
     var output = List[_Scalar[k]]()
+    # Prime field points are gathered first: many of them share one subproduct tree.
+    var gathered = List[ModInt]()
     var cursor = iter(points)
     comptime T = downcast[type_of(cursor).Element, Copyable & Deinitable]
     while True:
@@ -1016,10 +1020,28 @@ def evaluate_many[I: Iterable, X: Iterable](values: I, points: X, mut budget: Bu
         var ctx = context.get()
         if not prepared:
             prepared = _promote[k](input, ctx, budget)
-        var value = evaluate_dense(prepared.value()._core[], _wrap[k](_convert[k](point, ctx, budget)), budget)
-        _charge_size(value.size(), budget)
-        _grow(output, budget)
-        output.append(_unwrap[k](value))
+        comptime if k == 3:
+            _grow(gathered, budget)
+            gathered.append(rebind_var[ModInt](_wrap[k](_convert[k](point, ctx, budget))))
+        else:
+            var value = evaluate_dense(prepared.value()._core[], _wrap[k](_convert[k](point, ctx, budget)), budget)
+            _charge_size(value.size(), budget)
+            _grow(output, budget)
+            output.append(_unwrap[k](value))
+    comptime if k == 3:
+        if len(gathered):
+            ref core = rebind[DensePoly[ModInt]](prepared.value()._core[])
+            var values: List[ModInt]
+            if len(gathered) >= _TREE_POINTS and core.ring.value > 2 and len(core.coefficients) >= _TREE_POINTS:
+                values = _evaluate_modular(core, gathered, budget)
+            else:
+                values = List[ModInt](capacity=len(gathered))
+                for x in gathered:
+                    values.append(evaluate_dense(core, x, budget))
+            _allocation[_Scalar[k]](len(values), budget)
+            output.reserve(len(values))
+            for v in values:
+                output.append(rebind_var[_Scalar[k]](v.copy()))
     var ctx = context.get()
     comptime if k == 3:
         modulus = rebind[Modulus](ctx).value

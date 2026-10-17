@@ -1,6 +1,7 @@
 """Budgeted Horner evaluation, polynomial substitution, and formal derivatives."""
-from .errors import Budget, PolyError, PolyErrorKind, _charge_size, _allocation
-from .coefficients import CoefficientRing, _pow
+from .errors import Budget, PolyError, PolyErrorKind, _charge_size, _allocation, _sum
+from .coefficients import CoefficientRing, ZZ, QQ, _pow
+from apn_mojo import Integer, Rational, gcd as _gcd_integer
 from .monomial import Monomial, MonomialOrder
 from .sparse import Term, SparsePoly
 from .dense import DensePoly
@@ -98,6 +99,76 @@ def evaluate[C: CoefficientRing](p: SparsePoly[C], point: List[Tuple[Int64, C]],
                 tasks.append(_HornerTask(group[0], group[1], task.level + 1, List[UInt32]()))
     return values.pop()
 
+comptime _FRACTION_FREE = 32
+"""Integer polynomial length from which evaluation at a fraction runs by halves."""
+
+
+def _cancel(numerator: Integer, b: Integer) raises -> Integer:
+    """The common factor of a long numerator and a short denominator base."""
+    return _gcd_integer(numerator % b, b)
+
+
+def _evaluate_fraction(p: DensePoly[QQ], x: QQ, mut budget: Budget) raises PolyError -> Optional[QQ]:
+    # For integer coefficients e_i and x = a/b in lowest terms, the value is
+    # S / b^(L-1) with S = sum e_i a^i b^(L-1-i). A block of width w holds the
+    # same sum over its coefficients; a full left block and its right
+    # neighbour of width v combine as S_left * b^v + a^w * S_right, so the
+    # products stay balanced. A prime that
+    # divides b and S divides the leading coefficient only (a and b are coprime),
+    # so cancelling word gcds with b reduces the fraction without a long gcd.
+    var count = len(p.coefficients)
+    _allocation[ZZ](count, budget)
+    var level = List[ZZ](capacity=count)
+    for i in range(count):
+        budget.charge(1)
+        ref c = p.coefficients[i].value
+        if c.denominator() != Integer(1):
+            return None
+        level.append(ZZ(c.numerator()))
+    var power_a = ZZ(x.value.numerator())
+    var power_b = ZZ(x.value.denominator())
+    var b = power_b.copy()
+    # Every block has width `width` except the last, whose width is `last`.
+    var width = 1
+    var last = 1
+    while len(level) > 1:
+        var next = List[ZZ](capacity=(len(level) + 1) // 2)
+        for j in range(0, len(level) - 1, 2):
+            budget.charge(1)
+            var shift = power_b.copy() if j + 2 < len(level) or last == width else _pow(b, UInt64(last), budget)
+            next.append(level[j].mul(shift, budget).add(power_a.mul(level[j + 1], budget), budget))
+        if len(level) % 2:
+            next.append(level[len(level) - 1].copy())
+        else:
+            last += width
+        level = next^
+        width *= 2
+        if len(level) > 1:
+            power_a = power_a.mul(power_a, budget)
+            power_b = power_b.mul(power_b, budget)
+    var numerator = level[0].copy()
+    var denominator = _pow(b, UInt64(count - 1), budget)
+    if numerator.value.sign() == 0:
+        return QQ(Rational(0))
+    if b.value != Integer(1):
+        while True:
+            budget.charge(1)
+            _charge_size(_sum(numerator.size(), denominator.size()), budget)
+            var common: Integer
+            try:
+                common = _cancel(numerator.value, b.value)
+            except e:
+                raise PolyError(PolyErrorKind.CAPACITY, String(e))
+            if common == Integer(1):
+                break
+            try:
+                numerator = ZZ(numerator.value // common)
+                denominator = ZZ(denominator.value // common)
+            except e:
+                raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    return QQ(Rational(_numerator=numerator.value, _denominator=denominator.value))
+
+
 def evaluate_dense[C: CoefficientRing](p: DensePoly[C], x: C, mut budget: Budget) raises PolyError -> C:
     """Evaluate a dense polynomial by Horner's rule.
 
@@ -117,6 +188,11 @@ def evaluate_dense[C: CoefficientRing](p: DensePoly[C], x: C, mut budget: Budget
     """
     if x.context() != p.ring:
         raise PolyError(PolyErrorKind.DOMAIN, "evaluation point in another ring")
+    comptime if C == QQ:
+        if len(p.coefficients) >= _FRACTION_FREE and rebind[QQ](x).value.denominator() != Integer(1):
+            var value = _evaluate_fraction(rebind[DensePoly[QQ]](p), rebind[QQ](x), budget)
+            if value:
+                return rebind_var[C](value.take())
     var result = C.zero(p.ring)
     for i in range(len(p.coefficients)):
         budget.charge(1)

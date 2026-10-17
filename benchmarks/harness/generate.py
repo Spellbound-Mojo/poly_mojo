@@ -281,6 +281,9 @@ def main(argv=None):
     if family in (None, 'arith'):
         from .arith import cases as arith_cases
         print(f"arith: {write(arith_cases(), 'arith')} cases")
+    if family in (None, 'series'):
+        from .series import cases as series_cases
+        print(f"series: {write(series_cases(), 'series')} cases")
 
 
 if __name__ == '__main__':

@@ -1,5 +1,5 @@
 """Reusable product trees and independently checked exact interpolation."""
-from .coefficients import CoefficientField, ModInt
+from .coefficients import CoefficientField, ModInt, Modulus
 from .dense import DensePoly
 from .coefficient_buffer import _view
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _sum, _product
@@ -9,6 +9,8 @@ from ._coefficient_ops import _copy
 from ._dense_ops import _remainder
 from ._toolkit_exact import _ExactOps
 from ._toolkit_ops import _values, _hermite_values
+from ._nmod import _Field, _field, _to, _from
+from ._multipoint import _Tree, _evaluate as _tree_evaluate, _interpolate as _tree_interpolate
 
 
 def _validate[C: CoefficientField](values: List[C], ring: C.Context, mut budget: Budget) raises PolyError:
@@ -216,6 +218,53 @@ struct MultipointPlan[C: CoefficientField](Copyable, Movable):
         return result^
 
 
+def _residues(values: List[ModInt], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
+    _allocation[UInt64](len(values), budget)
+    var result = List[UInt64](capacity=len(values))
+    for v in values:
+        result.append(_to(v.value, f))
+    return result^
+
+
+def _modints(values: List[UInt64], ring: Modulus, f: _Field, mut budget: Budget) raises PolyError -> List[ModInt]:
+    _allocation[ModInt](len(values), budget)
+    var result = List[ModInt](capacity=len(values))
+    for v in values:
+        result.append(ModInt(_from(v, f), ring))
+    return result^
+
+
+def _native(ring: Modulus) -> Bool:
+    """Whether a word prime field has native residue trees (odd primes)."""
+    return ring.value > 2
+
+
+def evaluate_modular(poly: DensePoly[ModInt], points: List[ModInt], mut budget: Budget) raises PolyError -> List[ModInt]:
+    """Evaluate at many points of an odd prime field through a subproduct tree.
+
+    Args:
+        poly: The polynomial.
+        points: Points in the polynomial's field, repetitions allowed.
+        budget: The shared work allowance.
+
+    Returns:
+        The values in point order.
+
+    Raises:
+        PolyError: DOMAIN for points in another field or the field GF(2), LIMIT or CAPACITY on work limits.
+    """
+    poly.check_invariants(budget)
+    _validate(points, poly.ring, budget)
+    if not _native(poly.ring):
+        raise PolyError(PolyErrorKind.DOMAIN, "native multipoint evaluation needs an odd prime")
+    if not len(points):
+        return List[ModInt]()
+    var f = _field(poly.ring.value)
+    var tree = _Tree(_residues(points, f, budget), f, budget)
+    var values = _tree_evaluate(tree, _residues(poly.coefficients.to_list(budget), f, budget), f, budget)
+    return _modints(values, poly.ring, f, budget)
+
+
 def interpolate[C: CoefficientField](variable: Int64, ring: C.Context, points: List[C], values: List[C], mut budget: Budget) raises PolyError -> DensePoly[C]:
     """Interpolate distinct points over an exact field.
 
@@ -235,6 +284,18 @@ def interpolate[C: CoefficientField](variable: Int64, ring: C.Context, points: L
     Raises:
         PolyError: DOMAIN for invalid data, LIMIT or CAPACITY on work limits.
     """
+    comptime if C == ModInt:
+        ref field = rebind[Modulus](ring)
+        if _native(field) and len(points) > 1:
+            _validate(points, ring, budget)
+            _validate(values, ring, budget)
+            if len(values) != len(points):
+                raise PolyError(PolyErrorKind.DOMAIN, "interpolation value count mismatch")
+            var f = _field(field.value)
+            var tree = _Tree(_residues(rebind[List[ModInt]](points), f, budget), f, budget)
+            var result = _tree_interpolate(tree, _residues(rebind[List[ModInt]](values), f, budget), f, budget)
+            var coefficients = _modints(result, field, f, budget)
+            return rebind_var[DensePoly[C]](DensePoly[ModInt].from_coefficients(variable, field, coefficients^, budget))
     var plan = MultipointPlan[C].prepare(variable, ring, points, budget)
     return plan.interpolate(values, budget)
 
