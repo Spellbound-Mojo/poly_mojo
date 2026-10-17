@@ -39,6 +39,7 @@ from .squarefree import squarefree
 from ._dense_reduction import _DenseReducer, _dense_reducer
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
 from ._dense_ops import _copy, _one, _gcd, _exact, _derivative
+from . import _nmod
 
 
 @fieldwise_init
@@ -145,9 +146,13 @@ def factor_mod_p(f: DensePoly[ModInt], mut budget: Budget, seed: UInt64) raises 
     f.check_invariants(budget)
     if f.is_zero() or f.coefficients[f.degree()].value != 1:
         raise PolyError(PolyErrorKind.DOMAIN, "finite-field factorization requires a monic input")
+    var factors = List[DensePoly[ModInt]]()
+    if f.ring.value > 2:
+        _native_factors(f, seed, factors, budget)
+        _sort_factors(factors, f, budget)
+        return factors^
     if _gcd(f, _derivative(f, budget), budget).degree() > 0:
         raise PolyError(PolyErrorKind.DOMAIN, "finite-field factorization requires a squarefree input")
-    var factors = List[DensePoly[ModInt]]()
     var remaining = _copy(f, budget)
     var x = DensePoly[ModInt].from_coefficients(f.variable, f.ring, [ModInt.zero(f.ring), ModInt.one(f.ring)], budget)
     var power = _copy(x, budget)
@@ -167,6 +172,11 @@ def factor_mod_p(f: DensePoly[ModInt], mut budget: Budget, seed: UInt64) raises 
     if remaining.degree() > 0:
         _allocation[DensePoly[ModInt]](1, budget)
         factors.append(remaining^)
+    _sort_factors(factors, f, budget)
+    return factors^
+
+
+def _sort_factors(mut factors: List[DensePoly[ModInt]], f: DensePoly[ModInt], mut budget: Budget) raises PolyError:
     # Stable insertion sort moves polynomial buffers instead of copying them.
     for i in range(1, len(factors)):
         budget.charge(1)
@@ -179,7 +189,26 @@ def factor_mod_p(f: DensePoly[ModInt], mut budget: Budget, seed: UInt64) raises 
             swap(moved, factors[j])
             j -= 1
         swap(current, factors[j])
-    return factors^
+
+
+def _native_factors(f: DensePoly[ModInt], seed: UInt64, mut factors: List[DensePoly[ModInt]], mut budget: Budget) raises PolyError:
+    # Odd primes use native Montgomery residues; the factor set is canonical,
+    # so it does not depend on the splitting strategy.
+    var field = _nmod._field(f.ring.value)
+    _allocation[UInt64](len(f.coefficients), budget)
+    var native = List[UInt64](capacity=len(f.coefficients))
+    for i in range(len(f.coefficients)):
+        native.append(_nmod._to(f.coefficients[i].value, field))
+    if len(_nmod._gcd(native, _nmod._derivative(native, field, budget), field, budget)) > 1:
+        raise PolyError(PolyErrorKind.DOMAIN, "finite-field factorization requires a squarefree input")
+    var found = _nmod._distinct_degree(native, field, seed, budget)
+    _allocation[DensePoly[ModInt]](len(found), budget)
+    for g in found:
+        _allocation[ModInt](len(g), budget)
+        var values = List[ModInt](capacity=len(g))
+        for v in g:
+            values.append(ModInt.zero(f.ring)._with_residue(_nmod._from(v, field)))
+        factors.append(DensePoly[ModInt]._from_canonical(f.variable, f.ring, values^))
 
 
 def factor_finite_field(f: DensePoly[ModInt], mut budget: Budget, seed: UInt64 = 0) raises PolyError -> Factorization[ModInt]:

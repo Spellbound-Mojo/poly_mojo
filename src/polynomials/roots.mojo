@@ -7,7 +7,7 @@ from .evaluate import evaluate_dense, _derivative_dense
 from .division import divmod
 from .certificates import SturmSequence, RootCountCertificate
 from ._dense_ops import _copy as _copy_poly
-from ._root_ops import _copy, _compare, _midpoint, _variations
+from ._root_ops import _copy, _compare, _midpoint, _variations, _chain_variations
 from ._images import _integer_dense
 from ._integer_ops import _primitive
 
@@ -102,7 +102,7 @@ def count_roots(f: DensePoly[QQ], a: QQ, b: QQ, mut budget: Budget) raises PolyE
     if _compare(a, b, budget) >= 0 or evaluate_dense(f, a, budget).is_zero() or evaluate_dense(f, b, budget).is_zero():
         raise PolyError(PolyErrorKind.DOMAIN, "root count requires ordered nonroot endpoints")
     var sequence = sturm_sequence(f, budget)
-    var count = sign_changes(sequence, a, budget) - sign_changes(sequence, b, budget)
+    var count = _chain_variations(sequence.polynomials, sequence.quotients, a, budget) - _chain_variations(sequence.polynomials, sequence.quotients, b, budget)
     return RootCountCertificate(sequence^, _copy(a, budget), _copy(b, budget), count)
 
 
@@ -218,8 +218,8 @@ def isolate_real_roots(f: DensePoly[QQ], mut budget: Budget) raises PolyError ->
         display_width = _midpoint(QQ.zero(NoContext()), display_width, budget)
     var high = _bound(f, budget)
     var low = high.neg(budget)
-    var va = sign_changes(sequence, low, budget)
-    var vb = sign_changes(sequence, high, budget)
+    var va = _chain_variations(sequence.polynomials, sequence.quotients, low, budget)
+    var vb = _chain_variations(sequence.polynomials, sequence.quotients, high, budget)
     _allocation[_IntervalTask](1, budget)
     var pending: List[_IntervalTask] = [_IntervalTask(low^, high^, va, vb, False, False, False, False)]
     while len(pending):
@@ -247,8 +247,8 @@ def isolate_real_roots(f: DensePoly[QQ], mut budget: Budget) raises PolyError ->
                 continue
         var middle = _midpoint(task.low, task.high, budget)
         var root = evaluate_dense(f, middle, budget).is_zero()
-        var vm_left = _variations(sequence.polynomials, middle, budget, side=-1 if root else 0)
-        var vm_right = _variations(sequence.polynomials, middle, budget, side=1) if root else vm_left
+        var vm_left = _chain_variations(sequence.polynomials, sequence.quotients, middle, budget, side=-1 if root else 0)
+        var vm_right = _chain_variations(sequence.polynomials, sequence.quotients, middle, budget, side=1) if root else vm_left
         if root:
             _allocation[QQ](1, budget)
             exact.append(_copy(middle, budget))
@@ -294,16 +294,16 @@ def refine(f: DensePoly[QQ], interval: RootInterval, width: QQ, mut budget: Budg
         raise PolyError(PolyErrorKind.DOMAIN, "refinement requires exactly one root")
     var low = _copy(interval.low, budget)
     var high = _copy(interval.high, budget)
-    var va = sign_changes(certificate.sequence, low, budget)
+    var va = _chain_variations(certificate.sequence.polynomials, certificate.sequence.quotients, low, budget)
     while _compare(high.sub(low, budget), width, budget) >= 0:
         budget.charge(1)
         var middle = _midpoint(low, high, budget)
         if evaluate_dense(f, middle, budget).is_zero():
             low = _midpoint(low, middle, budget)
             high = _midpoint(middle, high, budget)
-            va = sign_changes(certificate.sequence, low, budget)
+            va = _chain_variations(certificate.sequence.polynomials, certificate.sequence.quotients, low, budget)
         else:
-            var vm = sign_changes(certificate.sequence, middle, budget)
+            var vm = _chain_variations(certificate.sequence.polynomials, certificate.sequence.quotients, middle, budget)
             if va - vm == 1:
                 high = middle^
             else:
