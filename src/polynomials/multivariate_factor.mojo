@@ -137,18 +137,28 @@ def factor_multivariate_integer(f: SparsePoly[ZZ], mut budget: Budget) raises Po
         PolyError: DOMAIN for malformed input, LIMIT or CAPACITY on work limits.
     """
     f.check_invariants(budget)
-    var rational = factor_multivariate(_rational_image(f, budget), budget)
+    # Multiplicities are counted by exact division over ZZ directly; the
+    # rational route divided twice, once with Rational arithmetic.
     var remaining = f._copy(budget)
-    _allocation[Tuple[SparsePoly[ZZ], Int]](len(rational.factors), budget)
     var factors = List[Tuple[SparsePoly[ZZ], Int]]()
-    for entry in rational.factors:
-        budget.charge(1)
-        var primitive = _primitive_zz(_integer_image(entry[0], budget), budget)
-        var quotient = divide_exact(remaining, primitive.pow(UInt64(entry[1]), budget), budget)
-        if not quotient:
-            raise PolyError(PolyErrorKind.DOMAIN, "integer factor reconstruction is inexact")
-        remaining = quotient.take()
-        factors.append((primitive^, entry[1]))
+    if not f.is_zero():
+        var rational = _rational_image(f, budget)
+        var atoms = _atoms(rational.reorder(MonomialOrder(), budget), budget)
+        _allocation[Tuple[SparsePoly[ZZ], Int]](len(atoms), budget)
+        for atom in atoms:
+            budget.charge(1)
+            var primitive = _primitive_zz(_integer_image(_normalize(atom.reorder(rational.order, budget), budget), budget), budget)
+            var multiplicity = 0
+            while True:
+                budget.charge(1)
+                var quotient = divide_exact(remaining, primitive, budget)
+                if not quotient:
+                    break
+                remaining = quotient.take()
+                multiplicity = _sum(multiplicity, 1)
+            if not multiplicity:
+                raise PolyError(PolyErrorKind.DOMAIN, "integer factor reconstruction is inexact")
+            factors.append((primitive^, multiplicity))
     _sort(factors, budget)
     return MultivariateFactorization[ZZ](_unit(remaining, budget), factors^)
 
