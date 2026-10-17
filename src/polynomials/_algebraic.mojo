@@ -235,3 +235,47 @@ def _roots_cached(f: DensePoly[QQ], mut cache: _NormalizationCache, mut budget: 
             roots[j - 1] = moved^
             j -= 1
     return roots^
+
+
+def _roots_by_factors(f: DensePoly[QQ], mut cache: _NormalizationCache, mut budget: Budget) raises PolyError -> List[_Real]:
+    # Every distinct real root of f, isolated on the irreducible factor that
+    # defines it: smaller Sturm chains than isolating f, the same roots.
+    var normalized = _copy_poly(f, budget)
+    normalized.variable = 0
+    var index = -1
+    for i in range(len(cache.polynomials)):
+        budget.charge(1)
+        if _dense_equal(cache.polynomials[i], normalized, budget):
+            index = i
+            break
+    if index < 0:
+        var factors = factor(normalized, budget)
+        index = len(cache.polynomials)
+        _allocation[DensePoly[QQ]](1, budget)
+        _allocation[Factorization[QQ]](1, budget)
+        cache.polynomials.append(normalized^)
+        cache.factorizations.append(factors^)
+    var roots = List[_Real]()
+    for entry in cache.factorizations[index].factors:
+        budget.charge(1)
+        ref p = entry[0]
+        if p.degree() == 1:
+            _allocation[_Real](1, budget)
+            roots.append(_rational(p.coefficients[0].neg(budget).mul(p.coefficients[1].inverse(budget), budget), budget))
+            continue
+        var isolation = isolate_real_roots(p, budget)
+        for interval in isolation.intervals:
+            budget.charge(1)
+            var sequence_index = _sturm_index(p, cache.sequences, budget)
+            _allocation[_Real](1, budget)
+            roots.append(_Real(_copy_poly(p, budget), _copy_q(interval.low, budget), _copy_q(interval.high, budget), _copy_sequence(cache.sequences[sequence_index], budget), False))
+    for i in range(1, len(roots)):
+        budget.charge(1)
+        var j = i
+        while j > 0 and _compare(roots[j], roots[j - 1], budget) < 0:
+            budget.charge(1)
+            var moved = _copy_real(roots[j], budget)
+            roots[j] = _copy_real(roots[j - 1], budget)
+            roots[j - 1] = moved^
+            j -= 1
+    return roots^

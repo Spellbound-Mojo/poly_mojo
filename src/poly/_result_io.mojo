@@ -301,12 +301,33 @@ def _write_node[T: Copyable & Deinitable, C: CoefficientRing, D: NumericDomain, 
         writer.line(String(len(v.roots)), sink, budget)
         for field178 in v.roots:
             _write_node[core.RealAlgebraic, C, D, E](field178, writer, sink, budget, depth + 1)
+        writer.line(String(len(v.filters)), sink, budget)
+        for field179 in v.filters:
+            _write_node[core.AlgebraicRootFilter, C, D, E](field179, writer, sink, budget, depth + 1)
+        _write_node[core.RealAlgebraic, C, D, E](v.element, writer, sink, budget, depth + 1)
+        writer.line(String(len(v.representations)), sink, budget)
+        for field944 in v.representations:
+            _write_node[core.DensePoly[core.QQ], C, D, E](field944, writer, sink, budget, depth + 1)
+    elif T == core.AlgebraicRootFilter:
+        ref v = rebind[core.AlgebraicRootFilter](value)
+        _write_node[Int, C, D, E](v.kind, writer, sink, budget, depth + 1)
+        writer.line(String(len(v.coefficients)), sink, budget)
+        for field901 in v.coefficients:
+            _write_node[core.RealAlgebraic, C, D, E](field901, writer, sink, budget, depth + 1)
+        _write_node[core.RealAlgebraic, C, D, E](v.candidate, writer, sink, budget, depth + 1)
+        writer.line(String(len(v.representations)), sink, budget)
+        for field902 in v.representations:
+            _write_node[core.DensePoly[core.QQ], C, D, E](field902, writer, sink, budget, depth + 1)
+        _write_node[core.RealAlgebraic, C, D, E](v.element, writer, sink, budget, depth + 1)
     elif T == core.AlgebraicPolynomialEvaluation:
         ref v = rebind[core.AlgebraicPolynomialEvaluation](value)
         writer.line(String(len(v.steps)), sink, budget)
         for field183 in v.steps:
             _write_node[core.AlgebraicArithmeticCertificate, C, D, E](field183, writer, sink, budget, depth + 1)
         _write_node[core.RealAlgebraic, C, D, E](v.value, writer, sink, budget, depth + 1)
+        writer.line(String(len(v.witness)), sink, budget)
+        for field940 in v.witness:
+            _write_node[core.RealAlgebraic, C, D, E](field940, writer, sink, budget, depth + 1)
     elif T == core.AlgebraicSpecializationCertificate:
         ref v = rebind[core.AlgebraicSpecializationCertificate](value)
         writer.line(String(len(v.monomials)), sink, budget)
@@ -384,6 +405,19 @@ def _write_node[T: Copyable & Deinitable, C: CoefficientRing, D: NumericDomain, 
         writer.line(String(len(v.signs)), sink, budget)
         for field258 in v.signs:
             _write_node[core.AlgebraicComparisonCertificate, C, D, E](field258, writer, sink, budget, depth + 1)
+        writer.line(String(len(v.witnesses)), sink, budget)
+        for field920 in v.witnesses:
+            _write_node[core.CADSignWitness, C, D, E](field920, writer, sink, budget, depth + 1)
+    elif T == core.CADSignWitness:
+        ref v = rebind[core.CADSignWitness](value)
+        _write_node[Int, C, D, E](v.kind, writer, sink, budget, depth + 1)
+        writer.line(String(len(v.point)), sink, budget)
+        for field921 in v.point:
+            _write_node[core.RealAlgebraic, C, D, E](field921, writer, sink, budget, depth + 1)
+        _write_node[Int, C, D, E](v.primitive, writer, sink, budget, depth + 1)
+        writer.line(String(len(v.representations)), sink, budget)
+        for field922 in v.representations:
+            _write_node[core.DensePoly[core.QQ], C, D, E](field922, writer, sink, budget, depth + 1)
     elif T == core.CADCertificate:
         ref v = rebind[core.CADCertificate](value)
         _write_node[core.CADProjectionCertificate, C, D, E](v.projection, writer, sink, budget, depth + 1)
@@ -1221,7 +1255,37 @@ def _read_node[T: Copyable & Deinitable, C: CoefficientRing, D: NumericDomain, E
             var field170 = _read_node[core.RealAlgebraic, C, D, E](reader, budget, depth + 1)
             _grow(field168, budget)
             field168.append(field170^)
-        return rebind_var[T](core.AlgebraicRootsCertificate(field145^, field148^, field151^, field154^, field155^, field158^, field161^, field162^, field165^, field168^))
+        var field904 = reader.count(budget)
+        var field903 = List[core.AlgebraicRootFilter]()
+        for _ in range(field904):
+            var field905 = _read_node[core.AlgebraicRootFilter, C, D, E](reader, budget, depth + 1)
+            _grow(field903, budget)
+            field903.append(field905^)
+        var field945 = _read_node[core.RealAlgebraic, C, D, E](reader, budget, depth + 1)
+        var field947 = reader.count(budget)
+        var field946 = List[core.DensePoly[core.QQ]]()
+        for _ in range(field947):
+            var field948 = _read_node[core.DensePoly[core.QQ], C, D, E](reader, budget, depth + 1)
+            _grow(field946, budget)
+            field946.append(field948^)
+        return rebind_var[T](core.AlgebraicRootsCertificate(field145^, field148^, field151^, field154^, field155^, field158^, field161^, field162^, field165^, field168^, field903^, field945^, field946^))
+    elif T == core.AlgebraicRootFilter:
+        var field906 = _read_node[Int, C, D, E](reader, budget, depth + 1)
+        var field908 = reader.count(budget)
+        var field907 = List[core.RealAlgebraic]()
+        for _ in range(field908):
+            var field909 = _read_node[core.RealAlgebraic, C, D, E](reader, budget, depth + 1)
+            _grow(field907, budget)
+            field907.append(field909^)
+        var field910 = _read_node[core.RealAlgebraic, C, D, E](reader, budget, depth + 1)
+        var field912 = reader.count(budget)
+        var field911 = List[core.DensePoly[core.QQ]]()
+        for _ in range(field912):
+            var field913 = _read_node[core.DensePoly[core.QQ], C, D, E](reader, budget, depth + 1)
+            _grow(field911, budget)
+            field911.append(field913^)
+        var field914 = _read_node[core.RealAlgebraic, C, D, E](reader, budget, depth + 1)
+        return rebind_var[T](core.AlgebraicRootFilter(field906, field907^, field910^, field911^, field914^))
     elif T == core.AlgebraicPolynomialEvaluation:
         var field180 = reader.count(budget)
         var field179 = List[core.AlgebraicArithmeticCertificate]()
@@ -1230,7 +1294,13 @@ def _read_node[T: Copyable & Deinitable, C: CoefficientRing, D: NumericDomain, E
             _grow(field179, budget)
             field179.append(field181^)
         var field182 = _read_node[core.RealAlgebraic, C, D, E](reader, budget, depth + 1)
-        return rebind_var[T](core.AlgebraicPolynomialEvaluation(field179^, field182^))
+        var field942 = reader.count(budget)
+        var field941 = List[core.RealAlgebraic]()
+        for _ in range(field942):
+            var field943 = _read_node[core.RealAlgebraic, C, D, E](reader, budget, depth + 1)
+            _grow(field941, budget)
+            field941.append(field943^)
+        return rebind_var[T](core.AlgebraicPolynomialEvaluation(field179^, field182^, field941^))
     elif T == core.AlgebraicSpecializationCertificate:
         var field185 = reader.count(budget)
         var field184 = List[core.Monomial]()
@@ -1351,7 +1421,29 @@ def _read_node[T: Copyable & Deinitable, C: CoefficientRing, D: NumericDomain, E
             var field256 = _read_node[core.AlgebraicComparisonCertificate, C, D, E](reader, budget, depth + 1)
             _grow(field254, budget)
             field254.append(field256^)
-        return rebind_var[T](core.CADCell(field247, field248, field249, field250^, field251^, field254^))
+        var field924 = reader.count(budget)
+        var field923 = List[core.CADSignWitness]()
+        for _ in range(field924):
+            var field925 = _read_node[core.CADSignWitness, C, D, E](reader, budget, depth + 1)
+            _grow(field923, budget)
+            field923.append(field925^)
+        return rebind_var[T](core.CADCell(field247, field248, field249, field250^, field251^, field254^, field923^))
+    elif T == core.CADSignWitness:
+        var field926 = _read_node[Int, C, D, E](reader, budget, depth + 1)
+        var field928 = reader.count(budget)
+        var field927 = List[core.RealAlgebraic]()
+        for _ in range(field928):
+            var field929 = _read_node[core.RealAlgebraic, C, D, E](reader, budget, depth + 1)
+            _grow(field927, budget)
+            field927.append(field929^)
+        var field930 = _read_node[Int, C, D, E](reader, budget, depth + 1)
+        var field932 = reader.count(budget)
+        var field931 = List[core.DensePoly[core.QQ]]()
+        for _ in range(field932):
+            var field933 = _read_node[core.DensePoly[core.QQ], C, D, E](reader, budget, depth + 1)
+            _grow(field931, budget)
+            field931.append(field933^)
+        return rebind_var[T](core.CADSignWitness(field926, field927^, field930, field931^))
     elif T == core.CADCertificate:
         var field259 = _read_node[core.CADProjectionCertificate, C, D, E](reader, budget, depth + 1)
         var field261 = reader.count(budget)

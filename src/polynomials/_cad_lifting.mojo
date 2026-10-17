@@ -24,7 +24,8 @@ from .algebraic import algebraic_compare
 from ._algebraic import _compare, _refine, _NormalizationCache
 from ._root_ops import _compare as _compare_q, _midpoint
 from .algebraic_specialization import _specialize_cached, check_algebraic_specialization, _zero_specialization, _coefficients
-from .algebraic_roots import _roots_with_cache, check_algebraic_roots
+from .algebraic_roots import _roots_with_cache, _roots_in_context, _RootsContext, check_algebraic_roots
+from .evaluate import derivative
 from .lazard import _lazard_cached, check_lazard_evaluation
 from .cad_projection import CADProjectionCertificate
 from .cad_types import CADPolynomialLift, CADStackCertificate
@@ -126,6 +127,14 @@ def _merge_roots(lifts: List[CADPolynomialLift], mut budget: Budget) raises Poly
     return (roots^, sources^, mapping^)
 
 
+def _copy_point(point: List[Tuple[Int64, RealAlgebraic]], mut budget: Budget) raises PolyError -> List[Tuple[Int64, RealAlgebraic]]:
+    _allocation[Tuple[Int64, RealAlgebraic]](len(point), budget)
+    var result = List[Tuple[Int64, RealAlgebraic]](capacity=len(point))
+    for entry in point:
+        result.append((entry[0], _copy_real(entry[1], budget)))
+    return result^
+
+
 def _stack(projection: CADProjectionCertificate, parent: Int, level: Int, point: List[Tuple[Int64, RealAlgebraic]], dimension: Int, seed: Optional[RealAlgebraic], mut budget: Budget) raises PolyError -> CADStackCertificate:
     var cache = _NormalizationCache()
     return _stack_cached(projection, parent, level, point, dimension, seed, cache, budget)
@@ -139,7 +148,13 @@ def _stack_cached(projection: CADProjectionCertificate, parent: Int, level: Int,
         var lift = CADPolynomialLift(None, None, None)
         if projection.lazard:
             var evaluation = _lazard_cached(f, variable, point, cache, budget)
-            lift.roots = _roots_with_cache(_coefficients(evaluation.evaluations[len(evaluation.evaluations) - 1], variable, budget), cache, budget)
+            # The lifting polynomial is f differentiated by the vanishing orders.
+            var lifting = f._copy(budget)
+            for i in range(len(point)):
+                for _ in range(evaluation.orders[i]):
+                    budget.charge(1)
+                    lifting = derivative(lifting, point[i][0], budget)
+            lift.roots = _roots_in_context(_coefficients(evaluation.evaluations[len(evaluation.evaluations) - 1], variable, budget), _RootsContext(lifting^, variable, _copy_point(point, budget)), cache, budget)
             lift.lazard = evaluation^
         else:
             var evaluation = _specialize_cached(f, point, cache, budget)
@@ -147,7 +162,7 @@ def _stack_cached(projection: CADProjectionCertificate, parent: Int, level: Int,
                 if dimension != 0 or level != len(projection.variables) - 1:
                     raise PolyError(PolyErrorKind.UNSUPPORTED, "McCallum nullification requires Lazard mode at this cell")
             else:
-                lift.roots = _roots_with_cache(_coefficients(evaluation, variable, budget), cache, budget)
+                lift.roots = _roots_in_context(_coefficients(evaluation, variable, budget), _RootsContext(f._copy(budget), variable, _copy_point(point, budget)), cache, budget)
             lift.ordinary = evaluation^
         _allocation[CADPolynomialLift](1, budget)
         lifts.append(lift^)

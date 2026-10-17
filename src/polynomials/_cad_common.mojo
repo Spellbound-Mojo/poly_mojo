@@ -5,12 +5,14 @@ from .sparse import SparsePoly
 from .algebraic_types import RealAlgebraic, AlgebraicComparisonCertificate, _rational, _copy_real, _check_comparison
 from .algebraic import algebraic_sign
 from .algebraic_specialization import AlgebraicPolynomialEvaluation, _evaluate_sparse_cached, check_algebraic_evaluate_sparse
-from .cad_types import CADCell
+from .cad_types import CADCell, CADSignWitness
+from .dense import DensePoly
+from ._algebraic_filter import _try_point_interval, _try_point_zero, _try_point_divisor, _check_point_interval, _check_point_zero, _check_point_divisor
 from ._algebraic import _NormalizationCache
 
 
 def _cell(parent: Int, level: Int, position: Int, sample: RealAlgebraic, mut budget: Budget) raises PolyError -> CADCell:
-    return CADCell(parent, level, position, _copy_real(sample, budget), List[AlgebraicPolynomialEvaluation](), List[AlgebraicComparisonCertificate]())
+    return CADCell(parent, level, position, _copy_real(sample, budget), List[AlgebraicPolynomialEvaluation](), List[AlgebraicComparisonCertificate](), List[CADSignWitness]())
 
 
 def _coordinates(cells: List[CADCell], index: Int, variables: List[Int64], mut budget: Budget) raises PolyError -> Tuple[List[Tuple[Int64, RealAlgebraic]], Int]:
@@ -83,3 +85,82 @@ def _violation(cell: CADCell, masks: List[UInt8], mut budget: Budget) raises Pol
         if masks[i] & (UInt8(1) << UInt8(cell.signs[i].relation + 1)) == 0:
             return i
     return -1
+
+
+def _placeholder(relation: Int, mut budget: Budget) raises PolyError -> AlgebraicComparisonCertificate:
+    # The sign of a witnessed input; the witness, not this record, proves it.
+    var zero = _rational(QQ.zero(NoContext()), budget)
+    return AlgebraicComparisonCertificate(relation, _copy_real(zero, budget), zero^, DensePoly[QQ](0, NoContext()), DensePoly[QQ](0, NoContext()), DensePoly[QQ](0, NoContext()), None)
+
+
+def _signs_witnessed(inputs: List[SparsePoly[QQ]], point: List[Tuple[Int64, RealAlgebraic]], mut evaluations: List[AlgebraicPolynomialEvaluation], mut signs: List[AlgebraicComparisonCertificate], mut witnesses: List[CADSignWitness], mut cache: _NormalizationCache, mut budget: Budget) raises PolyError:
+    var variables = List[Int64]()
+    var coordinates = List[RealAlgebraic]()
+    for entry in point:
+        variables.append(entry[0])
+        coordinates.append(_copy_real(entry[1], budget))
+    for f in inputs:
+        budget.charge(1)
+        _allocation[CADSignWitness](1, budget)
+        var interval = _try_point_interval(f, variables, coordinates, 24, budget)
+        if interval:
+            var parts = interval.take()
+            signs.append(_placeholder(parts[1], budget))
+            witnesses.append(CADSignWitness(1, parts[0].copy(), -1, List[DensePoly[QQ]]()))
+            continue
+        var zero = _try_point_zero(f, variables, coordinates, 256, budget)
+        if zero:
+            var parts = zero.take()
+            signs.append(_placeholder(0, budget))
+            witnesses.append(CADSignWitness(2, parts[0].copy(), parts[1], parts[2].copy()))
+            continue
+        var divided = _try_point_divisor(f, variables, coordinates, 256, budget)
+        if divided:
+            var parts = divided.take()
+            signs.append(_placeholder(0, budget))
+            witnesses.append(CADSignWitness(3, parts[0].copy(), parts[1], parts[2].copy()))
+            continue
+        var narrow = _try_point_interval(f, variables, coordinates, 400, budget)
+        if narrow:
+            var parts = narrow.take()
+            signs.append(_placeholder(parts[1], budget))
+            witnesses.append(CADSignWitness(1, parts[0].copy(), -1, List[DensePoly[QQ]]()))
+            continue
+        var evaluation = _evaluate_sparse_cached(f, point, cache, budget)
+        signs.append(algebraic_sign(evaluation.value, budget))
+        evaluations.append(evaluation^)
+        witnesses.append(CADSignWitness(0, List[RealAlgebraic](), -1, List[DensePoly[QQ]]()))
+
+
+def _check_cell_signs(inputs: List[SparsePoly[QQ]], point: List[Tuple[Int64, RealAlgebraic]], cell: CADCell, mut budget: Budget) raises PolyError -> Bool:
+    if len(cell.witnesses) == 0:
+        return _check_signs(inputs, point, cell.evaluations, cell.signs, budget)
+    if len(cell.witnesses) != len(inputs) or len(cell.signs) != len(inputs) or len(cell.evaluations) > len(inputs):
+        return False
+    var variables = List[Int64]()
+    var coordinates = List[RealAlgebraic]()
+    for entry in point:
+        variables.append(entry[0])
+        coordinates.append(_copy_real(entry[1], budget))
+    var zero = _rational(QQ.zero(NoContext()), budget)
+    var cursor = 0
+    for i in range(len(inputs)):
+        budget.charge(1)
+        ref w = cell.witnesses[i]
+        var relation = cell.signs[i].relation
+        if w.kind == 0:
+            if cursor == len(cell.evaluations) or not check_algebraic_evaluate_sparse(inputs[i], point, cell.evaluations[cursor], budget) or not _check_comparison(cell.evaluations[cursor].value, zero, cell.signs[i], budget):
+                return False
+            cursor += 1
+        elif w.kind == 1:
+            if not _check_point_interval(inputs[i], variables, coordinates, w.point, relation, budget):
+                return False
+        elif w.kind == 2:
+            if relation != 0 or not _check_point_zero(inputs[i], variables, coordinates, w.point, w.primitive, w.representations, budget):
+                return False
+        elif w.kind == 3:
+            if relation != 0 or not _check_point_divisor(inputs[i], variables, coordinates, w.point, w.primitive, w.representations, budget):
+                return False
+        else:
+            return False
+    return cursor == len(cell.evaluations)

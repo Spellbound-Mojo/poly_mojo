@@ -11,7 +11,8 @@ from .algebraic_types import RealAlgebraic, AlgebraicComparisonCertificate, _rat
 from .algebraic_specialization import AlgebraicPolynomialEvaluation
 from .cad_projection import cad_projection, check_cad_projection
 from .cad_types import CADCell, CADStackCertificate, CADCertificate, CADCellCertificate
-from ._cad_common import _cell, _coordinates, _signs, _signs_cached, _check_signs
+from ._cad_common import _cell, _coordinates, _signs, _signs_cached, _check_signs, _signs_witnessed, _check_cell_signs
+from .cad_types import CADSignWitness
 from ._cad_lifting import _stack, _stack_cached, _check_stack, _position
 from ._algebraic import _NormalizationCache
 from ._cad_fiber_common import _validate_fixed, _selection
@@ -56,9 +57,11 @@ def _cad(inputs: List[SparsePoly[QQ]], variables: List[Int64], fixed: List[RealA
         if level == len(variables):
             var evaluations = List[AlgebraicPolynomialEvaluation]()
             var signs = List[AlgebraicComparisonCertificate]()
-            _signs_cached(inputs, point[0], evaluations, signs, cache, budget)
+            var witnesses = List[CADSignWitness]()
+            _signs_witnessed(inputs, point[0], evaluations, signs, witnesses, cache, budget)
             cells[parent].evaluations = evaluations^
             cells[parent].signs = signs^
+            cells[parent].witnesses = witnesses^
         else:
             var stack = _stack_cached(projection, parent, level, point[0], point[1], None, cache, budget)
             var selected = _selection(stack, fixed, budget)
@@ -90,10 +93,10 @@ def _check_cad(inputs: List[SparsePoly[QQ]], certificate: CADCertificate, fixed:
         var point = _coordinates(cells, parent, variables, budget)
         var level = cells[parent].level + 1
         if level == len(variables):
-            if not _check_signs(inputs, point[0], cells[parent].evaluations, cells[parent].signs, budget):
+            if not _check_cell_signs(inputs, point[0], cells[parent], budget):
                 return False
             continue
-        if len(cells[parent].evaluations) or len(cells[parent].signs) or next_stack >= len(certificate.stacks):
+        if len(cells[parent].evaluations) or len(cells[parent].signs) or len(cells[parent].witnesses) or next_stack >= len(certificate.stacks):
             return False
         ref stack = certificate.stacks[next_stack]
         if not _check_stack(certificate.projection, parent, level, point[0], point[1], stack, budget):

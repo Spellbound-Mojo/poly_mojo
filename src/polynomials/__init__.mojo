@@ -20,7 +20,7 @@ from .sparse_gcd import sparse_gcd, sparse_gcd_integer
 from .determinant import DeterminantStep, ProjectionResultantCertificate, projection_resultant, check_projection_resultant
 from .cad_projection import CADProjectionCertificate, cad_projection, check_cad_projection
 from .lazard import LazardEvaluationCertificate, lazard_evaluate, check_lazard_evaluation
-from .cad_types import CADPolynomialLift, CADStackCertificate, CADCell, CADCertificate, CADCellCertificate, CADCoveringCertificate
+from .cad_types import CADPolynomialLift, CADStackCertificate, CADCell, CADSignWitness, CADCertificate, CADCellCertificate, CADCoveringCertificate
 from .cad import cad, check_cad, cad_cell, check_cad_cell
 from .cad_covering import cad_covering, check_cad_covering
 from .cylindrical_covering import CADConflict, CADConflictInterval, CylindricalCoveringCertificate, cylindrical_covering, check_cylindrical_covering
@@ -41,7 +41,7 @@ from .certificates import SquarefreeDecomposition, Factorization, check_squarefr
 from .certificates import DivisionResult, ListDivision, GcdResult, ResultantResult, ContentGcdStep, CoprimalityNode, CoprimalityCertificate, CancellationCertificate, check_division, check_list_division, check_common_divisor, check_bezout, check_coprimality, check_resultant_identity, check_cancellation
 from .algebraic_arithmetic import AlgebraicArithmeticCertificate, check_algebraic_arithmetic
 from .algebraic_evaluation import AlgebraicEvaluationCertificate, algebraic_evaluate, check_algebraic_evaluation
-from .algebraic_roots import AlgebraicRootsCertificate, algebraic_roots, check_algebraic_roots
+from .algebraic_roots import AlgebraicRootsCertificate, AlgebraicRootFilter, algebraic_roots, check_algebraic_roots
 from .algebraic_specialization import AlgebraicPolynomialEvaluation, AlgebraicSpecializationCertificate, AlgebraicRootsAtCertificate, algebraic_evaluate_sparse, check_algebraic_evaluate_sparse, algebraic_specialize, check_algebraic_specialization, algebraic_roots_at, check_algebraic_roots_at
 from .algebraic import algebraic_add, algebraic_subtract, algebraic_multiply, algebraic_negate, algebraic_inverse
 

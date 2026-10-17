@@ -1,5 +1,7 @@
 """Certificate values for cylindrical sections, sectors, stacks and coverings."""
 from .algebraic_types import RealAlgebraic, AlgebraicComparisonCertificate
+from .dense import DensePoly
+from .coefficients import QQ
 from .algebraic_specialization import AlgebraicSpecializationCertificate, AlgebraicPolynomialEvaluation
 from .algebraic_roots import AlgebraicRootsCertificate
 from .lazard import LazardEvaluationCertificate
@@ -43,6 +45,19 @@ struct CADStackCertificate(Copyable, Movable, Writable):
 
 
 @fieldwise_init
+struct CADSignWitness(Copyable, Movable, Writable):
+    """The proof of one input's sign at a terminal sample point."""
+    var kind: Int
+    """Zero for the next exact evaluation, one for interval exclusion, two for a representation zero proof, three for a common-divisor zero proof."""
+    var point: List[RealAlgebraic]
+    """Refined witnesses of every coordinate, for kinds one and two."""
+    var primitive: Int
+    """For kind two, the coordinate whose field contains every other coordinate."""
+    var representations: List[DensePoly[QQ]]
+    """For kind two, each coordinate as a rational polynomial in the primitive one; for kind three, the monic divisor's coefficients in the primitive coordinate's field, by powers of the other irrational coordinate."""
+
+
+@fieldwise_init
 struct CADCell(Copyable, Movable, Writable):
     """A cylindrical cell located by its parent and section or sector position."""
     var parent: Int
@@ -57,6 +72,8 @@ struct CADCell(Copyable, Movable, Writable):
     """Certified input-polynomial values at a full-dimensional coordinate tuple."""
     var signs: List[AlgebraicComparisonCertificate]
     """Comparisons of those values with zero, giving signs constant on the entire cell."""
+    var witnesses: List[CADSignWitness]
+    """One sign proof per input, or empty when every sign has an exact evaluation."""
 
 
 @fieldwise_init
