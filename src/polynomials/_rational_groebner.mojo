@@ -493,6 +493,17 @@ struct _Prefix(Movable):
                 self.shifts.append(self.checks[len(self.checks) - 1].residue(limbs))
 
 
+struct _Candidate(Movable):
+    """A reconstructed integral basis whose monomials are numbers in the `_Images` table that made it."""
+    var numbers: List[List[UInt32]]
+    """Each element's monomials, in increasing order."""
+    var values: List[List[ZZ]]
+
+    def __init__(out self):
+        self.numbers = List[List[UInt32]]()
+        self.values = List[List[ZZ]]()
+
+
 struct _Images[W: Int](Movable):
     """Monic modular bases that share their leading monomials, and their CRT.
 
@@ -741,7 +752,25 @@ struct _Images[W: Int](Movable):
                     r = UInt32((UInt64(r) * scales.unsafe_get(i)) % self.primes.unsafe_get(i))
                 into.unsafe_get(b * _BATCH + slot) = r
 
-    def reconstruct(mut self, mut budget: Budget) raises PolyError -> Optional[List[List[_Term[ZZ, Self.W]]]]:
+    def written(self, var candidate: _Candidate, mut budget: Budget) raises PolyError -> List[List[_Term[ZZ, Self.W]]]:
+        """The candidate as increasing term lists; this accumulator made it."""
+        var basis = List[List[_Term[ZZ, Self.W]]](capacity=len(candidate.numbers))
+        for e in range(len(candidate.numbers)):
+            var numbers = List[UInt32]()
+            var values = List[ZZ]()
+            swap(numbers, candidate.numbers[e])
+            swap(values, candidate.values[e])
+            _allocation[_Term[ZZ, Self.W]](len(numbers), budget)
+            var terms = List[_Term[ZZ, Self.W]](capacity=len(numbers))
+            for k in range(len(numbers)):
+                budget.charge(1)
+                var value = ZZ(Integer(0))
+                swap(value, values[k])
+                terms.append(_Term[ZZ, Self.W](self.table.monomials[Int(numbers[k])], value^))
+            basis.append(terms^)
+        return basis^
+
+    def reconstruct(mut self, mut budget: Budget) raises PolyError -> Optional[_Candidate]:
         """Every element, as fractions, times the least common denominator of its coefficients; None when a coefficient has no small enough fraction yet.
 
         Probe coefficients are tried first, so an attempt that is still too
@@ -778,7 +807,7 @@ struct _Images[W: Int](Movable):
         var prefix = _Prefix(self.primes, 0, budget)
         var limbs = List[UInt64]()
         var scales = List[UInt64]()
-        var result = List[List[_Term[ZZ, Self.W]]](capacity=len(self.leads))
+        var result = _Candidate()
         for e in range(len(self.leads)):
             # A running common denominator: a coefficient whose value times it
             # is small needs no Euclidean reconstruction of its own. Each
@@ -857,8 +886,9 @@ struct _Images[W: Int](Movable):
                 numerators.append(numerator.take())
             # Over the final denominator: numerators before a change lack the
             # factors that came later.
-            _allocation[_Term[ZZ, Self.W]](len(numerators), budget)
-            var terms = List[_Term[ZZ, Self.W]](capacity=len(numerators))
+            _allocation[ZZ](len(numerators), budget)
+            var numbers = List[UInt32](capacity=len(numerators))
+            var values = List[ZZ](capacity=len(numerators))
             var segment = -1
             var factor = Integer(1)
             for k in range(len(numerators)):
@@ -878,19 +908,22 @@ struct _Images[W: Int](Movable):
                     value = numerators[k] * factor
                 except err:
                     raise PolyError(PolyErrorKind.CAPACITY, String(err))
-                terms.append(_Term[ZZ, Self.W](self._monomial(e, k), ZZ(value^)))
-            result.append(terms^)
+                numbers.append(self.monomials[e][k])
+                values.append(ZZ(value^))
+            result.numbers.append(numbers^)
+            result.values.append(values^)
         return result^
 
 
-def _agrees[W: Int](kind: UInt8, candidate: List[List[_Term[ZZ, W]]], basis: List[List[_Term[ModInt, W]]], p: UInt64, mut budget: Budget) raises PolyError -> Bool:
-    """Whether the integral candidate is, modulo p, its leading coefficient times the monic image, coefficient by coefficient."""
-    if len(candidate) != len(basis):
+def _agrees[W: Int](kind: UInt8, candidate: _Candidate, table: _Columns[W], basis: List[List[_Term[ModInt, W]]], p: UInt64, mut budget: Budget) raises PolyError -> Bool:
+    """Whether the integral candidate, whose monomials are numbers in `table`, is, modulo p, its leading coefficient times the monic image, coefficient by coefficient."""
+    if len(candidate.numbers) != len(basis):
         return False
     for e in range(len(basis)):
-        ref c = candidate[e]
+        ref c = candidate.numbers[e]
+        ref v = candidate.values[e]
         ref image = basis[e]
-        var lead = _residue(c[len(c) - 1].coefficient.value, p, budget)
+        var lead = _residue(v[len(v) - 1].value, p, budget)
         if lead == 0:
             return False
         var i = 0
@@ -903,14 +936,14 @@ def _agrees[W: Int](kind: UInt8, candidate: List[List[_Term[ZZ, W]]], basis: Lis
             elif j == len(image):
                 comparison = -1
             else:
-                comparison = _compare(kind, image[j].monomial, c[i].monomial)
+                comparison = _compare(kind, image[j].monomial, table.monomials[Int(c[i])])
             if comparison > 0:
                 return False  # The image has a monomial the candidate lacks.
             var residue = UInt64(0)
             if comparison == 0:
                 residue = image[j].coefficient.value
                 j += 1
-            if _residue(c[i].coefficient.value, p, budget) != UInt64((UInt128(lead) * UInt128(residue)) % UInt128(p)):
+            if _residue(v[i].value, p, budget) != UInt64((UInt128(lead) * UInt128(residue)) % UInt128(p)):
                 return False
             i += 1
     return True
@@ -1062,7 +1095,7 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
     returned uncertified.
     """
     var images = _Images[W](kind)
-    var candidate = Optional[List[List[_Term[ZZ, W]]]](None)
+    var candidate = Optional[_Candidate](None)
     var mismatches = 0
     var certifications = 0
     var attempt = 1
@@ -1127,16 +1160,16 @@ def _multimodular[W: Int](inputs: List[List[_Term[ZZ, W]]], kind: UInt8, certify
             if lane >= 0:
                 basis = _lane_basis(trace, ahead, lane, ring, budget)
                 lane = -1
-            if _agrees(kind, candidate.value(), basis, p, budget):
+            if _agrees(kind, candidate.value(), images.table, basis, p, budget):
                 certifications += 1
                 if not certify:
-                    return candidate.take()
+                    return images.written(candidate.take(), budget)
                 # Certification needs neither the recorded run nor the
                 # waiting lanes, and a failure records the run anew.
                 trace = _Trace[W]()
                 ahead = _LaneBases()
                 ahead_primes = List[UInt64]()
-                var certified = _certify(kind, inputs, candidate.take(), budget)
+                var certified = _certify(kind, inputs, images.written(candidate.take(), budget), budget)
                 if certified:
                     return certified.take()
                 if certifications >= _CERTIFY_LIMIT:
