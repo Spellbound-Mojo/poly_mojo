@@ -42,6 +42,7 @@ from .certificates import ListDivision, MembershipCertificate
 from ._sparse_ops import _subtract_multiples
 from ._packed_groebner import _packed_groebner, _packed_groebner_rational, _packed_supported
 from ._f4 import _f4_groebner, _f4_supported
+from ._fglm import _fglm_groebner, _fglm_rational, _fglm_rational_supported, _fglm_supported
 from ._rational_groebner import _grevlex_groebner_rational, _grevlex_supported
 
 
@@ -263,10 +264,20 @@ def groebner[C: CoefficientField](generators: List[SparsePoly[C]], order: Monomi
             if _grevlex_supported(order):
                 var homogenized = _grevlex_groebner_rational(inputs, order, budget, certify=certify)
                 return GroebnerBasis[C](order.copy(), rebind_var[List[SparsePoly[C]]](homogenized^), Optional[List[List[SparsePoly[C]]]](None))
+            if _fglm_rational_supported(order):
+                # A zero-dimensional ideal's LEX basis from its GREVLEX one.
+                var lex = _fglm_rational(inputs, order, certify, budget)
+                if lex:
+                    return GroebnerBasis[C](order.copy(), rebind_var[List[SparsePoly[C]]](lex.take()), Optional[List[List[SparsePoly[C]]]](None))
             var rational = _packed_groebner_rational(inputs, order, budget)
             return GroebnerBasis[C](order.copy(), rebind_var[List[SparsePoly[C]]](rational^), Optional[List[List[SparsePoly[C]]]](None))
         elif C == ModInt:
             ref modular = rebind[List[SparsePoly[ModInt]]](generators)
+            if len(modular) and _fglm_supported(order, modular[0].ring.value):
+                # A zero-dimensional ideal's LEX basis from its GREVLEX one.
+                var lex = _fglm_groebner(modular, order, budget)
+                if lex:
+                    return GroebnerBasis[C](order.copy(), rebind_var[List[SparsePoly[C]]](lex.take()), Optional[List[List[SparsePoly[C]]]](None))
             if len(modular) and _f4_supported(order, modular[0].ring.value):
                 var f4 = _f4_groebner(modular, order, budget)
                 return GroebnerBasis[C](order.copy(), rebind_var[List[SparsePoly[C]]](f4^), Optional[List[List[SparsePoly[C]]]](None))
