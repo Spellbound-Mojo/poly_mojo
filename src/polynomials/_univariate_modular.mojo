@@ -7,7 +7,7 @@ that changes nothing marks a stable candidate. The gcd is accepted only after
 exact division (G-5); the resultant stops at the Hadamard bound.
 """
 from apn_mojo import Integer
-from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
+from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _sum
 from .coefficients import ZZ, NoContext
 from ._coefficient_ops import _gcd_coefficient, _quotient, _exact
 from .dense import DensePoly
@@ -73,6 +73,56 @@ def _entered(values: List[UInt64], field: _Field) -> List[UInt64]:
     for v in values:
         out.append(field.enter(v))
     return out^
+
+
+struct _Words(Movable):
+    """The 32-bit magnitude words of a dense integer polynomial's coefficients, flattened once for residues modulo many primes."""
+    var words: List[UInt64]
+    var offsets: List[Int]
+    var negative: List[Bool]
+    var longest: Int
+
+    def __init__(out self, f: DensePoly[ZZ], mut budget: Budget) raises PolyError:
+        var count = len(f.coefficients)
+        _allocation[Int](count + 1, budget)
+        self.offsets = List[Int](capacity=count + 1)
+        self.negative = List[Bool](capacity=count)
+        self.words = List[UInt64]()
+        self.longest = 0
+        self.offsets.append(0)
+        for i in range(count):
+            ref c = f.coefficients[i].value
+            var n = c._word_count()
+            _allocation[UInt64](n, budget)
+            for j in range(n):
+                self.words.append(UInt64(c._word(j)))
+            self.offsets.append(len(self.words))
+            self.negative.append(c.sign() < 0)
+            self.longest = max(self.longest, n)
+
+    def residues(self, field: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
+        """Every coefficient modulo field.p, in Montgomery form.
+
+        With W_j the Montgomery form of 2^(32 j) R, the sum of word_j W_j
+        stays below 2^32 p per word, so one reduction yields value R mod p.
+        """
+        _charge_size(len(self.words) + self.longest, budget)
+        var powers = List[UInt64](capacity=self.longest)
+        var step = field.enter(UInt64(1) << 32)
+        var w = field.r2
+        for _ in range(self.longest):
+            powers.append(w)
+            w = field.mul(w, step)
+        _allocation[UInt64](len(self.negative), budget)
+        var out = List[UInt64](capacity=len(self.negative))
+        for i in range(len(self.negative)):
+            var total = UInt128(0)
+            var base = self.offsets[i]
+            for j in range(self.offsets[i + 1] - base):
+                total += UInt128(self.words[base + j]) * UInt128(powers[j])
+            var r = field.reduce(total)
+            out.append((field.p - r if r else r) if self.negative[i] else r)
+        return out^
 
 
 def _gcd_images(fd: DensePoly[ZZ], hd: DensePoly[ZZ], gamma: ZZ, p: UInt64, mut budget: Budget) raises PolyError -> List[UInt64]:
@@ -159,14 +209,18 @@ def _modular_resultant(fd: DensePoly[ZZ], gd: DensePoly[ZZ], mut budget: Budget)
     var covered = 0
     var index = 0
     var residue = List[UInt64](length=1, fill=0)
+    var fw = _Words(fd, budget)
+    var gw = _Words(gd, budget)
     while covered < bits:
         budget.charge(1)
         var p = prime(index, budget)
         index = _sum(index, 1)
-        if _residue(fd.coefficients[m].value, p, budget) == 0 or _residue(gd.coefficients[n].value, p, budget) == 0:
-            continue
         var field = _Field.of(p)
-        residue[0] = field.leave(_resultant_words(_entered(_residues(fd, p, budget), field), _entered(_residues(gd, p, budget), field), field, budget))
+        var a = fw.residues(field, budget)
+        var b = gw.residues(field, budget)
+        if a[m] == 0 or b[n] == 0:
+            continue
+        residue[0] = field.leave(_resultant_words(a^, b^, field, budget))
         _ = values.merge(residue, p, budget)
         var floor_log = 0
         while (p >> UInt64(floor_log + 1)) != 0:
@@ -239,14 +293,48 @@ def _univariate_gcd(f: DensePoly[ZZ], h: DensePoly[ZZ], mut budget: Budget) rais
     if pf.degree() == 0 or ph.degree() == 0:
         return constant^
     var gamma = _gcd_coefficient(pf.coefficients[pf.degree()], ph.coefficients[ph.degree()], budget)
-    var state = _GcdSearch(gamma^, min(pf.degree(), ph.degree()) + 1, budget)
+    var fw = _Words(pf, budget)
+    var hw = _Words(ph, budget)
+    var best = min(pf.degree(), ph.degree()) + 1
+    var values = _Reconstruction(0, budget)
+    var used = 0
+    var index = 0
     while True:
         budget.charge(1)
-        var candidate = _next_gcd_candidate(pf, ph, state, budget)
-        if candidate.degree() == 0:
+        var p = prime(index, budget)
+        index = _sum(index, 1)
+        var field = _Field.of(p)
+        var a = fw.residues(field, budget)
+        var b = hw.residues(field, budget)
+        # Both degrees must survive reduction, as required by G-5's proof.
+        if a[len(a) - 1] == 0 or b[len(b) - 1] == 0:
+            continue
+        var image = _gcd_words(a^, b^, field, budget)
+        var degree = len(image) - 1
+        if degree > best:
+            continue
+        if degree == 0:
             return constant^
-        var primitive = _divide_scalar(candidate, _dense_content(candidate, budget), budget)
-        if primitive.coefficients[primitive.degree()].value.sign() < 0:
-            primitive = primitive.scale(ZZ(Integer(-1)), budget)
-        if _dense_divides(pf, primitive, budget) and _dense_divides(ph, primitive, budget):
-            return primitive.scale(common, budget)
+        if degree < best:
+            best = degree
+            values = _Reconstruction(degree + 1, budget)
+            used = 0
+        var scale = field.enter(_residue(gamma.value, p, budget))
+        for i in range(len(image)):
+            image[i] = field.leave(field.mul(image[i], scale))
+        var changed = values.merge(image, p, budget)
+        used = _sum(used, 1)
+        if used > 1 and not changed:
+            _allocation[ZZ](best + 1, budget)
+            var coefficients = List[ZZ](capacity=best + 1)
+            for i in range(best + 1):
+                budget.charge(1)
+                coefficients.append(ZZ(values.values[i].copy()))
+            var candidate = DensePoly[ZZ].from_coefficients(pf.variable, NoContext(), coefficients^, budget)
+            if candidate.degree() != best:
+                continue
+            var primitive = _divide_scalar(candidate, _dense_content(candidate, budget), budget)
+            if primitive.coefficients[primitive.degree()].value.sign() < 0:
+                primitive = primitive.scale(ZZ(Integer(-1)), budget)
+            if _dense_divides(pf, primitive, budget) and _dense_divides(ph, primitive, budget):
+                return primitive.scale(common, budget)
