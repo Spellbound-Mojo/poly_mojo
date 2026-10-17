@@ -1,12 +1,17 @@
 """Dense univariate arithmetic with iterative Karatsuba multiplication."""
 from .coefficient_buffer import CoefficientBuffer, _CoefficientView, _view
 from .errors import Budget, PolyError, PolyErrorKind, _sum, _product, _charge_size, _allocation
-from .coefficients import CoefficientRing, ModInt
+from .coefficients import CoefficientRing, ModInt, ZZ
 from .monomial import Monomial, MonomialOrder
 from .sparse import Term, SparsePoly
+from ._ntt import _ntt_product
 
 comptime KARATSUBA_THRESHOLD = 32
 """The measured Karatsuba threshold for arbitrary-precision coefficients."""
+
+comptime _NTT_THRESHOLD = 32
+"""The shorter operand length from which ZZ and GF(p) products use multi-modular transforms."""
+
 
 def _threshold[C: CoefficientRing]() -> Int:
     comptime if C == ModInt:
@@ -370,7 +375,15 @@ struct DensePoly[C: CoefficientRing](Copyable, Movable, Equatable, Writable):
             PolyError: DOMAIN for incompatible operands, LIMIT or CAPACITY on work limits.
         """
         self._same(other)
-        if min(len(self.coefficients), len(other.coefficients)) < _threshold[Self.C]():
+        var shorter = min(len(self.coefficients), len(other.coefficients))
+        comptime if Self.C == ZZ or Self.C == ModInt:
+            if shorter >= _NTT_THRESHOLD:
+                # Equal operands share their transform.
+                var square = self.coefficients == other.coefficients
+                var product = _ntt_product(_view(self.coefficients), _view(other.coefficients), square, budget)
+                if product:
+                    return Self._from_canonical(self.variable, self.ring, product.take())
+        if shorter < _threshold[Self.C]():
             return self.mul_schoolbook(other, budget)
         return Self._from_canonical(self.variable, self.ring, _karatsuba(_view(self.coefficients), _view(other.coefficients), self.ring, budget))
 
