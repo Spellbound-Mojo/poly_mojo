@@ -448,7 +448,9 @@ def _transform_divides(f: DensePoly[ZZ], fw: _Words, h: DensePoly[ZZ], hw: _Word
 
 def _divides_both(f: DensePoly[ZZ], fw: _Words, h: DensePoly[ZZ], hw: _Words, g: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Bool:
     """Whether g divides both f and h, of degree at least deg g: by transform primes when they decide, else by long division."""
-    if g.degree() >= 31:
+    # Long division wins only for short divisors of wide coefficients.
+    var wide = max(_bits_zz(_view(f.coefficients)), _bits_zz(_view(h.coefficients))) > 640
+    if g.degree() >= 31 or (g.degree() >= 4 and not wide):
         var fast = _transform_divides(f, fw, h, hw, g, budget)
         if fast:
             return fast.value()

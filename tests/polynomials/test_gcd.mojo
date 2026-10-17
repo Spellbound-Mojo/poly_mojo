@@ -137,7 +137,7 @@ def transform_division_cases(mut c: Checker) raises:
         product = product * Integer(Int(primes[i]))
     var constants: List[Integer] = [Integer(1), Integer(-1), product^]
     for bits in [0, 70, 300]:
-        for degree in [31, 45, 90]:
+        for degree in [4, 6, 17, 31, 45, 90]:
             var g = dense_random[ZZ](NoContext(), degree, rng, work, bits)
             var f = g.mul(dense_random[ZZ](NoContext(), degree // 2 + 3, rng, work, bits), work)
             var h = g.mul(dense_random[ZZ](NoContext(), degree + 5, rng, work, bits), work)
