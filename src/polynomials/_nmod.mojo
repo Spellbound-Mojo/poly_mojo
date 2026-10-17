@@ -431,6 +431,19 @@ struct _SmallTables(Movable):
             stride *= 2
 
 
+def _powm_plain(a: UInt64, e: UInt64, p: UInt64) -> UInt64:
+    """a^e mod p for any p below 2^63."""
+    var result = UInt128(1)
+    var base = UInt128(a % p)
+    var n = e
+    while n:
+        if n & 1:
+            result = (result * base) % UInt128(p)
+        base = (base * base) % UInt128(p)
+        n >>= 1
+    return UInt64(result)
+
+
 def _plain_power(a: UInt64, e: UInt64, q: UInt64) -> UInt64:
     """a^e mod q for q below 2^32."""
     var result = UInt64(1)
@@ -444,75 +457,90 @@ def _plain_power(a: UInt64, e: UInt64, q: UInt64) -> UInt64:
     return result
 
 
+@always_inline
+def _forward_stage[W: Int](pa: Pointer[mut=True, UInt64, _], pw: Pointer[mut=False, UInt64, _], n: Int, m: Int, negated_inverse: UInt64):
+    """One decimation-in-frequency stage of half-length m >= W, W lanes at a time."""
+    comptime Lane = SIMD[DType.uint64, W]
+    var q = Lane(_SMALL_Q)
+    var q2 = Lane(2 * _SMALL_Q)
+    var mask = Lane(0xFFFFFFFF)
+    var ni = Lane(negated_inverse)
+    var start = 0
+    while start < n:
+        var j = 0
+        while j < m:
+            var u = pa.unsafe_offset(start + j).unsafe_load[width=W]()
+            var v = pa.unsafe_offset(start + j + m).unsafe_load[width=W]()
+            var w = pw.unsafe_offset(m + j).unsafe_load[width=W]()
+            var x = u + v
+            var t = (u - v + q2) * w
+            var r = ((t & mask) * ni) & mask
+            pa.unsafe_offset(start + j).unsafe_store[width=W](x.ge(q2).select(x - q2, x))
+            pa.unsafe_offset(start + j + m).unsafe_store[width=W]((t + r * q) >> 32)
+            j += W
+        start += 2 * m
+
+
+@always_inline
+def _inverse_stage[W: Int](pa: Pointer[mut=True, UInt64, _], pw: Pointer[mut=False, UInt64, _], n: Int, m: Int, negated_inverse: UInt64):
+    """One decimation-in-time stage of half-length m >= W, W lanes at a time."""
+    comptime Lane = SIMD[DType.uint64, W]
+    var q = Lane(_SMALL_Q)
+    var q2 = Lane(2 * _SMALL_Q)
+    var mask = Lane(0xFFFFFFFF)
+    var ni = Lane(negated_inverse)
+    var start = 0
+    while start < n:
+        var j = 0
+        while j < m:
+            var u = pa.unsafe_offset(start + j).unsafe_load[width=W]()
+            var product = pa.unsafe_offset(start + j + m).unsafe_load[width=W]() * pw.unsafe_offset(m + j).unsafe_load[width=W]()
+            var r = ((product & mask) * ni) & mask
+            var t = (product + r * q) >> 32
+            var x = u + t
+            var y = u - t + q2
+            pa.unsafe_offset(start + j).unsafe_store[width=W](x.ge(q2).select(x - q2, x))
+            pa.unsafe_offset(start + j + m).unsafe_store[width=W](y.ge(q2).select(y - q2, y))
+            j += W
+        start += 2 * m
+
+
 def _small_forward(mut a: List[UInt64], tables: _SmallTables):
-    """Decimation in frequency modulo _SMALL_Q; values below 2q in and out, bit-reversed output."""
+    """Decimation in frequency modulo _SMALL_Q; values below 2q in and out, bit-reversed output.
+
+    Stages of half-length 4 and 2 use four- and two-lane vectors.
+    """
     var n = len(a)
-    var q = _SMALL_Q
-    var q2 = 2 * q
-    var vq = _SmallLane(q)
-    var vq2 = _SmallLane(q2)
-    var vn = _SmallLane(tables.negated_inverse)
     var pa = a.unsafe_ptr()
     var pw = tables.forward.unsafe_ptr()
     var m = n // 2
     while m >= 1:
-        var start = 0
-        while start < n:
-            if m >= _SMALL_LANES:
-                var j = 0
-                while j < m:
-                    var u = pa.unsafe_offset(start + j).unsafe_load[width=_SMALL_LANES]()
-                    var v = pa.unsafe_offset(start + j + m).unsafe_load[width=_SMALL_LANES]()
-                    var w = pw.unsafe_offset(m + j).unsafe_load[width=_SMALL_LANES]()
-                    var x = u + v
-                    pa.unsafe_offset(start + j).unsafe_store[width=_SMALL_LANES](x.ge(vq2).select(x - vq2, x))
-                    pa.unsafe_offset(start + j + m).unsafe_store[width=_SMALL_LANES](_small_redc_lanes((u - v + vq2) * w, vq, vn))
-                    j += _SMALL_LANES
-            else:
-                for j in range(m):
-                    var u = pa.unsafe_offset(start + j).unsafe_load()
-                    var v = pa.unsafe_offset(start + j + m).unsafe_load()
-                    var x = u + v
-                    pa.unsafe_offset(start + j).unsafe_store(x - q2 if x >= q2 else x)
-                    pa.unsafe_offset(start + j + m).unsafe_store(_small_redc((u - v + q2) * pw.unsafe_offset(m + j).unsafe_load(), q, tables.negated_inverse))
-            start += 2 * m
+        if m >= _SMALL_LANES:
+            _forward_stage[_SMALL_LANES](pa, pw, n, m, tables.negated_inverse)
+        elif m == 4:
+            _forward_stage[4](pa, pw, n, m, tables.negated_inverse)
+        elif m == 2:
+            _forward_stage[2](pa, pw, n, m, tables.negated_inverse)
+        else:
+            _forward_stage[1](pa, pw, n, m, tables.negated_inverse)
         m //= 2
 
 
 def _small_inverse(mut a: List[UInt64], tables: _SmallTables):
     """Decimation in time modulo _SMALL_Q without the 1/n factor; values below 2q in and out, bit-reversed input."""
     var n = len(a)
-    var q = _SMALL_Q
-    var q2 = 2 * q
-    var vq = _SmallLane(q)
-    var vq2 = _SmallLane(q2)
-    var vn = _SmallLane(tables.negated_inverse)
     var pa = a.unsafe_ptr()
     var pw = tables.inverse.unsafe_ptr()
     var m = 1
     while m < n:
-        var start = 0
-        while start < n:
-            if m >= _SMALL_LANES:
-                var j = 0
-                while j < m:
-                    var u = pa.unsafe_offset(start + j).unsafe_load[width=_SMALL_LANES]()
-                    var w = pw.unsafe_offset(m + j).unsafe_load[width=_SMALL_LANES]()
-                    var t = _small_redc_lanes(pa.unsafe_offset(start + j + m).unsafe_load[width=_SMALL_LANES]() * w, vq, vn)
-                    var x = u + t
-                    var y = u - t + vq2
-                    pa.unsafe_offset(start + j).unsafe_store[width=_SMALL_LANES](x.ge(vq2).select(x - vq2, x))
-                    pa.unsafe_offset(start + j + m).unsafe_store[width=_SMALL_LANES](y.ge(vq2).select(y - vq2, y))
-                    j += _SMALL_LANES
-            else:
-                for j in range(m):
-                    var u = pa.unsafe_offset(start + j).unsafe_load()
-                    var t = _small_redc(pa.unsafe_offset(start + j + m).unsafe_load() * pw.unsafe_offset(m + j).unsafe_load(), q, tables.negated_inverse)
-                    var x = u + t
-                    var y = u - t + q2
-                    pa.unsafe_offset(start + j).unsafe_store(x - q2 if x >= q2 else x)
-                    pa.unsafe_offset(start + j + m).unsafe_store(y - q2 if y >= q2 else y)
-            start += 2 * m
+        if m >= _SMALL_LANES:
+            _inverse_stage[_SMALL_LANES](pa, pw, n, m, tables.negated_inverse)
+        elif m == 4:
+            _inverse_stage[4](pa, pw, n, m, tables.negated_inverse)
+        elif m == 2:
+            _inverse_stage[2](pa, pw, n, m, tables.negated_inverse)
+        else:
+            _inverse_stage[1](pa, pw, n, m, tables.negated_inverse)
         m *= 2
 
 
@@ -536,6 +564,10 @@ struct _Spectral(Movable):
     var tables: _Tables
     var small_tables: _SmallTables
     var field: _Field
+    var barrett: UInt64
+    """floor(2^32 / p), for the small transforms' outputs."""
+    var unscale: UInt64
+    """2^-64 mod p, for the same."""
 
     def __init__(out self, n: Int, field: _Field, terms: Int, mut budget: Budget) raises PolyError:
         """Length n, for sums of at most `terms` products of residues below p."""
@@ -545,6 +577,9 @@ struct _Spectral(Movable):
         _allocation[UInt64](_product(4, n), budget)
         self.n = n
         self.field = field
+        self.barrett = (UInt64(1) << 32) // field.p
+        var r64 = UInt64((UInt128(1) << 64) % UInt128(field.p))
+        self.unscale = UInt64(_powm_plain(r64, field.p - 2, field.p))
         self.small = n <= (1 << _SMALL_LOG) and UInt128(field.p - 1) * UInt128(field.p - 1) * UInt128(terms) < UInt128(_SMALL_Q)
         if self.small:
             self.q = _SMALL_Q
@@ -563,6 +598,43 @@ struct _Spectral(Movable):
             self.scale_quotient = _shoup_quotient(self.scale, self.q)
             self.tables = _Tables(self.q, roots[0], n)
             self.small_tables = _SmallTables(1)
+
+    def _small_back(self, x: List[UInt64], lo: Int, hi: Int) -> List[UInt64]:
+        """Scaled outputs modulo _SMALL_Q to Montgomery residues modulo p < 2^15, eight lanes at a time.
+
+        The exact value v < 2^30 goes to v mod p and then to v 2^-64 mod p by
+        a product with 2^-64 mod p below 2^30, each by a 32-bit Barrett step.
+        """
+        comptime W = _SMALL_LANES
+        var out = List[UInt64](length=hi - lo, fill=0)
+        var px = x.unsafe_ptr()
+        var po = out.unsafe_ptr()
+        var q = SIMD[DType.uint64, W](self.q)
+        var ni = SIMD[DType.uint64, W](self.small_tables.negated_inverse)
+        var scale = SIMD[DType.uint64, W](self.scale)
+        var p = SIMD[DType.uint64, W](self.field.p)
+        var m = SIMD[DType.uint64, W](self.barrett)
+        var c = SIMD[DType.uint64, W](self.unscale)
+        var i = lo
+        while i < hi:
+            var width = min(W, hi - i)
+            var v = SIMD[DType.uint64, W](0)
+            if width == W:
+                v = px.unsafe_offset(i).unsafe_load[width=W]()
+            else:
+                for k in range(width):
+                    v[k] = px.unsafe_offset(i + k).unsafe_load()
+            var t = _small_redc_lanes(v * scale, q, ni)
+            t = t.ge(q).select(t - q, t)
+            var r = _barrett_lanes[W](_barrett_lanes[W](t, p, m) * c, p, m)
+            if width == W:
+                po.unsafe_offset(i - lo).unsafe_store[width=W](r)
+            else:
+                for k in range(width):
+                    po.unsafe_offset(i - lo + k).unsafe_store(r[k])
+            i += W
+        _trim(out)
+        return out^
 
     def exact(self, terms: Int) -> Bool:
         """Whether sums of `terms` products of residues below p stay below the transform prime."""
@@ -618,6 +690,8 @@ struct _Spectral(Movable):
         else:
             _inverse(x, self.tables, self.q)
         _allocation[UInt64](hi - lo, budget)
+        if self.small:
+            return self._small_back(x, lo, hi)
         var out = List[UInt64](capacity=hi - lo)
         for i in range(lo, hi):
             var v: UInt64
@@ -629,6 +703,13 @@ struct _Spectral(Movable):
             out.append(_redc(UInt128(v), self.field))
         _trim(out)
         return out^
+
+
+@always_inline
+def _barrett_lanes[W: Int](v: SIMD[DType.uint64, W], p: SIMD[DType.uint64, W], m: SIMD[DType.uint64, W]) -> SIMD[DType.uint64, W]:
+    """v mod p for v < 2^30 and m = floor(2^32 / p): the quotient estimate is at most one short."""
+    var r = v - ((v * m) >> 32) * p
+    return r.ge(p).select(r - p, r)
 
 
 def _log2(n: Int) -> Int:
