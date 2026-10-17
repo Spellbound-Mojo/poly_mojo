@@ -10,15 +10,14 @@ in proportion to its coefficient work.
 """
 from .errors import Budget, PolyError, _allocation, _charge_size, _product
 from .coefficients import ModInt, Modulus
-from ._nmod import _Field, _field, _dot, _mulm, _addm, _subm, _negm, _to, _from, _invm, _reversed
+from ._nmod import _Field, _field, _mulm, _addm, _subm, _negm, _to, _from, _invm
 from ._multipoint import _mullow_fast, _redc_all, _TRANSFORM, _compose_series
 from ._ntt import _modular_range
 from ._nmod import _slice
+from ._series_words import _INVERSE_WORDS, _EXP_WORDS, _word_divide, _word_exp, _naturals
 
 comptime _SETUP = 64
 """Work charged for preparing a native field, before any series work."""
-comptime _DIRECT = 32
-"""Orders below which inverses and exponentials use the quadratic recurrences."""
 
 
 def _middle(a: List[UInt64], b: List[UInt64], lo: Int, hi: Int, f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
@@ -49,35 +48,19 @@ def _padded(a: List[UInt64], n: Int, mut budget: Budget) raises PolyError -> Lis
     return result^
 
 
-def _naturals(n: Int, f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
-    """Montgomery inverses of 1 ... n - 1 (index 0 unused), for n - 1 < p."""
-    _allocation[UInt64](max(n, 1), budget)
-    var plain = List[UInt64](length=max(n, 2), fill=0)
-    plain[1] = 1
-    # 1/k = -(p // k) * (1 / (p mod k)) mod p.
-    for k in range(2, n):
-        var q = UInt64(f.p // UInt64(k))
-        plain[k] = UInt64((UInt128(f.p - q) * UInt128(plain[Int(f.p % UInt64(k))])) % UInt128(f.p))
-    var result = List[UInt64](length=max(n, 1), fill=0)
-    for k in range(1, n):
-        result[k] = _to(plain[k], f)
-    _charge_size(n, budget)
-    return result^
-
-
 def _inverse(a: List[UInt64], n: Int, f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
-    """1 / a modulo x^n for a unit constant term."""
-    var g = List[UInt64](capacity=n)
-    g.append(_invm(a[0], f, budget))
-    var k = 1
-    if n <= _DIRECT:
-        # g_m = -g_0 * sum_{i=1..m} a_i g_(m-i).
-        var reversed = _reversed(_padded(a, n, budget), n, budget)
-        _charge_size(_product(n, n), budget)
-        for m in range(1, n):
-            var s = _dot(reversed.unsafe_ptr().unsafe_offset(n - 1 - m), g.unsafe_ptr(), m, f)
-            g.append(_negm(_mulm(s, g[0], f), f))
-        return g^
+    """1 / a modulo x^n for a unit constant term.
+
+    Below _INVERSE_WORDS the quadratic word recurrence wins outright; above it
+    seeds Newton at the largest order below the crossover that doubles to n.
+    """
+    var one: List[UInt64] = [f.one]
+    if n < _INVERSE_WORDS:
+        return _word_divide(one, a, n, f, budget)
+    var k = n
+    while k >= _INVERSE_WORDS:
+        k = (k + 1) // 2
+    var g = _word_divide(one, a, k, f, budget)
     while k < n:
         budget.charge(1)
         var k2 = min(2 * k, n)
@@ -110,22 +93,13 @@ def _log(a: List[UInt64], n: Int, naturals: List[UInt64], f: _Field, mut budget:
 
 def _exp(a: List[UInt64], n: Int, naturals: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
     """exp(a) modulo x^n for a(0) = 0, given the inverses of 1 ... n - 1."""
-    var direct = min(n, _DIRECT)
-    # g_m = (1/m) sum_{i=1..m} i a_i g_(m-i).
+    # The quadratic word recurrence below _EXP_WORDS; above, it seeds Newton at
+    # the largest order below the crossover that doubles to n.
+    var direct = n
+    while direct >= _EXP_WORDS:
+        direct = (direct + 1) // 2
     _allocation[UInt64](n, budget)
-    var g = List[UInt64](capacity=n)
-    g.append(f.one)
-    var weighted = List[UInt64](length=direct, fill=0)
-    var k = UInt64(0)
-    for i in range(1, direct):
-        k = _addm(k, f.one, f)
-        if i < len(a):
-            weighted[i] = _mulm(a[i], k, f)
-    var reversed = _reversed(weighted, direct, budget)
-    _charge_size(_product(direct, direct), budget)
-    for m in range(1, direct):
-        var s = _dot(reversed.unsafe_ptr().unsafe_offset(direct - 1 - m), g.unsafe_ptr(), m, f)
-        g.append(_mulm(s, naturals[m], f))
+    var g = _word_exp(a, direct, naturals, f, budget)
     if direct == n:
         return g^
     # h = 1 / g is carried along: extended by one Newton step per doubling and

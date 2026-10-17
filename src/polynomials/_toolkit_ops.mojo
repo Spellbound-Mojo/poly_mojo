@@ -3,8 +3,9 @@ from .coefficient_buffer import _CoefficientView, _view
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product, _sum
 from .coefficients import ModInt, Modulus, QQ
 from ._series_rational import _compose_rational
-from ._nmod import _field, _to, _from
+from ._nmod import _Field, _field, _to, _from, _mulm
 from ._multipoint import _compose_series
+from ._series_words import _word_divide, _word_exp, _naturals, _wide_mod, _wrap
 
 comptime _NATIVE_COMPOSE = 16
 """Truncation order from which prime field and rational compositions use Brent-Kung steps."""
@@ -171,12 +172,15 @@ def _divide_values[O: _ScalarOps, inverse_only: Bool = False](a: _CoefficientVie
         raise PolyError(PolyErrorKind.DOMAIN, "zero series divisor")
     comptime if O.Scalar == ModInt and O.EXACT:
         # A zero constant takes the generic path, which raises.
-        if length >= _NATIVE_SERIES and rebind[ModInt](b[0]).value != 0:
-            ref ring = rebind[Modulus](context)
-            var numerator = List[UInt64]() if inverse_only else _residues_of(a)
+        ref ring = rebind[Modulus](context)
+        if length >= _NATIVE_SERIES and ring.value > 2 and rebind[ModInt](b[0]).value != 0:
+            var f = _field(ring.value)
+            var numerator = List[UInt64]()
             if inverse_only:
-                numerator.append(1)
-            return _as_mod_ints[O.Scalar](_native_divide(numerator, _residues_of(b), length, ring.value, budget), ring, budget)
+                numerator.append(f.one)
+            else:
+                numerator = _montgomery_of(a, f)
+            return _from_montgomery[O.Scalar](_word_divide(numerator, _montgomery_of(b, f), length, f, budget), ring, f, budget)
     var inverse = O.apply(O.integer(1, context, budget), b[0], 3, context, budget)
     _allocation[O.Scalar](length, budget)
     var result = List[O.Scalar](capacity=length)
@@ -265,72 +269,11 @@ comptime _NATIVE_SERIES = 32
 """Prime-field quadratic recurrences of at least this length run on native words."""
 
 
-@always_inline
-def _wide_mod(low: UInt128, carry: UInt64, p: UInt64, wrap: UInt64) -> UInt64:
-    """(carry * 2^128 + low) mod p, given wrap = 2^128 mod p."""
-    var r = UInt64(low % UInt128(p))
-    if carry:
-        r = UInt64((UInt128(r) + UInt128(carry) * UInt128(wrap)) % UInt128(p))
-    return r
-
-
-def _wrap(p: UInt64) -> UInt64:
-    var r = UInt64((UInt128(1) << 64) % UInt128(p))
-    return UInt64((UInt128(r) * UInt128(r)) % UInt128(p))
-
-
 def _residues_of[T: Copyable & Deinitable](values: _CoefficientView[T, _]) -> List[UInt64]:
     var out = List[UInt64](capacity=len(values))
     for i in range(len(values)):
         out.append(rebind[ModInt](values[i]).value)
     return out^
-
-
-def _native_divide(a: List[UInt64], b: List[UInt64], length: Int, p: UInt64, mut budget: Budget) raises PolyError -> List[UInt64]:
-    """The first `length` coefficients of a / b modulo p, for b[0] invertible; one reduction per coefficient."""
-    var inverse = _mod_power(b[0], p - 2, p)
-    var wrap = _wrap(p)
-    var r = List[UInt64](capacity=length)
-    for k in range(length):
-        var terms = min(k + 1, len(b)) - 1
-        _charge_size(_sum(_product(2, terms), 2), budget)
-        var low = UInt128(0)
-        var carry = UInt64(0)
-        for j in range(1, terms + 1):
-            var t = low + UInt128(b.unsafe_get(j)) * UInt128(r.unsafe_get(k - j))
-            carry += UInt64(1) if t < low else UInt64(0)
-            low = t
-        var sum = _wide_mod(low, carry, p, wrap)
-        var value = a[k] if k < len(a) else UInt64(0)
-        value = value - sum if value >= sum else value + p - sum
-        r.append(UInt64((UInt128(value) * UInt128(inverse)) % UInt128(p)))
-    return r^
-
-
-def _native_exp(a: List[UInt64], length: Int, p: UInt64, mut budget: Budget) raises PolyError -> List[UInt64]:
-    """exp(a) to `length` coefficients modulo p > length, a[0] = 0: n g_n = sum k a_k g_(n-k)."""
-    var wrap = _wrap(p)
-    # Inverses of 1 ..< length in linear time: 1/i = -(p // i) / (p mod i).
-    var inverses = List[UInt64](length=max(length, 2), fill=0)
-    inverses[1] = 1
-    for i in range(2, length):
-        inverses[i] = UInt64((UInt128(p - p // UInt64(i)) * UInt128(inverses[Int(p % UInt64(i))])) % UInt128(p))
-    var scaled = List[UInt64](length=len(a), fill=0)
-    for k in range(1, len(a)):
-        scaled[k] = UInt64((UInt128(a[k]) * UInt128(UInt64(k))) % UInt128(p))
-    var g = List[UInt64](capacity=length)
-    g.append(1)
-    for n in range(1, length):
-        var terms = max(0, min(n + 1, len(a)) - 1)
-        _charge_size(_sum(_product(4, terms), 2), budget)
-        var low = UInt128(0)
-        var carry = UInt64(0)
-        for k in range(1, terms + 1):
-            var t = low + UInt128(scaled.unsafe_get(k)) * UInt128(g.unsafe_get(n - k))
-            carry += UInt64(1) if t < low else UInt64(0)
-            low = t
-        g.append(UInt64((UInt128(_wide_mod(low, carry, p, wrap)) * UInt128(inverses[n])) % UInt128(p)))
-    return g^
 
 
 def _native_convolve(a: List[UInt64], b: List[UInt64], n: Int, p: UInt64, mut budget: Budget) raises PolyError -> List[UInt64]:
@@ -351,17 +294,23 @@ def _native_convolve(a: List[UInt64], b: List[UInt64], n: Int, p: UInt64, mut bu
     return out^
 
 
-def _mod_power(a: UInt64, e: UInt64, p: UInt64) -> UInt64:
-    var base = a % p
-    var exponent = e
-    var result = UInt64(1)
-    while exponent:
-        if exponent & 1:
-            result = UInt64((UInt128(result) * UInt128(base)) % UInt128(p))
-        exponent >>= 1
-        if exponent:
-            base = UInt64((UInt128(base) * UInt128(base)) % UInt128(p))
-    return result
+def _montgomery_of[T: Copyable & Deinitable](values: _CoefficientView[T, _], f: _Field) -> List[UInt64]:
+    var out = List[UInt64](capacity=len(values))
+    var i = 0
+    while i < len(values):
+        var run = values._run(i)
+        for j in range(len(run)):
+            out.append(_mulm(rebind[ModInt](run[j]).value, f.r2, f))
+        i += len(run)
+    return out^
+
+
+def _from_montgomery[T: Writable & Copyable & Deinitable](values: List[UInt64], ring: Modulus, f: _Field, mut budget: Budget) raises PolyError -> List[T]:
+    _allocation[T](len(values), budget)
+    var out = List[T](capacity=len(values))
+    for v in values:
+        out.append(rebind_var[T](ModInt(_from(v, f), ring)))
+    return out^
 
 
 def _as_mod_ints[T: Writable & Copyable & Deinitable](values: List[UInt64], ring: Modulus, mut budget: Budget) raises PolyError -> List[T]:

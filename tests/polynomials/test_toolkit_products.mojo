@@ -5,6 +5,8 @@ from support.check import Checker
 from polynomials._toolkit_exact import _exact_product, _ExactOps
 from polynomials._toolkit_ops import _divide_values, _convolve_values
 from polynomials._series_ops import _exp_values
+from polynomials._series_nmod import _native_series
+from polynomials._ntt import _modular_range
 from polynomials._fntt import _fconvolve, _FPRIMES, _FPRIME_COUNT
 from polynomials._ntt import _transform_length, _ntt_middle_product, _ks_range, _ks_core, _Segments, _zz_range, _transform_quotient, _shoup_quotient, _PRIMES, _PRIME_COUNT
 from polynomials.coefficient_buffer import _view
@@ -200,8 +202,49 @@ def native_recurrences(mut check: Checker) raises:
             check.check(same, String("native convolution modulo ", p, ", length ", n))
 
 
+def routed_series(mut check: Checker) raises:
+    """Prime-field inverses and exponentials agree with their identities on both sides of the word/Newton crossovers."""
+    var work = Budget()
+    var p = (UInt64(1) << 62) - 57
+    var ring = Modulus(p, work)
+    for n in [1535, 1536, 1537, 3071, 3073]:
+        var a = List[ModInt]()
+        var x = UInt64(n)
+        for k in range(n):
+            x = x * 6364136223846793005 + 1442695040888963407
+            a.append(ModInt(x >> 3, ring))
+        var unit = a.copy()
+        unit[0] = ModInt(1, ring)
+        var g = _native_series(unit, ring, n, 0, work).value().copy()
+        var bu = List[UInt64]()
+        var gu = List[UInt64]()
+        for k in range(n):
+            bu.append(unit[k].value)
+            gu.append(g[k].value)
+        var product = _modular_range(bu, gu, 0, n, p, work)
+        var ok = product[0] == 1
+        for k in range(1, n):
+            ok = ok and product[k] == 0
+        check.check(ok, String("routed series inverse, order ", n))
+        var zero = a.copy()
+        zero[0] = ModInt(0, ring)
+        var e = _native_series(zero, ring, n, 2, work).value().copy()
+        var da = List[UInt64]()
+        var eu = List[UInt64]()
+        for k in range(n):
+            eu.append(e[k].value)
+            if k:
+                da.append(UInt64((UInt128(zero[k].value) * UInt128(k)) % UInt128(p)))
+        var rhs = _modular_range(da, eu, 0, n - 1, p, work)
+        var fine = e[0].value == 1
+        for k in range(n - 1):
+            fine = fine and rhs[k] == UInt64((UInt128(e[k + 1].value) * UInt128(k + 1)) % UInt128(p))
+        check.check(fine, String("routed series exponential, order ", n))
+
+
 def main() raises:
     var check = Checker("toolkit_products")
+    routed_series(check)
     native_recurrences(check)
     float_convolutions(check)
     transform_quotients(check)
