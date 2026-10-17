@@ -168,6 +168,17 @@ def division_cases[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
             if len(g.variables(work)):
                 # q g + 1 is not a multiple of a nonconstant g.
                 c.check(not divide_exact(f.add(SparsePoly[C].constant(C.one(ctx), order, work), work), g, work), "inexact input rejected")
+    # Few terms in a large exponent box take the heap rather than a dense array.
+    for order in orders:
+        var one = SparsePoly[C].constant(C.one(ctx), order, work)
+        var x = SparsePoly[C].variable(0, order, ctx, work)
+        var y = SparsePoly[C].variable(1, order, ctx, work)
+        var z = SparsePoly[C].variable(3, order, ctx, work)
+        var q = x.pow(60, work).mul(y, work).add(y.pow(50, work).mul(z.pow(3, work), work), work).add(one, work)
+        var g = x.pow(7, work).mul(z, work).add(y.pow(9, work), work).add(one.add(one, work), work)
+        var got = divide_exact(q.mul(g, work), g, work)
+        c.check(Bool(got) and got.value() == q, "sparse quotient over a large box")
+        c.check(not divide_exact(q.mul(g, work).add(x, work), g, work), "sparse inexact input over a large box")
     # Thirty variables of degree 31 need 150 key bits: the generic path answers.
     var order = MonomialOrder()
     var wide = SparsePoly[C].constant(C.one(ctx), order, work)
