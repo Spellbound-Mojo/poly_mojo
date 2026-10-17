@@ -2,7 +2,7 @@
 from apn_mojo import Rational, Integer
 from polynomials import Budget, PolyErrorKind, CoefficientRing, QQ, ZZ, NoContext, DensePoly, MonomialOrder, factor, factor_integer, check_factorization, Factorization, Modulus, factor_mod_p, prime
 from polynomials.factor import _integer, _rational, _bound
-from polynomials._hensel import _hensel, _truncate
+from polynomials._hensel import _hensel, _truncate, _divmod_monic, _long_divmod_monic
 from polynomials._dense_ops import _monic, _one
 from polynomials._gcd import _mod_image
 from support.corpus import read_cases, parse_polynomial, as_zz
@@ -152,4 +152,24 @@ def main() raises:
             c.check(False, "late factorization budget ignored")
         except e:
             c.check(e.kind == PolyErrorKind.LIMIT and input == original, "late budget fails closed without changing input")
+    # Division by a power series inverse agrees with long division modulo M.
+    var division_work = Budget()
+    var big_modulus = Integer(1)
+    for _ in range(40):
+        big_modulus = big_modulus * Integer(1000003)
+    var division_modulus = ZZ(big_modulus.copy())
+    var state = Integer(12345)
+    var dividend_values = List[ZZ]()
+    var divisor_values = List[ZZ]()
+    for i in range(301):
+        state = (state * Integer(6364136223) + Integer(1442695)) % big_modulus
+        dividend_values.append(ZZ(state - Integer(1000003)))
+        if i < 120:
+            divisor_values.append(ZZ(state % Integer(998244353) - Integer(499122176)))
+    divisor_values.append(ZZ(Integer(1)))
+    var numerator = _truncate(DensePoly[ZZ].from_coefficients(0, NoContext(), dividend_values^, division_work), division_modulus, division_work)
+    var monic_divisor = DensePoly[ZZ].from_coefficients(0, NoContext(), divisor_values^, division_work)
+    var fast = _divmod_monic(numerator, monic_divisor, division_modulus, division_work)
+    var slow = _long_divmod_monic(numerator, monic_divisor, division_modulus, division_work)
+    c.check(fast[0] == slow[0] and fast[1] == slow[1] and fast[1].degree() < monic_divisor.degree(), "series-inverse division matches long division")
     c.finish()
