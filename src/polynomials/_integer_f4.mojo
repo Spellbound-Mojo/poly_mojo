@@ -58,6 +58,9 @@ comptime _ADX = CompilationTarget._has_feature["adx"]() and CompilationTarget._h
 comptime _ROWS = 4
 """With mulx, adcx and adox, products whose longer factor has at least this many limbs go a row at a time."""
 
+comptime _KARATSUBA = 64
+"""Without IFMA, products whose factors are both at least this many limbs long split by Karatsuba, down to pieces below it."""
+
 comptime _PAD = 32
 """Zero digits on each side of a digit string, for the IFMA loads that run past its ends."""
 
@@ -608,6 +611,11 @@ def _accumulate[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, 
     if na > nb:
         _accumulate[subtract](data, width, b, nb, a, na)
         return
+    comptime if not _IFMA:
+        # With IFMA, long products go through digits instead.
+        if na >= _KARATSUBA:
+            _karatsuba[subtract](data, width, a, na, b, nb)
+            return
     comptime if _ADX:
         if nb >= _ROWS:
             _rows[subtract](data, width, a, na, b, nb)
@@ -1014,6 +1022,130 @@ def _sub_mul_2[whole: Bool = False](data: Pointer[mut=True, UInt64, _], width: I
         var e = data.unsafe_offset(l).unsafe_load()
         data.unsafe_offset(l).unsafe_store(e - low)
         _borrow[whole](data, width, l + 1, (t >> 64) + (UInt128(1) if e < low else UInt128(0)) + UInt128(c1))
+
+
+def _karatsuba[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int):
+    """`_accumulate` for _KARATSUBA <= na <= nb: the whole product by `_limb_product`, then added to the entry."""
+    var product = List[UInt64](unsafe_uninit_length=na + nb)
+    var scratch = List[UInt64](unsafe_uninit_length=_limb_product_room(na, nb) + 1)
+    var p = product.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    _limb_product(p, a, na, b, nb, scratch.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]())
+    var m = min(na + nb, width)
+    var chain = UInt64(0)
+    for l in range(m):
+        var e = data.unsafe_offset(l).unsafe_load()
+        var x = p.unsafe_offset(l).unsafe_load()
+        comptime if subtract:
+            var d = e - x
+            var next = UInt64(1) if e < x else UInt64(0)
+            var t = d - chain
+            next += UInt64(1) if d < chain else UInt64(0)
+            data.unsafe_offset(l).unsafe_store(t)
+            chain = next
+        else:
+            var t = e + x
+            var next = UInt64(1) if t < e else UInt64(0)
+            var t2 = t + chain
+            next += UInt64(1) if t2 < chain else UInt64(0)
+            data.unsafe_offset(l).unsafe_store(t2)
+            chain = next
+    comptime if subtract:
+        _borrow_word[True](data, width, m, chain)
+    else:
+        _carry_word[True](data, width, m, chain)
+
+
+def _limb_product_room(nx: Int, ny: Int) -> Int:
+    """The scratch limbs `_limb_product` takes for factors of nx <= ny limbs."""
+    if nx < _KARATSUBA:
+        return 0
+    if nx == ny:
+        var high = nx - nx // 2
+        return 4 * (high + 1) + _limb_product_room(high + 1, high + 1)
+    # A chunk's product, then the chunk's own scratch; the last, shorter chunk swaps the factors.
+    var tail = ny % nx
+    var room = 2 * nx + _limb_product_room(nx, nx)
+    if tail > 0:
+        room = max(room, nx + tail + _limb_product_room(tail, nx))
+    return room
+
+
+def _limb_product(dst: Pointer[mut=True, UInt64, MutAnyOrigin], x: Pointer[mut=False, UInt64, _], nx: Int, y: Pointer[mut=False, UInt64, _], ny: Int, scratch: Pointer[mut=True, UInt64, MutAnyOrigin]):
+    """dst[0 : nx + ny] = x[0:nx] * y[0:ny] for nx <= ny, with `_limb_product_room(nx, ny)` limbs of scratch.
+
+    Factors of fewer than _KARATSUBA limbs go a row at a time. Equal ones
+    split in halves x = x0 + x1 B^h: x0 y0, x1 y1 and (x0 + x1)(y0 + y1),
+    whose difference from the other two is the middle term. A longer y goes
+    in chunks of nx limbs, each an equal product.
+    """
+    for l in range(nx + ny):
+        dst.unsafe_offset(l).unsafe_store(0)
+    if nx < _KARATSUBA:
+        _accumulate[False](dst, nx + ny, x, nx, y, ny)
+        return
+    if nx == ny:
+        var n = nx
+        var h = n // 2
+        var high = n - h
+        _limb_product(dst, x, h, y, h, scratch)
+        _limb_product(dst.unsafe_offset(2 * h), x.unsafe_offset(h), high, y.unsafe_offset(h), high, scratch)
+        var sx = scratch
+        var sy = scratch.unsafe_offset(high + 1)
+        var middle = scratch.unsafe_offset(2 * high + 2)
+        _half_sum(sx, x, h, high)
+        _half_sum(sy, y, h, high)
+        _limb_product(middle, sx, high + 1, sy, high + 1, scratch.unsafe_offset(4 * high + 4))
+        _ = _subtract_limbs(middle, 2 * high + 2, dst, 2 * h)
+        _ = _subtract_limbs(middle, 2 * high + 2, dst.unsafe_offset(2 * h), 2 * high)
+        # The middle term is below 2 B^n, so it fits above limb h.
+        _ = _add_limbs(dst.unsafe_offset(h), 2 * n - h, middle, min(2 * high + 2, 2 * n - h))
+        return
+    var chunk = scratch
+    var rest = scratch.unsafe_offset(2 * nx)
+    var at = 0
+    while at < ny:
+        var count = min(nx, ny - at)
+        if count == nx:
+            _limb_product(chunk, x, nx, y.unsafe_offset(at), nx, rest)
+        else:
+            _limb_product(chunk, y.unsafe_offset(at), count, x, nx, scratch.unsafe_offset(nx + count))
+        _ = _add_limbs(dst.unsafe_offset(at), nx + ny - at, chunk, nx + count)
+        at += count
+
+
+def _half_sum(dst: Pointer[mut=True, UInt64, _], x: Pointer[mut=False, UInt64, _], h: Int, high: Int):
+    """dst[0 : high + 1] = x[0:h] + x[h : h + high], for h <= high."""
+    var carry = UInt64(0)
+    for l in range(high):
+        var t = x.unsafe_offset(h + l).unsafe_load()
+        var e = x.unsafe_offset(l).unsafe_load() if l < h else UInt64(0)
+        var s = t + e
+        var over = UInt64(1) if s < t else UInt64(0)
+        var s2 = s + carry
+        over += UInt64(1) if s2 < carry else UInt64(0)
+        dst.unsafe_offset(l).unsafe_store(s2)
+        carry = over
+    dst.unsafe_offset(high).unsafe_store(carry)
+
+
+def _add_limbs(x: Pointer[mut=True, UInt64, _], nx: Int, y: Pointer[mut=False, UInt64, _], ny: Int) -> UInt64:
+    """x[0:nx] += y[0:ny] for ny <= nx; return the carry out."""
+    var carry = UInt64(0)
+    for i in range(ny):
+        var e = x.unsafe_offset(i).unsafe_load()
+        var t = e + y.unsafe_offset(i).unsafe_load()
+        var over = UInt64(1) if t < e else UInt64(0)
+        var t2 = t + carry
+        over += UInt64(1) if t2 < carry else UInt64(0)
+        x.unsafe_offset(i).unsafe_store(t2)
+        carry = over
+    var i = ny
+    while carry != 0 and i < nx:
+        var e = x.unsafe_offset(i).unsafe_load() + carry
+        carry = UInt64(1) if e < carry else UInt64(0)
+        x.unsafe_offset(i).unsafe_store(e)
+        i += 1
+    return carry
 
 
 def _comba[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int):
