@@ -535,8 +535,8 @@ def check_coprimality[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], ce
 
 
 from .coefficients import QQ
-from .evaluate import evaluate_dense, _derivative_dense
-from ._root_ops import _compare as _root_compare, _chain_variations, _one_sided
+from .evaluate import _derivative_dense
+from ._root_ops import _compare as _root_compare, _chain_variations, _one_sided, _sign_at
 
 
 @fieldwise_init
@@ -594,7 +594,7 @@ def _check_root_count_chain(f: DensePoly[QQ], sequence: SturmSequence, a: QQ, b:
     var n = len(sequence.polynomials)
     if f.is_zero() or n == 0 or len(sequence.quotients) != n - 1 or count < 0:
         return False
-    if _root_compare(a, b, budget) >= 0 or evaluate_dense(f, a, budget).is_zero() or evaluate_dense(f, b, budget).is_zero():
+    if _root_compare(a, b, budget) >= 0 or _sign_at(f, a, budget) == 0 or _sign_at(f, b, budget) == 0:
         return False
     for p in sequence.polynomials:
         budget.charge(1)

@@ -3,11 +3,11 @@ from apn_mojo import Rational, Integer, gcd, lcm, div_rem_euclid, div_rem_floor
 from .coefficients import QQ, ZZ, NoContext, _work
 from .dense import DensePoly
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size
-from .evaluate import evaluate_dense, _derivative_dense
+from .evaluate import _derivative_dense
 from .division import divmod
 from .certificates import SturmSequence, RootCountCertificate, _integer_form, _IntegerChain, _integer_variations
 from ._dense_ops import _copy as _copy_poly
-from ._root_ops import _copy, _compare, _midpoint, _variations, _chain_variations, _one_sided
+from ._root_ops import _copy, _compare, _midpoint, _variations, _chain_variations, _one_sided, _sign_at
 from ._images import _integer_dense
 from ._integer_ops import _primitive
 
@@ -365,7 +365,7 @@ def count_roots(f: DensePoly[QQ], a: QQ, b: QQ, mut budget: Budget) raises PolyE
     Raises:
         PolyError: DOMAIN for zero, endpoint roots, or a not below b; LIMIT or CAPACITY on work limits.
     """
-    if _compare(a, b, budget) >= 0 or evaluate_dense(f, a, budget).is_zero() or evaluate_dense(f, b, budget).is_zero():
+    if _compare(a, b, budget) >= 0 or _sign_at(f, a, budget) == 0 or _sign_at(f, b, budget) == 0:
         raise PolyError(PolyErrorKind.DOMAIN, "root count requires ordered nonroot endpoints")
     var integer = _IntegerChain()
     var sequence = _sturm_chain(f, integer, budget)
@@ -433,7 +433,7 @@ def _rational_root(f: DensePoly[QQ], low: QQ, high: QQ, bound: ZZ, mut budget: B
             candidate = QQ(Rational(h.value, k.value))
         except e:
             raise PolyError(PolyErrorKind.CAPACITY, String(e))
-        if _compare(low, candidate, budget) < 0 and _compare(candidate, high, budget) < 0 and evaluate_dense(f, candidate, budget).is_zero():
+        if _compare(low, candidate, budget) < 0 and _compare(candidate, high, budget) < 0 and _sign_at(f, candidate, budget) == 0:
             return candidate^
         h0 = h1^
         h1 = h^
@@ -514,7 +514,7 @@ def isolate_real_roots(f: DensePoly[QQ], mut budget: Budget) raises PolyError ->
                 intervals.append(RootInterval(_copy(task.low, budget), _copy(task.high, budget)))
                 continue
         var middle = _midpoint(task.low, task.high, budget)
-        var root = evaluate_dense(f, middle, budget).is_zero()
+        var root = _sign_at(f, middle, budget) == 0
         var vm_left = _integer_variations(integer, sequence, middle, budget, side=-1 if root else 0)
         var vm_right = _integer_variations(integer, sequence, middle, budget, side=1) if root else vm_left
         if root:
@@ -566,7 +566,7 @@ def refine(f: DensePoly[QQ], interval: RootInterval, width: QQ, mut budget: Budg
     while _compare(high.sub(low, budget), width, budget) >= 0:
         budget.charge(1)
         var middle = _midpoint(low, high, budget)
-        if evaluate_dense(f, middle, budget).is_zero():
+        if _sign_at(f, middle, budget) == 0:
             low = _midpoint(low, middle, budget)
             high = _midpoint(middle, high, budget)
             va = _chain_variations(certificate.sequence.polynomials, certificate.sequence.quotients, low, budget)
@@ -599,9 +599,9 @@ def sign_on_interval(f: DensePoly[QQ], low: QQ, high: QQ, mut budget: Budget) ra
     var comparison = _compare(low, high, budget)
     if comparison > 0:
         raise PolyError(PolyErrorKind.DOMAIN, "sign interval has reversed endpoints")
-    var value = evaluate_dense(f, low, budget)
-    if value.is_zero() or evaluate_dense(f, high, budget).is_zero():
+    var sign = _sign_at(f, low, budget)
+    if sign == 0 or _sign_at(f, high, budget) == 0:
         return None
     if comparison < 0 and count_roots(f, low, high, budget).count != 0:
         return None
-    return value.value.sign()
+    return sign

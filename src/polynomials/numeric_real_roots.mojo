@@ -4,10 +4,9 @@ from .coefficients import QQ, CoefficientRing, NoContext
 from .dense import DensePoly
 from .root_stream import RootStreamReceipt
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _sum
-from .evaluate import evaluate_dense
 from .roots import sturm_sequence, sign_changes, _sturm_chain
 from .certificates import SturmSequence, _check_root_count_parts, _check_root_count_chain, _IntegerChain, _integer_variations
-from ._root_ops import _compare, _midpoint, _chain_variations
+from ._root_ops import _compare, _midpoint, _chain_variations, _sign_at
 from .numeric_domains import NumericDomain, BallDomain
 from .numeric_dense import NumericDensePoly
 from .numeric_bounds import NumericBox, numeric_bounds, _box_real, _box_zero, _box_sub, _box_div_real, _box_center, _box_valid
@@ -154,7 +153,7 @@ def _real_split(coefficients: List[NumericBox], interval: NumericBox, exact: Opt
     for k in range(1, degree + 2):
         var fraction = QQ(Rational(k)).mul(QQ(Rational(k + 1)).inverse(budget), budget)
         var middle = interval.real_low.add(width.mul(fraction, budget), budget)
-        if (exact and not evaluate_dense(exact.value(), middle, budget).is_zero()) or (not exact and not _box_zero(_exact_box_evaluate(coefficients, NumericBox.point(middle, QQ(Rational(0)), budget), budget), budget)):
+        if (exact and _sign_at(exact.value(), middle, budget) != 0) or (not exact and not _box_zero(_exact_box_evaluate(coefficients, NumericBox.point(middle, QQ(Rational(0)), budget), budget), budget)):
             return middle^
     return _midpoint(interval.real_low, interval.real_high, budget)
 
@@ -496,7 +495,7 @@ def real_roots_numeric_to[D: NumericDomain, S: RealRootSink](poly: NumericDenseP
 
 def _check_real_cell(coefficients: List[NumericBox], derivative: List[NumericBox], exact: Optional[DensePoly[QQ]], sequence: Optional[SturmSequence], cell: RealRootCell, previous_variations: Int, mut budget: Budget, chain: _IntegerChain = _IntegerChain()) raises PolyError -> Optional[Int]:
     if exact:
-        if cell.method != 0 or len(cell.evaluations) or evaluate_dense(exact.value(), cell.interval.real_high, budget).is_zero():
+        if cell.method != 0 or len(cell.evaluations) or _sign_at(exact.value(), cell.interval.real_high, budget) == 0:
             return None
         var next_variations = _integer_variations(chain, sequence.value(), cell.interval.real_high, budget)
         if cell.count != previous_variations - next_variations:

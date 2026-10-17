@@ -35,9 +35,9 @@ from std.sys import CompilationTarget, llvm_intrinsic
 from std.sys._assembly import inlined_assembly
 from std.time import perf_counter_ns
 from apn_mojo import Integer, div_rem_trunc, gcd as integer_gcd
-from .coefficients import Modulus, ZZ, _prime
+from .coefficients import ZZ, _prime
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product
-from ._f4 import _LANES, _Lanes, _Matrix, _Primes, _Store, _mod_lanes, _raw_hash
+from ._f4 import _Matrix, _Store, _raw_hash
 from ._packed_groebner import _Engine, _Packed, _Term, _div
 
 comptime _SLACK = 16
@@ -566,12 +566,21 @@ struct _Row(Movable):
             var negative = u > 0 and (entry.unsafe_offset(u - 1).unsafe_load() >> 63) != 0
             var carry = UInt64(0)
             var any = UInt64(0)
-            for l in range(u):
-                var e = entry.unsafe_offset(l).unsafe_load()
-                any |= e
-                var p = UInt128(f) * UInt128(e) + UInt128(carry)
-                entry.unsafe_offset(l).unsafe_store(UInt64(p & UInt128(UInt64.MAX)))
-                carry = UInt64(p >> 64)
+            comptime if _ADX:
+                # Almost every entry is nonzero in its low limb.
+                var l = 0
+                while l < u and entry.unsafe_offset(l).unsafe_load() == 0:
+                    l += 1
+                any = UInt64(Int(l < u))
+                if u > 0:
+                    carry = _adx_mul(entry, f, u)
+            else:
+                for l in range(u):
+                    var e = entry.unsafe_offset(l).unsafe_load()
+                    any |= e
+                    var p = UInt128(f) * UInt128(e) + UInt128(carry)
+                    entry.unsafe_offset(l).unsafe_store(UInt64(p & UInt128(UInt64.MAX)))
+                    carry = UInt64(p >> 64)
             if u < width:
                 # The sign limb B - 1 times f, plus the carry, is f B + carry - f.
                 entry.unsafe_offset(u).unsafe_store(carry - (f if negative else UInt64(0)))
@@ -813,6 +822,62 @@ def _adx_sub_mul(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer[m
         UInt64,
         constraints="=&r,r,r,r,r,~{rdi},~{rsi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{r11},~{memory},~{cc}",
     ](data, other, n, f)
+
+
+@always_inline
+def _adx_mul(data: Pointer[mut=True, UInt64, _], f: UInt64, n: Int) -> UInt64:
+    """data[0:n] *= f in place for n >= 1; return the high limb.
+
+    Each product's high word goes into the next limb by adcx, one carry
+    chain of single additions.
+    """
+    return inlined_assembly[
+        """
+        mov $1, %rdi
+        mov $2, %rcx
+        mov $3, %rdx
+        mov %rcx, %r11
+        shr $$2, %r11
+        and $$3, %rcx
+        xor %r8d, %r8d
+        jrcxz 3f
+        1:
+        mulx (%rdi), %r9, %r10
+        adcx %r8, %r9
+        mov %r9, (%rdi)
+        mov %r10, %r8
+        lea 8(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 3f
+        jmp 1b
+        3:
+        mov %r11, %rcx
+        jrcxz 4f
+        2:
+        mulx (%rdi), %r9, %r10
+        adcx %r8, %r9
+        mov %r9, (%rdi)
+        mulx 8(%rdi), %r9, %r8
+        adcx %r10, %r9
+        mov %r9, 8(%rdi)
+        mulx 16(%rdi), %r9, %r10
+        adcx %r8, %r9
+        mov %r9, 16(%rdi)
+        mulx 24(%rdi), %r9, %r8
+        adcx %r10, %r9
+        mov %r9, 24(%rdi)
+        lea 32(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 4f
+        jmp 2b
+        4:
+        mov $$0, %r9
+        adcx %r9, %r8
+        mov %r8, $0
+        """,
+        UInt64,
+        constraints="=&r,r,r,r,~{rdi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{r11},~{memory},~{cc}",
+    ](data, n, f)
 
 
 @always_inline
@@ -1399,7 +1464,7 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
 
     Each pair first tries a standard representation found modulo up to
     `primes` primes (`_modular_pair`); a pair it does not prove, and every
-    pair when `primes` is below `_LANES`, is reduced exactly over the
+    pair when `primes` is below `_CERT_LANES`, is reduced exactly over the
     integers. Stops at the first pair that does not reduce to zero.
     """
     engine.sort_active(budget)
@@ -1477,7 +1542,7 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
                 var t0 = _clock()
                 var cost = 0
                 # The primes the last pair needed: attempts start a batch below.
-                k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, b, max(_FIRST_PRIMES, hint - _LANES), allowance, cost, counts, budget)
+                k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, b, max(_FIRST_PRIMES, hint - _CERT_LANES), allowance, cost, counts, budget)
                 spent = cost
                 counts[6] += cost
                 counts[7] += _clock() - t0
@@ -1802,11 +1867,47 @@ def _digit_terms[W: Int, //, minus: Bool](mut row: _Row, matrix: _Matrix[W], coe
             row.add_product(c, factor, limbs, starts.unsafe_get(k), starts.unsafe_get(k + 1), bits)
 
 
+comptime _CERT_LANES = 8
+"""Primes a certificate lane vector holds, one per SIMD lane (distinct from `_f4`'s replay lanes)."""
+
+comptime _CertLanes = SIMD[DType.uint64, _CERT_LANES]
+
+comptime _SWEEP = 4
+"""Most batches of `_CERT_LANES` primes one sweep of a pair reduces at once."""
+
+
+struct _CertPrimes(Copyable, Movable):
+    """A batch of certificate primes, one per lane, with their squares and reciprocals."""
+    var primes: _CertLanes
+    var squares: _CertLanes
+    var reciprocals: SIMD[DType.float64, _CERT_LANES]
+
+    def __init__(out self, primes: List[UInt64], start: Int):
+        self.primes = _CertLanes(0)
+        for l in range(_CERT_LANES):
+            self.primes[l] = primes[start + l]
+        self.squares = self.primes * self.primes
+        self.reciprocals = SIMD[DType.float64, _CERT_LANES](1.0) / self.primes.cast[DType.float64]()
+
+
+@always_inline
+def _cert_mod(v: _CertLanes, lanes: _CertPrimes) -> _CertLanes:
+    """Each lane of v, below 2^62, modulo its prime.
+
+    The quotient estimated in floating point is off by one at most either
+    way, so one correction each way remains.
+    """
+    var q = (v.cast[DType.float64]() * lanes.reciprocals).cast[DType.uint64]()
+    var r = v - q * lanes.primes
+    r = (r >> 63).ne(0).select(r + lanes.primes, r)
+    return r.ge(lanes.primes).select(r - lanes.primes, r)
+
+
 comptime _PAIR_PRIMES = 128
 """Primes a pair's modular standard representation may use before the pair is reduced exactly."""
 
-comptime _FIRST_PRIMES = _LANES
-"""Primes of a pair's first attempt; each later batch of `_LANES` primes makes another."""
+comptime _FIRST_PRIMES = _CERT_LANES
+"""Primes of a pair's first attempt; each later batch of `_CERT_LANES` primes makes another."""
 
 comptime _GIVE_UP = 4
 """Pairs of a degree that must fail modularly, and be most of those tried, before the rest skip the modular attempt."""
@@ -1814,8 +1915,11 @@ comptime _GIVE_UP = 4
 comptime _TIMED = 3
 """Long pairs a degree samples before comparing the routes' costs."""
 
-comptime _RATIO = 85
-"""Percent of the exact cost above which a degree leaves the modular route."""
+comptime _RATIO = 70
+"""Percent of the exact cost above which a degree leaves the modular route.
+
+Well below 100: the cost models are fitted on one machine, and the routes'
+relative speed differs between machines, so only a clear modular win counts."""
 
 comptime _LONG = 48
 """Primes from which a pair counts as long, and may be sampled (see `_pair_routes`)."""
@@ -1823,7 +1927,7 @@ comptime _LONG = 48
 comptime _EVERY = 32
 """After the first `_TIMED`, one long pair in this many is sampled, while the comparison is close."""
 
-comptime _CLEAR = 60
+comptime _CLEAR = 50
 """Percent of the exact cost below which the modular route wins clearly and sampling stops."""
 
 comptime _CERT_STATS = False
@@ -1841,15 +1945,18 @@ def _exact_cost(units: Int, terms: Int, columns: Int) -> Int:
     """The exact check's cost model, in hundredths of a nanosecond on the
     calibration machine: from its budget units, the row terms it loaded and
     the columns after the pair's leading one (fitted over cyclic-7/8,
-    katsura-9/10, eco-10/11 and noon-8 to a few percent)."""
-    return 79 * units + 1030 * terms + 165 * columns
+    katsura-9/10, eco-10/11 and noon-8 to about fifteen percent, with the
+    ADX row kernels; refit with experiments/cert_reconstruct/calibrate_routes.py)."""
+    return 53 * units + 1258 * terms + 166 * columns
 
 
 def _modular_cost(lane_units: Int, crt_units: Int, slots: Int) -> Int:
     """The modular route's cost model, in the units of `_exact_cost`: from the
     budget units of its lane sweeps and of its proofs, and the quotient slots
-    its attempts combine (fitted as `_exact_cost`, to about fifteen percent)."""
-    return 38 * lane_units + 232 * crt_units + 21000 * slots
+    its attempts combine. Fitted as `_exact_cost`, refitted after the limb
+    reconstruction of the proofs, to about twenty percent, and scaled up by a
+    fifth so that close calls go to the exact check."""
+    return 27 * lane_units + 106 * crt_units + 16760 * slots
 
 
 def _remainder_of(limbs: Pointer[mut=False, UInt64, _], n: Int, d: UInt64) -> UInt64:
@@ -1883,7 +1990,7 @@ struct _Basis(Movable):
     product Q, Q_i = Q / p_i and c_i = Q_i^-1 modulo p_i, residues r_i give
     x = sum r_i e_i - m Q with e_i = c_i Q_i and m = floor(sum r_i c_i / p_i).
 
-    `values` forms `_LANES` values at once, one per SIMD lane, from the
+    `values` forms `_CERT_LANES` values at once, one per SIMD lane, from the
     32-bit digits of the e_i: each digit's products with the residues stay
     below 2^63, and their low and high halves go into columns that carry
     once all of them are in."""
@@ -1961,38 +2068,38 @@ struct _Basis(Movable):
 
 
     def values(self, residues: List[UInt64], mut work: List[UInt64], mut sums: List[UInt64]):
-        """`value` for `_LANES` residue vectors at once, uncharged: residues[i _LANES + j] is the j-th's residue modulo the i-th prime, and its value goes to work[j (limbs + 2) :], limbs + 2 limbs. `sums` is scratch of `_LANES` (2 limbs + 2)."""
+        """`value` for `_CERT_LANES` residue vectors at once, uncharged: residues[i _CERT_LANES + j] is the j-th's residue modulo the i-th prime, and its value goes to work[j (limbs + 2) :], limbs + 2 limbs. `sums` is scratch of `_CERT_LANES` (2 limbs + 2)."""
         var k = len(self.weights)
         var digits = 2 * self.limbs
         var columns = sums.unsafe_ptr()
-        var mask = _Lanes(0xFFFFFFFF)
+        var mask = _CertLanes(0xFFFFFFFF)
         for d in range(digits + 2):
-            columns.unsafe_offset(_LANES * d).unsafe_store[width=_LANES](_Lanes(0))
-        var estimate = SIMD[DType.float64, _LANES](0)
+            columns.unsafe_offset(_CERT_LANES * d).unsafe_store[width=_CERT_LANES](_CertLanes(0))
+        var estimate = SIMD[DType.float64, _CERT_LANES](0)
         for i in range(k):
-            var r = residues.unsafe_ptr().unsafe_offset(_LANES * i).unsafe_load[width=_LANES]()
+            var r = residues.unsafe_ptr().unsafe_offset(_CERT_LANES * i).unsafe_load[width=_CERT_LANES]()
             estimate += r.cast[DType.float64]() * self.weights.unsafe_get(i)
             var e = self.digits.unsafe_ptr().unsafe_offset(i * digits)
-            var high = _Lanes(0)
+            var high = _CertLanes(0)
             for d in range(digits):
                 # Both factors are below 2^32, which the masks make plain.
-                var x = (r & mask) * (_Lanes(e.unsafe_offset(d).unsafe_load()) & mask)
-                var column = columns.unsafe_offset(_LANES * d)
-                column.unsafe_store[width=_LANES](column.unsafe_load[width=_LANES]() + (x & mask) + high)
+                var x = (r & mask) * (_CertLanes(e.unsafe_offset(d).unsafe_load()) & mask)
+                var column = columns.unsafe_offset(_CERT_LANES * d)
+                column.unsafe_store[width=_CERT_LANES](column.unsafe_load[width=_CERT_LANES]() + (x & mask) + high)
                 high = x >> 32
-            var column = columns.unsafe_offset(_LANES * digits)
-            column.unsafe_store[width=_LANES](column.unsafe_load[width=_LANES]() + high)
-        var carry = _Lanes(0)
+            var column = columns.unsafe_offset(_CERT_LANES * digits)
+            column.unsafe_store[width=_CERT_LANES](column.unsafe_load[width=_CERT_LANES]() + high)
+        var carry = _CertLanes(0)
         for d in range(digits + 2):
-            var x = columns.unsafe_offset(_LANES * d).unsafe_load[width=_LANES]() + carry
-            columns.unsafe_offset(_LANES * d).unsafe_store[width=_LANES](x & mask)
+            var x = columns.unsafe_offset(_CERT_LANES * d).unsafe_load[width=_CERT_LANES]() + carry
+            columns.unsafe_offset(_CERT_LANES * d).unsafe_store[width=_CERT_LANES](x & mask)
             carry = x >> 32
         var n = self.limbs + 2
-        for lane in range(_LANES):
+        for lane in range(_CERT_LANES):
             var data = work.unsafe_ptr().unsafe_offset(lane * n)
             for l in range(self.limbs + 1):
-                var low = columns.unsafe_offset(_LANES * 2 * l + lane).unsafe_load()
-                var high = columns.unsafe_offset(_LANES * (2 * l + 1) + lane).unsafe_load()
+                var low = columns.unsafe_offset(_CERT_LANES * 2 * l + lane).unsafe_load()
+                var high = columns.unsafe_offset(_CERT_LANES * (2 * l + 1) + lane).unsafe_load()
                 data.unsafe_offset(l).unsafe_store(low | (high << 32))
             data.unsafe_offset(self.limbs + 1).unsafe_store(0)
             var m = UInt64(estimate[lane])
@@ -2034,24 +2141,24 @@ def _limbs_to_integer(limbs: List[UInt64], n: Int) -> Integer:
 
 
 struct _PairPrimes(Movable):
-    """Primes below 2^31 that divide no leading coefficient, `_LANES` at a time,
+    """Primes below 2^31 that divide no leading coefficient, `_CERT_LANES` at a time,
     with each element's coefficients modulo them made monic, and the CRT basis
     of each attempt's primes."""
     var limit: Int
-    """Primes a pair may use: a multiple of `_LANES`, or zero."""
+    """Primes a pair may use: a multiple of `_CERT_LANES`, or zero."""
     var primes: List[UInt64]
-    var batches: List[_Primes]
+    var batches: List[_CertPrimes]
     var values: List[List[List[UInt32]]]
-    """Per batch and element, its monic coefficients, `_LANES` residues per term."""
+    """Per batch and element, its monic coefficients, `_CERT_LANES` residues per term."""
     var inverses: List[List[UInt64]]
-    """Per batch, each element's leading coefficient inverse, `_LANES` per element."""
+    """Per batch, each element's leading coefficient inverse, `_CERT_LANES` per element."""
     var bases: List[_Basis]
-    """The CRT basis of the first `_LANES` * (i + 1) primes."""
+    """The CRT basis of the first `_CERT_LANES` * (i + 1) primes."""
 
     def __init__(out self, coefficients: _Coefficients, limit: Int, mut budget: Budget) raises PolyError:
-        self.limit = (limit // _LANES) * _LANES
+        self.limit = (limit // _CERT_LANES) * _CERT_LANES
         self.primes = List[UInt64]()
-        self.batches = List[_Primes]()
+        self.batches = List[_CertPrimes]()
         self.values = List[List[List[UInt32]]]()
         self.inverses = List[List[UInt64]]()
         self.bases = List[_Basis]()
@@ -2075,29 +2182,26 @@ struct _PairPrimes(Movable):
             return
         while len(self.batches) <= batch:
             var b = len(self.batches)
-            var rings = List[Modulus]()
-            for l in range(_LANES):
-                rings.append(Modulus(_prime_value=self.primes[_LANES * b + l]))
-            var lanes = _Primes(rings)
+            var lanes = _CertPrimes(self.primes, _CERT_LANES * b)
             var values = List[List[UInt32]]()
-            var inverses = List[UInt64](length=_LANES * len(coefficients.limbs), fill=0)
+            var inverses = List[UInt64](length=_CERT_LANES * len(coefficients.limbs), fill=0)
             for g in range(len(coefficients.limbs)):
                 var n = len(coefficients.starts[g]) - 1
-                budget.charge(UInt64(_product(_LANES, len(coefficients.limbs[g]) + n)))
-                _allocation[UInt32](_LANES * n, budget)
-                var r = List[UInt32](length=_LANES * n, fill=0)
+                budget.charge(UInt64(_product(_CERT_LANES, len(coefficients.limbs[g]) + n)))
+                _allocation[UInt32](_CERT_LANES * n, budget)
+                var r = List[UInt32](length=_CERT_LANES * n, fill=0)
                 ref limbs = coefficients.limbs[g]
                 ref starts = coefficients.starts[g]
-                for l in range(_LANES):
+                for l in range(_CERT_LANES):
                     var p = lanes.primes[l]
                     var lead = _remainder_of(limbs.unsafe_ptr().unsafe_offset(starts[0]), starts[1] - starts[0], p)
                     var inverse = _power(lead, p - 2, p)
-                    inverses[_LANES * g + l] = inverse
+                    inverses[_CERT_LANES * g + l] = inverse
                     for k in range(n):
                         var x = _remainder_of(limbs.unsafe_ptr().unsafe_offset(starts[k]), starts[k + 1] - starts[k], p)
                         if coefficients.negative[g][k] and x != 0:
                             x = p - x
-                        r[_LANES * k + l] = UInt32(x * inverse % p)
+                        r[_CERT_LANES * k + l] = UInt32(x * inverse % p)
                 values.append(r^)
             self.batches.append(lanes^)
             self.values.append(values^)
@@ -2106,11 +2210,17 @@ struct _PairPrimes(Movable):
     def basis(mut self, attempt: Int, mut budget: Budget) raises PolyError:
         """Prepare the CRT basis of attempt `attempt`."""
         while len(self.bases) <= attempt:
-            self.bases.append(_Basis(self.primes, _LANES * (len(self.bases) + 1), budget))
+            self.bases.append(_Basis(self.primes, _CERT_LANES * (len(self.bases) + 1), budget))
 
 
 struct _LaneRow(Movable):
-    """A dense row with a residue per lane prime in each column, and a mark per written column."""
+    """A dense row with a residue per prime of a sweep in each column, and a mark per written column.
+
+    A sweep of B batches keeps a column's residues B `_CERT_LANES` apart, so
+    columns are `stride` = B `_CERT_LANES` apart; the row is zero outside a
+    sweep, whatever the stride. The entries reducers meet are kept per batch:
+    `residues[batch]` holds `_CERT_LANES` residues for every slot.
+    """
     var data: List[UInt64]
     var marks: List[UInt64]
     var ncols: Int
@@ -2118,21 +2228,42 @@ struct _LaneRow(Movable):
     """Per column, the quotient slot of the pair being reduced, or -1."""
     var columns: List[Int]
     """Per slot, its column."""
-    var residues: List[UInt32]
-    """Per slot, `limit` residues of the entry the reducer met, prime by prime."""
+    var residues: List[List[UInt32]]
+    """Per batch swept so far, `_CERT_LANES` residues per slot of the entry the reducer met."""
 
     def __init__(out self, ncols: Int, mut budget: Budget) raises PolyError:
-        _allocation[UInt64](_product(2 * _LANES + 1, ncols), budget)
+        _allocation[UInt64](_product(_CERT_LANES + 1, ncols), budget)
         self.ncols = ncols
-        self.data = List[UInt64](length=2 * _LANES * ncols, fill=0)
+        self.data = List[UInt64](length=_CERT_LANES * ncols, fill=0)
         self.marks = List[UInt64](length=ncols // 64 + 1, fill=0)
         self.slot = List[Int](length=ncols, fill=-1)
         self.columns = List[Int]()
-        self.residues = List[UInt32]()
+        self.residues = List[List[UInt32]]()
+
+    def widen(mut self, stride: Int, mut budget: Budget) raises PolyError:
+        """Room for `stride` residues per column; the row is zero."""
+        if len(self.data) < stride * self.ncols:
+            _allocation[UInt64](_product(stride, self.ncols), budget)
+            self.data = List[UInt64](length=stride * self.ncols, fill=0)
+
+    def begin(mut self, batch: Int, count: Int):
+        """Make room for the residues of `count` batches from `batch` on, zero for the slots so far."""
+        while len(self.residues) < batch + count:
+            self.residues.append(List[UInt32]())
+        for b in range(batch, batch + count):
+            self.residues[b].resize(_CERT_LANES * len(self.columns), 0)
 
     @always_inline
-    def mark(mut self, c: Int):
-        self.marks.unsafe_get(c // 64) |= UInt64(1) << UInt64(c % 64)
+    def slot_of(mut self, c: Int) -> Int:
+        """The slot of column c, made with zero residues in every batch so far if new."""
+        var slot = self.slot.unsafe_get(c)
+        if slot < 0:
+            slot = len(self.columns)
+            self.slot.unsafe_get(c) = slot
+            self.columns.append(c)
+            for b in range(len(self.residues)):
+                self.residues[b].resize(_CERT_LANES * (slot + 1), 0)
+        return slot
 
     def next_marked(self, c: Int) -> Int:
         if c >= self.ncols:
@@ -2146,162 +2277,113 @@ struct _LaneRow(Movable):
             word = self.marks.unsafe_get(w)
         return min(64 * w + Int(count_trailing_zeros(word)), self.ncols)
 
-    def clear(mut self, stride: Int):
-        """Zero every marked column, `stride` lanes apart, and forget the slots."""
-        for w in range(len(self.marks)):
+    def clear(mut self, stride: Int, start: Int):
+        """Zero every marked column from `start` on, `stride` residues apart."""
+        for w in range(start // 64, len(self.marks)):
             var word = self.marks.unsafe_get(w)
             while word != 0:
                 var c = 64 * w + Int(count_trailing_zeros(word))
-                for l in range(0, stride, _LANES):
-                    self.data.unsafe_ptr().unsafe_offset(stride * c + l).unsafe_store[width=_LANES](_Lanes(0))
+                for l in range(0, stride, _CERT_LANES):
+                    self.data.unsafe_ptr().unsafe_offset(stride * c + l).unsafe_store[width=_CERT_LANES](_CertLanes(0))
                 word &= word - 1
             self.marks.unsafe_get(w) = 0
+
+    def forget(mut self):
+        """Forget the slots and their residues."""
         for c in self.columns:
             self.slot.unsafe_get(c) = -1
         self.columns.clear()
         self.residues.clear()
 
-    def add(mut self, columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factor: SIMD[DType.uint32, _LANES], squares: _Lanes, skip: Int):
-        """Add factor times a row of residues, after its first `skip` entries; entries stay below p^2."""
-        _lanes_add[_LANES, True](self.data.unsafe_ptr(), self.marks.unsafe_ptr(), columns, values, n, factor, squares, skip)
+
+@always_inline
+def _lane_update[reduce: Bool](at: Pointer[mut=True, UInt64, _], factor: _CertLanes, values: Pointer[mut=False, UInt32, _], square: _CertLanes):
+    """One batch of one column: at += factor times the residues at `values`, below p^2 again with `reduce`."""
+    var x = at.unsafe_load[width=_CERT_LANES]() + factor * values.unsafe_load[width=_CERT_LANES]().cast[DType.uint64]()
+    comptime if reduce:
+        at.unsafe_store[width=_CERT_LANES](x.ge(square).select(x - square, x))
+    else:
+        at.unsafe_store[width=_CERT_LANES](x)
 
 
 @no_inline
-def _lanes_add[S: Int, reduce: Bool](data: Pointer[mut=True, UInt64, _], marks: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factors: SIMD[DType.uint32, _LANES], squares: _Lanes, skip: Int):
-    """Add factors times a row of residues, after its first `skip` entries, to every lane of a dense row whose columns are S apart, and mark the columns.
+def _lanes_add[B: Int, reduce: Bool](data: Pointer[mut=True, UInt64, _], marks: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], v0: Pointer[mut=False, UInt32, _], v1: Pointer[mut=False, UInt32, _], v2: Pointer[mut=False, UInt32, _], v3: Pointer[mut=False, UInt32, _], n: Int, factors: SIMD[DType.uint32, B * _CERT_LANES], squares: SIMD[DType.uint64, B * _CERT_LANES], skip: Int):
+    """Add factors times a row of residues, after its first `skip` entries, to the dense row of a B-batch sweep, and mark the columns.
 
-    With `reduce` each entry is brought below p^2 again. Both factors widen
-    from 32 bits, so each product is one 32 by 32 bit multiplication; this
-    stays out of line, since inlined the widening is lost before instructions
-    are selected.
+    Batch i's factors are factors[i _CERT_LANES :] and its residues come
+    from v_i, `_CERT_LANES` per term. With `reduce` each entry is brought
+    below p^2 again. Both factors widen from 32 bits, so each product is one
+    32 by 32 bit multiplication; this stays out of line, since inlined the
+    widening is lost before instructions are selected.
     """
-    var factor = factors.cast[DType.uint64]()
+    comptime S = B * _CERT_LANES
+    var f = factors.cast[DType.uint64]()
     for k in range(skip, n):
         var c = Int(columns.unsafe_offset(k).unsafe_load())
         var at = data.unsafe_offset(S * c)
-        var x = at.unsafe_load[width=_LANES]() + factor * values.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
-        comptime if reduce:
-            at.unsafe_store[width=_LANES](x.ge(squares).select(x - squares, x))
-        else:
-            at.unsafe_store[width=_LANES](x)
+        _lane_update[reduce](at, f.slice[_CERT_LANES, offset=0](), v0.unsafe_offset(_CERT_LANES * k), squares.slice[_CERT_LANES, offset=0]())
+        comptime if B > 1:
+            _lane_update[reduce](at.unsafe_offset(_CERT_LANES), f.slice[_CERT_LANES, offset=_CERT_LANES](), v1.unsafe_offset(_CERT_LANES * k), squares.slice[_CERT_LANES, offset=_CERT_LANES]())
+        comptime if B > 2:
+            _lane_update[reduce](at.unsafe_offset(2 * _CERT_LANES), f.slice[_CERT_LANES, offset=2 * _CERT_LANES](), v2.unsafe_offset(_CERT_LANES * k), squares.slice[_CERT_LANES, offset=2 * _CERT_LANES]())
+        comptime if B > 3:
+            _lane_update[reduce](at.unsafe_offset(3 * _CERT_LANES), f.slice[_CERT_LANES, offset=3 * _CERT_LANES](), v3.unsafe_offset(_CERT_LANES * k), squares.slice[_CERT_LANES, offset=3 * _CERT_LANES]())
         var mw = marks.unsafe_offset(c >> 6)
         mw.unsafe_store(mw.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
 
 
-@no_inline
-def _lanes_add_two[reduce: Bool](data: Pointer[mut=True, UInt64, _], marks: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], others: Pointer[mut=False, UInt32, _], n: Int, factors: SIMD[DType.uint32, _LANES], more: SIMD[DType.uint32, _LANES], squares: _Lanes, more_squares: _Lanes, skip: Int):
-    """As `_lanes_add` for two batches, `_LANES` apart in each column."""
-    comptime S = 2 * _LANES
-    var f0 = factors.cast[DType.uint64]()
-    var f1 = more.cast[DType.uint64]()
-    for k in range(skip, n):
-        var c = Int(columns.unsafe_offset(k).unsafe_load())
-        var at = data.unsafe_offset(S * c)
-        var x = at.unsafe_load[width=_LANES]() + f0 * values.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
-        var at1 = at.unsafe_offset(_LANES)
-        var y = at1.unsafe_load[width=_LANES]() + f1 * others.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
-        comptime if reduce:
-            at.unsafe_store[width=_LANES](x.ge(squares).select(x - squares, x))
-            at1.unsafe_store[width=_LANES](y.ge(more_squares).select(y - more_squares, y))
-        else:
-            at.unsafe_store[width=_LANES](x)
-            at1.unsafe_store[width=_LANES](y)
-        var mw = marks.unsafe_offset(c >> 6)
-        mw.unsafe_store(mw.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
+def _lane_sweep[B: Int, W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], images: _PairPrimes, a: Int, b: Int, batch: Int, mut budget: Budget) raises PolyError -> Bool:
+    """Reduce S / L, for the S-polynomial of rows a and b, modulo the primes of batches `batch` to `batch` + B - 1 at once, recording the entries reducers meet.
 
-
-def _lane_pass_two[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], values: List[List[UInt32]], others: List[List[UInt32]], primes: _Primes, more: _Primes, a: Int, b: Int, batch: Int, limit: Int, mut budget: Budget) raises PolyError -> Bool:
-    """As `_lane_pass` for batches `batch` and `batch` + 1 in one sweep, two `_LANES` apart in each column."""
-    comptime S = 2 * _LANES
+    With L = la * lc(g_a) = lb * lc(g_b), S / L is the difference of the two
+    monic rows. Returns False, with the row zero again, when a nonzero
+    residue meets a column no row leads in: then S does not reduce to zero,
+    and the exact check decides. Otherwise the row is zero again too.
+    """
+    comptime S = B * _CERT_LANES
+    lanes.widen(S, budget)
+    lanes.begin(batch, B)
     var data = lanes.data.unsafe_ptr()
     var marks = lanes.marks.unsafe_ptr()
+    var primes = SIMD[DType.uint64, S](0)
+    var squares = SIMD[DType.uint64, S](0)
+    comptime for i in range(B):
+        primes = primes.insert[offset=_CERT_LANES * i](images.batches[batch + i].primes)
+        squares = squares.insert[offset=_CERT_LANES * i](images.batches[batch + i].squares)
     var first = Int(matrix.entries[matrix.starts[a]])
     for half in range(2):
         var r = a if half == 0 else b
         var s = matrix.starts[r]
         var n = matrix.starts[r + 1] - s
-        var columns = matrix.entries.unsafe_ptr().unsafe_offset(s)
-        var f0 = SIMD[DType.uint32, _LANES](1) if half == 0 else (primes.primes - 1).cast[DType.uint32]()
-        var f1 = SIMD[DType.uint32, _LANES](1) if half == 0 else (more.primes - 1).cast[DType.uint32]()
-        _lanes_add_two[False](data, marks, columns, values[matrix.sources[r]].unsafe_ptr(), others[matrix.sources[r]].unsafe_ptr(), n, f0, f1, primes.squares, more.squares, 0)
+        var g = matrix.sources[r]
+        var factors = SIMD[DType.uint32, S](1) if half == 0 else (primes - 1).cast[DType.uint32]()
+        _lanes_add[B, False](data, marks, matrix.entries.unsafe_ptr().unsafe_offset(s), images.values[batch][g].unsafe_ptr(), images.values[batch + min(1, B - 1)][g].unsafe_ptr(), images.values[batch + min(2, B - 1)][g].unsafe_ptr(), images.values[batch + min(3, B - 1)][g].unsafe_ptr(), n, factors, squares, 0)
     budget.charge(UInt64(S * (matrix.starts[a + 1] - matrix.starts[a] + matrix.starts[b + 1] - matrix.starts[b])))
-    data.unsafe_offset(S * first).unsafe_store[width=_LANES](_Lanes(0))
-    data.unsafe_offset(S * first + _LANES).unsafe_store[width=_LANES](_Lanes(0))
+    comptime for i in range(B):
+        data.unsafe_offset(S * first + _CERT_LANES * i).unsafe_store[width=_CERT_LANES](_CertLanes(0))
     lanes.marks.unsafe_get(first // 64) &= ~(UInt64(1) << UInt64(first % 64))
     var c = lanes.next_marked(first + 1)
     while c < lanes.ncols:
         lanes.marks.unsafe_get(c // 64) &= ~(UInt64(1) << UInt64(c % 64))
         var at = data.unsafe_offset(S * c)
-        var u = _mod_lanes(at.unsafe_load[width=_LANES](), primes)
-        var w = _mod_lanes(at.unsafe_offset(_LANES).unsafe_load[width=_LANES](), more)
-        at.unsafe_store[width=_LANES](_Lanes(0))
-        at.unsafe_offset(_LANES).unsafe_store[width=_LANES](_Lanes(0))
-        if u.ne(0).reduce_or() or w.ne(0).reduce_or():
-            var q = pivot.unsafe_get(c)
-            if q < 0:
-                lanes.clear(S)
-                return False
-            var slot = lanes.slot.unsafe_get(c)
-            if slot < 0:
-                slot = len(lanes.columns)
-                lanes.slot.unsafe_get(c) = slot
-                lanes.columns.append(c)
-                lanes.residues.resize(len(lanes.residues) + limit, 0)
-            var to = lanes.residues.unsafe_ptr().unsafe_offset(slot * limit + _LANES * batch)
-            to.unsafe_store[width=_LANES](u.cast[DType.uint32]())
-            to.unsafe_offset(_LANES).unsafe_store[width=_LANES](w.cast[DType.uint32]())
-            var s = matrix.starts.unsafe_get(q)
-            var n = matrix.starts.unsafe_get(q + 1) - s
-            budget.charge(UInt64(S * n))
-            var f0 = u.eq(0).select(_Lanes(0), primes.primes - u).cast[DType.uint32]()
-            var f1 = w.eq(0).select(_Lanes(0), more.primes - w).cast[DType.uint32]()
-            var g = matrix.sources.unsafe_get(q)
-            _lanes_add_two[True](data, marks, matrix.entries.unsafe_ptr().unsafe_offset(s), values[g].unsafe_ptr(), others[g].unsafe_ptr(), n, f0, f1, primes.squares, more.squares, 1)
-        c = lanes.next_marked(c + 1)
-    return True
-
-
-def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], values: List[List[UInt32]], primes: _Primes, a: Int, b: Int, batch: Int, limit: Int, mut budget: Budget) raises PolyError -> Bool:
-    """Reduce S / L, for the S-polynomial of rows a and b, in every lane, recording the entries reducers meet.
-
-    With L = la * lc(g_a) = lb * lc(g_b), S / L is the difference of the two
-    monic rows. Returns False, with the row cleared, when a nonzero residue
-    meets a column no row leads in: then S does not reduce to zero, and the
-    exact check decides. Otherwise the row is zero again.
-    """
-    var data = lanes.data.unsafe_ptr()
-    var sa = matrix.starts[a]
-    var sb = matrix.starts[b]
-    lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sa), values[matrix.sources[a]].unsafe_ptr(), matrix.starts[a + 1] - sa, SIMD[DType.uint32, _LANES](1), primes.squares, 0)
-    lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sb), values[matrix.sources[b]].unsafe_ptr(), matrix.starts[b + 1] - sb, (primes.primes - 1).cast[DType.uint32](), primes.squares, 0)
-    budget.charge(UInt64(_LANES * (matrix.starts[a + 1] - sa + matrix.starts[b + 1] - sb)))
-    var first = Int(matrix.entries[sa])
-    data.unsafe_offset(_LANES * first).unsafe_store[width=_LANES](_Lanes(0))
-    lanes.marks.unsafe_get(first // 64) &= ~(UInt64(1) << UInt64(first % 64))
-    var c = lanes.next_marked(first + 1)
-    while c < lanes.ncols:
-        lanes.marks.unsafe_get(c // 64) &= ~(UInt64(1) << UInt64(c % 64))
-        var at = data.unsafe_offset(_LANES * c)
-        var v = _mod_lanes(at.unsafe_load[width=_LANES](), primes)
-        at.unsafe_store[width=_LANES](_Lanes(0))
+        var v = SIMD[DType.uint64, S](0)
+        comptime for i in range(B):
+            v = v.insert[offset=_CERT_LANES * i](_cert_mod(at.unsafe_offset(_CERT_LANES * i).unsafe_load[width=_CERT_LANES](), images.batches[batch + i]))
+            at.unsafe_offset(_CERT_LANES * i).unsafe_store[width=_CERT_LANES](_CertLanes(0))
         if v.ne(0).reduce_or():
             var q = pivot.unsafe_get(c)
             if q < 0:
-                lanes.clear(_LANES)
+                lanes.clear(S, c + 1)
                 return False
-            var slot = lanes.slot.unsafe_get(c)
-            if slot < 0:
-                slot = len(lanes.columns)
-                lanes.slot.unsafe_get(c) = slot
-                lanes.columns.append(c)
-                lanes.residues.resize(len(lanes.residues) + limit, 0)
-            var to = lanes.residues.unsafe_ptr().unsafe_offset(slot * limit + _LANES * batch)
-            to.unsafe_store[width=_LANES](v.cast[DType.uint32]())
+            var slot = lanes.slot_of(c)
+            comptime for i in range(B):
+                lanes.residues[batch + i].unsafe_ptr().unsafe_offset(_CERT_LANES * slot).unsafe_store[width=_CERT_LANES](v.slice[_CERT_LANES, offset=_CERT_LANES * i]().cast[DType.uint32]())
             var s = matrix.starts.unsafe_get(q)
             var n = matrix.starts.unsafe_get(q + 1) - s
-            budget.charge(UInt64(_LANES * n))
-            var factor = v.eq(0).select(_Lanes(0), primes.primes - v).cast[DType.uint32]()
-            lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(s), values[matrix.sources.unsafe_get(q)].unsafe_ptr(), n, factor, primes.squares, 1)
+            budget.charge(UInt64(S * n))
+            var factors = v.eq(0).select(SIMD[DType.uint64, S](0), primes - v).cast[DType.uint32]()
+            var g = matrix.sources.unsafe_get(q)
+            _lanes_add[B, True](data, marks, matrix.entries.unsafe_ptr().unsafe_offset(s), images.values[batch][g].unsafe_ptr(), images.values[batch + min(1, B - 1)][g].unsafe_ptr(), images.values[batch + min(2, B - 1)][g].unsafe_ptr(), images.values[batch + min(3, B - 1)][g].unsafe_ptr(), n, factors, squares, 1)
         c = lanes.next_marked(c + 1)
     return True
 
@@ -2317,8 +2399,8 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
     sum (n_c / D) R_c. Nothing else is assumed, so a wrong reconstruction can
     only fail.
 
-    Primes come in batches of `_LANES`, the first alone and later ones two
-    at a time; an attempt follows each batch from `first` primes on. Gives
+    Primes come in batches of `_CERT_LANES`, swept one, two or `_SWEEP` at a
+    time (see the loop); an attempt follows each batch from `first` primes on. Gives
     up after `images.limit` primes, or, when `allowance` is positive, after
     the attempt that brings its cost past it. Its cost, by `_modular_cost`,
     is added to `cost`; every decision follows that count, so a route never
@@ -2342,25 +2424,34 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
     var batch = 0
     var proved = 0
     var own = 0
-    while _LANES * batch < limit:
-        # The first batch alone, which often suffices; later ones two at a time.
-        var two = batch > 0 and _LANES * (batch + 2) <= limit
-        images.ensure(batch + 1 if two else batch, coefficients, budget)
+    while _CERT_LANES * batch < limit:
+        # Batches per sweep: as many of the batches still expected before the
+        # first attempt as fit in one sweep; past it, two at a time, after a
+        # first batch alone when that may suffice.
+        var room = (limit - _CERT_LANES * batch) // _CERT_LANES
+        var want = (first - _CERT_LANES * batch + _CERT_LANES - 1) // _CERT_LANES
+        var width = _SWEEP if want >= _SWEEP else (2 if want >= 2 else (1 if batch == 0 else 2))
+        while width > room:
+            width //= 2
+        images.ensure(batch + width - 1, coefficients, budget)
         var t0 = _clock()
         var units = budget.remaining()
         var passed: Bool
-        if two:
-            passed = _lane_pass_two(lanes, matrix, pivot, images.values[batch], images.values[batch + 1], images.batches[batch], images.batches[batch + 1], a, b, batch, limit, budget)
+        if width == 4:
+            passed = _lane_sweep[4](lanes, matrix, pivot, images, a, b, batch, budget)
+        elif width == 2:
+            passed = _lane_sweep[2](lanes, matrix, pivot, images, a, b, batch, budget)
         else:
-            passed = _lane_pass(lanes, matrix, pivot, images.values[batch], images.batches[batch], a, b, batch, limit, budget)
+            passed = _lane_sweep[1](lanes, matrix, pivot, images, a, b, batch, budget)
         counts[0] += _clock() - t0
         own += _modular_cost(Int(units - budget.remaining()), 0, 0)
         if not passed:
+            lanes.forget()
             cost += own
             return 0
-        for _ in range(2 if two else 1):
+        for _ in range(width):
             batch += 1
-            var k = _LANES * batch
+            var k = _CERT_LANES * batch
             if k < first:
                 continue
             var attempt = batch - 1
@@ -2376,7 +2467,7 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
                 break
         if proved > 0 or (allowance > 0 and own > allowance):
             break
-    lanes.clear(_LANES)
+    lanes.forget()
     cost += own
     return proved
 
@@ -2385,10 +2476,9 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
     """Whether the recorded residues modulo the attempt's primes prove the standard representation (see `_modular_pair`)."""
     ref basis = images.bases[attempt]
     var k = len(basis.weights)
-    var limit = images.limit
     var nslots = len(lanes.columns)
     # r_c = L v_c / lc(g_c) modulo p, with D folded in: D r_c. The factors
-    # are L D modulo each prime, `_LANES` at a time.
+    # are L D modulo each prime, `_CERT_LANES` at a time.
     var factors = List[UInt64](length=k, fill=0)
     var multiple_limbs = _limbs_of(multiple)
     for i in range(k):
@@ -2404,12 +2494,12 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
     var log = 0
     while (1 << log) < nslots + 1:
         log += 1
-    # The values of up to `_LANES` slots at a time, slot - j in lane j, under
+    # The values of up to `_CERT_LANES` slots at a time, slot - j in lane j, under
     # the factors of their time; a new denominator voids the rest.
     var n = basis.limbs + 2
-    var block = List[UInt64](length=_LANES * k, fill=0)
-    var block_values = List[UInt64](length=_LANES * n, fill=0)
-    var sums = List[UInt64](length=_LANES * (2 * basis.limbs + 2), fill=0)
+    var block = List[UInt64](length=_CERT_LANES * k, fill=0)
+    var block_values = List[UInt64](length=_CERT_LANES * n, fill=0)
+    var sums = List[UInt64](length=_CERT_LANES * (2 * basis.limbs + 2), fill=0)
     var euclid = _Euclid(basis.limbs, budget)
     var half_q = List[UInt64](length=basis.limbs, fill=0)
     for l in range(basis.limbs):
@@ -2438,23 +2528,23 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
         var g = elements.unsafe_get(slot)
         if top - slot >= ready:
             top = slot
-            ready = min(_LANES, slot + 1)
+            ready = min(_CERT_LANES, slot + 1)
             for j in range(ready):
                 var h = elements.unsafe_get(slot - j)
-                var from_ = lanes.residues.unsafe_ptr().unsafe_offset((slot - j) * limit)
+
                 var scale = combined.unsafe_ptr().unsafe_offset(h * k)
                 if stamps.unsafe_get(h) != version:
                     stamps.unsafe_get(h) = version
-                    for batch in range(k // _LANES):
-                        var inverse = images.inverses[batch].unsafe_ptr().unsafe_offset(_LANES * h).unsafe_load[width=_LANES]()
-                        var f = factors.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_load[width=_LANES]()
-                        scale.unsafe_offset(_LANES * batch).unsafe_store[width=_LANES](_mod_lanes(f * inverse, images.batches[batch]))
-                for batch in range(k // _LANES):
+                    for batch in range(k // _CERT_LANES):
+                        var inverse = images.inverses[batch].unsafe_ptr().unsafe_offset(_CERT_LANES * h).unsafe_load[width=_CERT_LANES]()
+                        var f = factors.unsafe_ptr().unsafe_offset(_CERT_LANES * batch).unsafe_load[width=_CERT_LANES]()
+                        scale.unsafe_offset(_CERT_LANES * batch).unsafe_store[width=_CERT_LANES](_cert_mod(f * inverse, images.batches[batch]))
+                for batch in range(k // _CERT_LANES):
                     ref primes = images.batches[batch]
-                    var v = from_.unsafe_offset(_LANES * batch).unsafe_load[width=_LANES]().cast[DType.uint64]()
-                    var y = _mod_lanes(v * scale.unsafe_offset(_LANES * batch).unsafe_load[width=_LANES](), primes)
-                    comptime for l in range(_LANES):
-                        block.unsafe_get(_LANES * (_LANES * batch + l) + j) = y[l]
+                    var v = lanes.residues[batch].unsafe_ptr().unsafe_offset(_CERT_LANES * (slot - j)).unsafe_load[width=_CERT_LANES]().cast[DType.uint64]()
+                    var y = _cert_mod(v * scale.unsafe_offset(_CERT_LANES * batch).unsafe_load[width=_CERT_LANES](), primes)
+                    comptime for l in range(_CERT_LANES):
+                        block.unsafe_get(_CERT_LANES * (_CERT_LANES * batch + l) + j) = y[l]
             basis.values(block, block_values, sums)
         # Charged per slot, as one `value` each.
         budget.charge(UInt64(_product(k, basis.limbs)))
@@ -2483,6 +2573,16 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
             for l in range(n):
                 work.unsafe_get(l) = x.unsafe_offset(l).unsafe_load()
             var found = euclid.fraction(work, basis.product, half)
+            # n_c = D r_c tends to be longer than the denominator's new factor:
+            # retry with room for a longer numerator.
+            var share = 4
+            while not found and share <= 8:
+                var den = basis.bits // share
+                for l in range(n):
+                    work.unsafe_get(l) = x.unsafe_offset(l).unsafe_load()
+                budget.charge(UInt64(_product(basis.limbs, basis.limbs)))
+                found = euclid.fraction(work, basis.product, basis.bits - 2 - den, den)
+                share *= 2
             counts[5] += _clock() - t0
             if not found:
                 return False
@@ -2621,8 +2721,12 @@ struct _Euclid(Movable):
         self.divisor = List[UInt64](length=self.n, fill=0)
         self.quotient = List[UInt64](length=self.n + 1, fill=0)
 
-    def fraction(mut self, x: List[UInt64], modulus: List[UInt64], bits: Int) -> Optional[Tuple[Integer, Integer]]:
-        """As `_euclid(x, modulus, bits)`, for 0 <= x < modulus, both given in limbs."""
+    def fraction(mut self, x: List[UInt64], modulus: List[UInt64], bits: Int, den_bits: Int = -1) -> Optional[Tuple[Integer, Integer]]:
+        """As `_euclid(x, modulus, bits)`, for 0 <= x < modulus, both given in limbs.
+
+        With `den_bits` nonnegative, the numerator stays below 2^bits and the
+        denominator below 2^den_bits instead.
+        """
         var n = self.n
         for l in range(n):
             self.r0.unsafe_get(l) = modulus[l] if l < len(modulus) else UInt64(0)
@@ -2676,7 +2780,7 @@ struct _Euclid(Movable):
             for l in range(n):
                 self.next1.unsafe_get(l) = self.t1.unsafe_get(l)
         var length = _bits_at(self.next1.unsafe_ptr(), n)
-        if length == 0 or length > bits:
+        if length == 0 or length > (den_bits if den_bits >= 0 else bits):
             return None
         var bytes = List[UInt8](length=8 * n, fill=0)
         for l in range(n):
