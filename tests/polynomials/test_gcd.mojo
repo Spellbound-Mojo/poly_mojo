@@ -181,6 +181,39 @@ def division_cases[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
     c.check(Bool(quotient) and quotient.value().mul(x, work) == wide, "wide exponents fall back to the generic division")
 
 
+def shortcut_cases(mut c: Checker) raises:
+    """Deflated gcds and the one-image proof of a constant gcd in the main variable."""
+    var work = Budget()
+    var order = MonomialOrder(MonomialOrder.GREVLEX, [0, 1, 2], work)
+    var one = SparsePoly[ZZ].constant(ZZ.one(NoContext()), order, work)
+    var two = one.add(one, work)
+    var x = SparsePoly[ZZ].variable(0, order, NoContext(), work)
+    var y = SparsePoly[ZZ].variable(1, order, NoContext(), work)
+    var z = SparsePoly[ZZ].variable(2, order, NoContext(), work)
+    # Every exponent of x is even and every exponent of y a multiple of three.
+    var x2 = x.pow(2, work)
+    var y3 = y.pow(3, work)
+    var a = x2.add(y3, work).add(one, work)
+    var b = x2.sub(y3.scale(ZZ(Integer(3)), work), work).add(two, work)
+    var d = x2.mul(y3, work).sub(two, work)
+    var common = a.mul(a, work).scale(ZZ(Integer(6)), work)
+    var got = gcd_value(common.mul(b, work).scale(ZZ(Integer(5)), work), common.mul(d, work).scale(ZZ(Integer(4)), work), work)
+    c.check(got == common, "deflated gcd inflates back with its content")
+    # Mixed: z is not deflatable, x is.
+    var e = x2.mul(z, work).add(z.pow(3, work), work).add(one, work)
+    c.check(gcd_value(e.mul(a, work), e.mul(b, work), work) == e, "partial deflation")
+    # Coprime in x with a shared content in y and z: the content is the gcd.
+    var content = y.add(z, work).add(one, work)
+    var f = content.mul(x.mul(y, work).add(z, work).add(two, work), work)
+    var h = content.mul(x.pow(2, work).sub(y.mul(z, work), work), work).scale(ZZ(Integer(-3)), work)
+    c.check(gcd_value(f, h, work) == content, "constant image gcd leaves the content gcd")
+    # lc_x(f) = y - 2 vanishes at the first point y = 2, so the test must move on.
+    var g = y.sub(two, work).mul(x.pow(3, work), work).add(z, work).add(one, work)
+    var k = x.pow(2, work).add(y, work)
+    c.check(gcd_value(g, k, work) == one, "vanishing leading coefficient at the first point")
+    c.check(gcd_value(g.mul(k, work), k.mul(x.add(z, work), work), work) == k, "planted gcd after an unlucky point")
+
+
 def main() raises:
     var c = Checker("gcd")
     var work = Budget()
@@ -229,4 +262,5 @@ def main() raises:
     division_cases[ZZ](NoContext(), c)
     division_cases[QQ](NoContext(), c)
     division_cases[ModInt](Modulus(101, work), c)
+    shortcut_cases(c)
     c.finish()

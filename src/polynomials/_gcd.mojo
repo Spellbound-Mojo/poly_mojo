@@ -12,6 +12,7 @@ from ._views import _is_unit
 from ._tower import _split, _one, _zero, _constant, _variables, _exact_poly
 from ._prs import _prs
 from ._univariate_modular import _GcdSearch, _next_gcd_candidate, _univariate_gcd
+from ._multivariate_gcd import _deflation, _deflates, _scaled, _image_coprime
 from .primes import prime, _residue, _merge_residue, _symmetric
 
 
@@ -100,6 +101,14 @@ def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budge
             var fd = DensePoly[ZZ].from_sparse(rebind[SparsePoly[ZZ]](f), budget, variable=variable)
             var hd = DensePoly[ZZ].from_sparse(rebind[SparsePoly[ZZ]](h), budget, variable=variable)
             return rebind_var[SparsePoly[C]](_univariate_gcd(fd, hd, budget).to_sparse(f.order, budget))
+    comptime if C == ZZ:
+        if len(variables) > 1:
+            var exponents = _deflation(f, h, variables, budget)
+            if _deflates(exponents):
+                var deflated = _gcd_value(_scaled(f, variables, exponents, False, budget), _scaled(h, variables, exponents, False, budget), budget)
+                return _normalized(_scaled(deflated, variables, exponents, True, budget), budget)
+            if _image_coprime(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variable, variables, budget):
+                return _normalized(_gcd_value(_content(f, variable, budget), _content(h, variable, budget), budget), budget)
     var cf = _content(f, variable, budget)
     var ch = _content(h, variable, budget)
     var common = _gcd_value(cf, ch, budget)
