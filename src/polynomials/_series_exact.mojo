@@ -4,15 +4,26 @@ from .coefficient_buffer import _CoefficientView, _view
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
 from ._coefficient_ops import _copy
 from ._toolkit_exact import _ExactOps, _use_newton
-from ._toolkit_ops import _mul_values, _derivative_values
+from ._toolkit_ops import _mul_values, _derivative_values, _values, _divide_values
 from ._series_ops import _log_values, _exp_values, _series_constant, _newton_divide
 from ._ntt import _ntt_middle_product
 
 
 def _exact_log[C: CoefficientField](a: _CoefficientView[C, _], length: Int, context: C.Context, mut budget: Budget) raises PolyError -> List[C]:
-    if _use_newton[C](max(0, length - 1), len(a)):
-        return _log_values[_ExactOps[C], True](_view(a), length, context, budget)
-    return _log_values[_ExactOps[C]](_view(a), length, context, budget)
+    if not _use_newton[C](max(0, length - 1), len(a)):
+        return _log_values[_ExactOps[C]](_view(a), length, context, budget)
+    if length < 1:
+        raise PolyError(PolyErrorKind.DOMAIN, "logarithm needs a known constant coefficient")
+    _series_constant[_ExactOps[C]](_view(a), 1, context, budget)
+    var derivative = _derivative_values[_ExactOps[C]](_view(a), context, budget)
+    var quotient = _exact_divide(_view(derivative), _view(a), length - 1, context, budget)
+    # Every required integer must be invertible, even when its numerator is zero.
+    _allocation[C](length, budget)
+    var result = List[C](capacity=length)
+    result.append(C.zero(context))
+    for k in range(1, length):
+        result.append(_ExactOps[C].apply(quotient[k - 1], _ExactOps[C].integer(k, context, budget), 3, context, budget))
+    return result^
 
 
 def _exact_exp[C: CoefficientField](a: _CoefficientView[C, _], length: Int, context: C.Context, mut budget: Budget) raises PolyError -> List[C]:
@@ -33,6 +44,31 @@ def _middle_values[C: CoefficientField](a: List[C], b: List[C], lo: Int, hi: Int
     for i in range(lo, hi):
         result.append(_copy(low[i], budget) if i < len(low) else C.zero(context))
     return result^
+
+
+def _exact_divide[C: CoefficientField](a: _CoefficientView[C, _], b: _CoefficientView[C, _], length: Int, context: C.Context, mut budget: Budget) raises PolyError -> List[C]:
+    """a / b modulo x^length by Newton inversion; b * g is needed only in its upper half, a middle product."""
+    var known = min(length, 16)
+    var divisor = _values[_ExactOps[C]](_view(b), min(len(b), length), context, budget)
+    var inverse = _divide_values[_ExactOps[C]](_view([C.one(context)]), _view(divisor), known, context, budget)
+    while known < length:
+        var next = _sum(known, min(known, length - known))
+        # b g = 1 + x^known e + O(x^next); the next coefficients are -g e.
+        var e = _middle_values(_values[_ExactOps[C]](_view(divisor), min(len(divisor), next), context, budget), inverse, known, next, context, budget)
+        var correction = _mul_values[_ExactOps[C]](_view(inverse), _view(e), next - known, context, budget)
+        _allocation[C](next - known, budget)
+        inverse.reserve(next)
+        for i in range(next - known):
+            inverse.append(correction[i].neg(budget) if i < len(correction) else C.zero(context))
+        known = next
+    if len(a) == 1 and _ExactOps[C].matches_integer(a[0], 1, context, budget):
+        return inverse^
+    var quotient = _mul_values[_ExactOps[C]](_view(a), _view(inverse), length, context, budget)
+    _allocation[C](length - len(quotient), budget)
+    while len(quotient) < length:
+        budget.charge(1)
+        quotient.append(C.zero(context))
+    return quotient^
 
 
 def _newton_exp[C: CoefficientField](a: _CoefficientView[C, _], length: Int, context: C.Context, mut budget: Budget) raises PolyError -> List[C]:
