@@ -6,7 +6,7 @@ from .algebraic import real_rational, real_root, algebraic_compare, algebraic_si
 from .coefficients import CoefficientRing, CoefficientField, NoContext, Modulus, ZZ, QQ, ModInt
 from .exact_complex import QQi
 from .calculus import derivative_dense, rational_dense, rational_sparse, integrate_dense, integrate_integer_dense, definite_integral, compose_dense, affine_transform, taylor_shift, jet_evaluate, integrate_sparse, integrate_integer_sparse, substitute_many
-from .interpolation import MultipointPlan, interpolate, evaluate_modular, hermite_interpolate, check_interpolation, check_hermite_interpolation
+from .interpolation import MultipointPlan, interpolate, hermite_interpolate, check_interpolation, check_hermite_interpolation
 from .monomial import Monomial, MonomialOrder
 from .sparse import Term, SparsePoly
 from .coefficient_buffer import CoefficientBuffer

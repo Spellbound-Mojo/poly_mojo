@@ -97,7 +97,7 @@ def _remainder(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) 
     return r^
 
 
-struct _Tree(Movable):
+struct _Tree(Copyable, Movable):
     """Levels of node products; level 0 holds x - a_i for Montgomery points a_i."""
     var levels: List[List[List[UInt64]]]
     var points: List[UInt64]
@@ -217,11 +217,11 @@ def _derivative(a: List[UInt64], f: _Field, mut budget: Budget) raises PolyError
     return result^
 
 
-def _interpolate(tree: _Tree, values: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
-    """The polynomial of degree below the point count through (a_i, values[i]); DOMAIN for repeated points."""
+def _inverse_weights(tree: _Tree, f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
+    """1 / M'(a_i) for every point, by one batched inversion; DOMAIN for repeated points."""
     var count = len(tree.points)
     var weights = _evaluate(tree, _derivative(tree.root(), f, budget), f, budget)
-    # One inversion for all weights: prefix products, then unwinding.
+    # Prefix products, one inversion, then unwinding.
     _allocation[UInt64](count, budget)
     var prefix = List[UInt64](capacity=count)
     var running = f.one
@@ -231,17 +231,23 @@ def _interpolate(tree: _Tree, values: List[UInt64], f: _Field, mut budget: Budge
         prefix.append(running)
         running = _mulm(running, weights[i], f)
     var inverse = _invm(running, f, budget)
-    _allocation[List[UInt64]](count, budget)
-    var parts = List[List[UInt64]](capacity=count)
-    for _ in range(count):
-        parts.append(List[UInt64]())
+    var result = List[UInt64](length=count, fill=0)
     for i in range(count - 1, -1, -1):
         budget.charge(1)
-        var w = _mulm(inverse, prefix[i], f)
+        result[i] = _mulm(inverse, prefix[i], f)
         inverse = _mulm(inverse, weights[i], f)
-        var c = _mulm(values[i], w, f)
-        if c:
-            parts[i].append(c)
+    return result^
+
+
+def _interpolate(tree: _Tree, values: List[UInt64], weights: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
+    """The polynomial of degree below the point count through (a_i, values[i]), given the inverse weights."""
+    var count = len(tree.points)
+    _allocation[List[UInt64]](count, budget)
+    var parts = List[List[UInt64]](capacity=count)
+    for i in range(count):
+        budget.charge(1)
+        var c = _mulm(values[i], weights[i], f)
+        parts.append([c] if c else List[UInt64]())
     for level in range(len(tree.levels) - 1):
         ref nodes = tree.levels[level]
         var size = (len(nodes) + 1) // 2

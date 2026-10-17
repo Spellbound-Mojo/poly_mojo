@@ -14,7 +14,7 @@ from ._common import _CoreKind
 from ._interop import _dense_copy
 from polynomials import SparsePoly, gcd as _gcd, gcd_value as _gcd_value, content as _content, primitive_part as _primitive_part, extended_gcd as _extended_gcd, resultant as _resultant, resultant_value as _resultant_value, subresultants as _subresultants, divide_exact as _divide_exact, pseudo_divmod as _pseudo_divmod
 from ._interop import _dense_sparse, _take_dense
-from polynomials import interpolate as _interpolate, hermite_interpolate as _hermite_interpolate, MultipointPlan, evaluate_modular as _evaluate_modular, affine_transform as _affine_transform, taylor_shift as _taylor_shift, jet_evaluate as _jet_evaluate, definite_integral as _definite_integral
+from polynomials import interpolate as _interpolate, hermite_interpolate as _hermite_interpolate, MultipointPlan, affine_transform as _affine_transform, taylor_shift as _taylor_shift, jet_evaluate as _jet_evaluate, definite_integral as _definite_integral
 from ._common import _sequence, _sequence_coefficients, _values_from_core, _data_context, _Nested, _rows
 from polynomials import QQi, factor_gaussian as _factor_gaussian, factor_finite_field as _factor_finite_field
 from polynomials import ZZ, QQ, Factorization, factor_integer as _factor_integer, factor as _factor, squarefree as _squarefree
@@ -1033,7 +1033,7 @@ def evaluate_many[I: Iterable, X: Iterable](values: I, points: X, mut budget: Bu
             ref core = rebind[DensePoly[ModInt]](prepared.value()._core[])
             var values: List[ModInt]
             if len(gathered) >= _TREE_POINTS and core.ring.value > 2 and len(core.coefficients) >= _TREE_POINTS:
-                values = _evaluate_modular(core, gathered, budget)
+                values = MultipointPlan[ModInt].prepare(core.variable, core.ring, gathered, budget).evaluate(core, budget)
             else:
                 values = List[ModInt](capacity=len(gathered))
                 for x in gathered:

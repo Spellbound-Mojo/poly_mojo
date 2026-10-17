@@ -12,6 +12,8 @@ from .coefficients import ZZ, NoContext
 from ._coefficient_ops import _gcd_coefficient, _quotient, _exact
 from .dense import DensePoly
 from .primes import prime, _residue
+from .coefficient_buffer import _view
+from ._ntt import _ntt_divide_exact
 from ._nmod_euclid import _Field, _gcd_words, _resultant_words, _trim_words
 
 
@@ -194,12 +196,16 @@ def _divide_scalar(f: DensePoly[ZZ], c: ZZ, mut budget: Budget) raises PolyError
 
 
 def _dense_divides(f: DensePoly[ZZ], g: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Bool:
-    """Whether g divides f over the integers, by dense exact long division."""
+    """Whether g divides f over the integers, by transform division when it decides, else dense exact long division."""
     if f.is_zero():
         return True
     var n = g.degree()
     if f.degree() < n:
         return False
+    if n >= 31:
+        var fast = _ntt_divide_exact(_view(f.coefficients), _view(g.coefficients), budget)
+        if fast:
+            return Bool(fast.value())
     ref lc = g.coefficients[n]
     var r = f.coefficients.to_list(budget)
     for k in range(f.degree(), n - 1, -1):
