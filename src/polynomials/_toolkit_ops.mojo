@@ -1,6 +1,12 @@
 """Private arithmetic schedules shared by exact and numerical coefficient vectors."""
 from .coefficient_buffer import _CoefficientView, _view
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
+from .coefficients import ModInt, Modulus
+from ._nmod import _field, _to, _from
+from ._multipoint import _compose_series
+
+comptime _NATIVE_COMPOSE = 16
+"""Truncation order from which prime field compositions use native Brent-Kung steps."""
 
 
 trait _ScalarOps:
@@ -72,6 +78,23 @@ def _compose_values[O: _ScalarOps, optimized: Bool = True](outer: _CoefficientVi
     var result = List[O.Scalar]()
     if not length:
         return result^
+    comptime if O.Scalar == ModInt and optimized:
+        ref ring = rebind[Modulus](context)
+        if length >= _NATIVE_COMPOSE and len(outer) >= _NATIVE_COMPOSE and ring.value > 2:
+            var field = _field(ring.value)
+            _allocation[UInt64](len(outer) + len(inner), budget)
+            var f = List[UInt64](capacity=len(outer))
+            for i in range(len(outer)):
+                f.append(_to(rebind[ModInt](outer[i]).value, field))
+            var g = List[UInt64](capacity=len(inner))
+            for i in range(len(inner)):
+                g.append(_to(rebind[ModInt](inner[i]).value, field))
+            var values = _compose_series(f, g, length, field, budget)
+            _allocation[O.Scalar](len(values), budget)
+            result.reserve(len(values))
+            for v in values:
+                result.append(rebind_var[O.Scalar](ModInt(_from(v, field), ring)))
+            return result^
     for i in range(len(outer) - 1, -1, -1):
         budget.charge(1)
         comptime if optimized:
