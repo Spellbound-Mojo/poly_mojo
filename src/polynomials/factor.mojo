@@ -4,7 +4,7 @@ from .coefficients import CoefficientRing, ZZ, QQ, ModInt, Modulus, NoContext, _
 from .dense import DensePoly
 from ._subsets import _Recombination
 from ._coefficient_ops import _copy as _copy_coefficient
-from .errors import Budget, PolyError, _allocation, _sum
+from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum
 from .certificates import Factorization
 from .squarefree import squarefree
 from .finite_field import factor_mod_p
@@ -15,6 +15,9 @@ from ._coefficient_ops import _quotient
 from ._hensel import _HenselState, _hensel, _truncate, _trial_divide
 from ._integer_ops import _content, _primitive, _divide_scalar
 from ._lattice_factor import _van_hoeij_lifted
+from ._gcd import _modular_primitive
+from .monomial import MonomialOrder
+from . import _nmod
 
 
 def _bound(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> ZZ:
@@ -165,6 +168,77 @@ def _sort[C: CoefficientRing](mut factors: List[Tuple[DensePoly[C], Int]], templ
         swap(current, factors[j])
 
 
+def _modular_squarefree(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Bool:
+    # A prime that keeps the degree and leaves f coprime to f' proves f
+    # squarefree over QQ: a repeated primitive factor would survive reduction.
+    for index in range(2):
+        budget.charge(1)
+        var p = prime(index, budget)
+        if _residue(f.coefficients[f.degree()].value, p, budget) == 0:
+            continue
+        var field = _nmod._field(p)
+        _allocation[UInt64](len(f.coefficients), budget)
+        var image = List[UInt64](capacity=len(f.coefficients))
+        for i in range(len(f.coefficients)):
+            image.append(_nmod._to(_residue(f.coefficients[i].value, p, budget), field))
+        if len(_nmod._gcd(image, _nmod._derivative(image, field, budget), field, budget)) == 1:
+            return True
+    return False
+
+
+def _integer_gcd(a: DensePoly[ZZ], b: DensePoly[ZZ], mut budget: Budget) raises PolyError -> DensePoly[ZZ]:
+    # The primitive gcd with positive leading coefficient, by modular images.
+    if b.is_zero():
+        return _primitive(a, budget)
+    if a.is_zero():
+        return _primitive(b, budget)
+    if a.degree() <= 0 or b.degree() <= 0:
+        return _constant(a, ZZ.one(NoContext()), budget)
+    var order = MonomialOrder()
+    var g = _modular_primitive(_primitive(a, budget).to_sparse(order, budget), _primitive(b, budget).to_sparse(order, budget), a.variable, budget)
+    return _primitive(DensePoly[ZZ].from_sparse(g, budget, variable=a.variable), budget)
+
+
+def _exact_integer(a: DensePoly[ZZ], b: DensePoly[ZZ], mut budget: Budget) raises PolyError -> DensePoly[ZZ]:
+    var quotient = _trial_divide(a, b, budget)
+    if not quotient:
+        raise PolyError(PolyErrorKind.DOMAIN, "inexact integer squarefree quotient")
+    return quotient.take()
+
+
+def _integer_squarefree(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> List[Tuple[DensePoly[ZZ], Int]]:
+    """Primitive squarefree blocks of a primitive polynomial by Yun's recurrence over ZZ.
+
+    By Gauss's lemma every quotient below is exact over ZZ, so modular gcds
+    replace rational remainder sequences.
+    """
+    var blocks = List[Tuple[DensePoly[ZZ], Int]]()
+    if f.degree() <= 0:
+        return blocks^
+    _allocation[Tuple[DensePoly[ZZ], Int]](1, budget)
+    if _modular_squarefree(f, budget):
+        blocks.append((_primitive(f, budget), 1))
+        return blocks^
+    var derivative = _derivative(f, budget)
+    var common = _integer_gcd(f, derivative, budget)
+    var b = _exact_integer(f, common, budget)
+    var c = _exact_integer(derivative, common, budget)
+    var multiplicity = 1
+    while b.degree() > 0:
+        budget.charge(1)
+        # Exactly b = prod_{j>=i} a_j and c = b * sum_{j>=i} (j-i+1) a_j'/a_j;
+        # b and c must share their scale, so neither is normalized.
+        var d = c.sub(_derivative(b, budget), budget)
+        var a = _integer_gcd(b, d, budget)
+        if a.degree() > 0:
+            _allocation[Tuple[DensePoly[ZZ], Int]](1, budget)
+            blocks.append((_copy(a, budget), multiplicity))
+        b = _exact_integer(b, a, budget)
+        c = _exact_integer(d, a, budget)
+        multiplicity = _sum(multiplicity, 1)
+    return blocks^
+
+
 def factor_integer(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Factorization[ZZ]:
     """Factor an integer polynomial into primitive factors with positive leading coefficients.
 
@@ -184,11 +258,10 @@ def factor_integer(f: DensePoly[ZZ], mut budget: Budget) raises PolyError -> Fac
     if f.degree() <= 0:
         return Factorization[ZZ](unit^, factors^)
     var primitive = _divide_scalar(f, unit, budget)
-    var blocks = squarefree(_rational(primitive, budget), budget)
-    for entry in blocks.factors:
+    var blocks = _integer_squarefree(primitive, budget)
+    for entry in blocks:
         budget.charge(1)
-        var block = _primitive(_integer(entry[0], budget), budget)
-        var irreducibles = _squarefree_factors(block, budget)
+        var irreducibles = _squarefree_factors(entry[0], budget)
         for i in range(len(irreducibles)):
             budget.charge(1)
             _allocation[Tuple[DensePoly[ZZ], Int]](1, budget)

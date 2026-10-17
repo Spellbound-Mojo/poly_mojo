@@ -45,6 +45,7 @@ algorithm in the packed or sparse engine.
 """
 from std.bit import count_leading_zeros
 from std.math import iota, max, min
+from std.sys.intrinsics import prefetch, PrefetchOptions
 from .coefficients import CoefficientRing, ModInt, Modulus
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product, _sum
 from .monomial import MonomialOrder
@@ -673,6 +674,9 @@ comptime _BLOCK = 16
 
 comptime _Block = SIMD[DType.uint64, _BLOCK]
 
+comptime _AHEAD = 8
+"""Entries ahead of the update that `_axpy_block` prefetches the block for."""
+
 
 struct _Field(Copyable, Movable):
     """A prime with the constants that reduce modulo it, in every lane."""
@@ -717,13 +721,28 @@ def _axpy_block[small: Bool](data: Pointer[mut=True, UInt64, _], columns: Pointe
     selected, which then multiply all 64 bits.
     """
     var factor = factors.cast[DType.uint64]()
-    for k in range(1, n):
-        var at = data.unsafe_offset(_BLOCK * Int(columns.unsafe_offset(k).unsafe_load()))
-        var x = at.unsafe_load[width=_BLOCK]() + factor * _Block(UInt64(values.unsafe_offset(k).unsafe_load()))
-        comptime if small:
-            at.unsafe_store[width=_BLOCK](x)
-        else:
-            at.unsafe_store[width=_BLOCK](x.ge(square).select(x - square, x))
+    var k = 1
+    while k + _AHEAD < n:
+        # The block is far larger than the cache, and its columns follow no
+        # pattern the hardware could prefetch; the row knows them ahead.
+        var ahead = data.unsafe_offset(_BLOCK * Int(columns.unsafe_offset(k + _AHEAD).unsafe_load()))
+        comptime for line in range(0, _BLOCK, 8):
+            prefetch[PrefetchOptions().for_write().high_locality()](ahead.unsafe_offset(line))
+        _update_block[small](data, columns, values, k, factor, square)
+        k += 1
+    while k < n:
+        _update_block[small](data, columns, values, k, factor, square)
+        k += 1
+
+
+@always_inline
+def _update_block[small: Bool](data: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], k: Int, factor: _Block, square: _Block):
+    var at = data.unsafe_offset(_BLOCK * Int(columns.unsafe_offset(k).unsafe_load()))
+    var x = at.unsafe_load[width=_BLOCK]() + factor * _Block(UInt64(values.unsafe_offset(k).unsafe_load()))
+    comptime if small:
+        at.unsafe_store[width=_BLOCK](x)
+    else:
+        at.unsafe_store[width=_BLOCK](x.ge(square).select(x - square, x))
 
 
 struct _Lane(Movable):
@@ -843,7 +862,8 @@ struct _Step[W: Int](Copyable, Movable):
     reduced. `supports` lists each result's columns, leading column first, in
     the order the results are inserted, which `inserted` gives as positions
     in the order they come when it is not empty; the final matrix also keeps
-    their monomials.
+    the monomial of each column, which `monomial` reads through the
+    supports.
     """
     var final: Bool
     var ncols: Int
@@ -855,7 +875,7 @@ struct _Step[W: Int](Copyable, Movable):
     var leads: List[Int32]
     var supports: List[List[Int32]]
     var inserted: List[Int]
-    var monomials: List[List[_Packed[Self.W]]]
+    var columns: List[_Packed[Self.W]]
 
     def __init__(out self, final: Bool, ncols: Int):
         self.final = final
@@ -868,7 +888,12 @@ struct _Step[W: Int](Copyable, Movable):
         self.leads = List[Int32]()
         self.supports = List[List[Int32]]()
         self.inserted = List[Int]()
-        self.monomials = List[List[_Packed[Self.W]]]()
+        self.columns = List[_Packed[Self.W]]()
+
+    @always_inline
+    def monomial(self, r: Int, k: Int) -> _Packed[Self.W]:
+        """The monomial of entry k of result r of the final matrix."""
+        return self.columns[Int(self.supports[r][k])]
 
     def keep(mut self, matrix: _Matrix[Self.W], r: Int, mut budget: Budget) raises PolyError:
         """Append matrix row r."""
@@ -1137,11 +1162,10 @@ def _interreduce[W: Int, record: Bool](mut engine: _Engine[ModInt, W, False], st
         step.pivots = nrows
         step.basis = basis_rows
         step.supports = _supports(found, rows, budget)
-        for r in range(basis_rows):
-            var monomials = List[_Packed[W]]()
-            for k in range(found.starts[r], found.starts[r + 1]):
-                monomials.append(matrix.columns.monomials[order[Int(found.columns[k])]])
-            step.monomials.append(monomials^)
+        _allocation[_Packed[W]](ncols, budget)
+        step.columns = List[_Packed[W]](capacity=ncols)
+        for c in range(ncols):
+            step.columns.append(matrix.columns.monomials[order[c]])
         trace.steps.append(step^)
     var basis = List[List[_Term[ModInt, W]]](capacity=basis_rows)
     for r in range(basis_rows):
@@ -1284,11 +1308,11 @@ def _f4_replay[W: Int](trace: _Trace[W], var generators: List[List[_Term[ModInt,
         var basis = List[List[_Term[ModInt, W]]](capacity=step.basis)
         for r in range(step.basis):
             ref residues = values[first + r]
-            ref monomials = step.monomials[r]
-            var terms = List[_Term[ModInt, W]](capacity=len(monomials))
-            for k in range(len(monomials) - 1, -1, -1):
+            var m = len(step.supports[r])
+            var terms = List[_Term[ModInt, W]](capacity=m)
+            for k in range(m - 1, -1, -1):
                 if residues[k] != 0:
-                    terms.append(_Term[ModInt, W](monomials[k], ModInt(UInt64(residues[k]), ring)))
+                    terms.append(_Term[ModInt, W](step.monomial(r, k), ModInt(UInt64(residues[k]), ring)))
             basis.append(terms^)
         return basis^
     return None
@@ -1355,18 +1379,22 @@ def _mod_lanes(v: _Lanes, lanes: _Primes) -> _Lanes:
     return r.ge(lanes.primes).select(r - lanes.primes, r)
 
 
-@always_inline
+@no_inline
 def _axpy_lanes(data: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factor: SIMD[DType.uint32, _LANES], squares: _Lanes):
     """Add factor times a row, after its leading entry, to every lane of the dense accumulator.
 
     Both factors widen from 32 bits, so each product is one 32 by 32 bit
-    multiplication.
+    multiplication. Inlined, the widening is lost before instructions are
+    selected, which then multiply all 64 bits (as for `_axpy_block`).
     """
     var f = factor.cast[DType.uint64]()
     for k in range(1, n):
         var at = data.unsafe_offset(_LANES * Int(columns.unsafe_offset(k).unsafe_load()))
         var x = at.unsafe_load[width=_LANES]() + f * values.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
-        at.unsafe_store[width=_LANES](x.ge(squares).select(x - squares, x))
+        # Below 2^63, so the sign of x - p^2 tells, which a signed comparison
+        # reads in one instruction where an unsigned one takes several.
+        var y = x - squares
+        at.unsafe_store[width=_LANES](y.cast[DType.int64]().lt(0).select(x, y))
 
 
 def _scatter_lanes[W: Int](mut dense: List[UInt64], step: _Step[W], values: List[List[UInt32]], row: Int, skip: Int):
@@ -1415,8 +1443,9 @@ def _reduce_lanes[W: Int](mut dense: List[UInt64], ncols: Int, start: Int, pivot
             _axpy_lanes(data, step.entries.unsafe_ptr().unsafe_offset(s), values[step.sources.unsafe_get(q)].unsafe_ptr(), n, factor, lanes.squares)
         else:
             found.columns.append(Int32(c))
-            for l in range(_LANES):
-                found.values.append(UInt32(v[l]))
+            var end = len(found.values)
+            found.values.resize(end + _LANES, 0)
+            found.values.unsafe_ptr().unsafe_offset(end).unsafe_store[width=_LANES](v.cast[DType.uint32]())
 
 
 def _eliminate_lanes[W: Int](step: _Step[W], mut dense: List[UInt64], mut pivot: List[Int], values: List[List[UInt32]], mut found: _LaneRows, mut lanes: _Primes, mut budget: Budget) raises PolyError -> List[Int]:
@@ -1544,13 +1573,13 @@ def _lane_basis[W: Int](trace: _Trace[W], bases: _LaneBases, lane: Int, ring: Mo
     var basis = List[List[_Term[ModInt, W]]](capacity=step.basis)
     for r in range(step.basis):
         ref residues = bases.values[r]
-        ref monomials = step.monomials[r]
-        _allocation[_Term[ModInt, W]](len(monomials), budget)
-        var terms = List[_Term[ModInt, W]](capacity=len(monomials))
-        for k in range(len(monomials) - 1, -1, -1):
+        var m = len(step.supports[r])
+        _allocation[_Term[ModInt, W]](m, budget)
+        var terms = List[_Term[ModInt, W]](capacity=m)
+        for k in range(m - 1, -1, -1):
             var residue = residues[_LANES * k + lane]
             if residue != 0:
-                terms.append(_Term[ModInt, W](monomials[k], ModInt(UInt64(residue), ring)))
+                terms.append(_Term[ModInt, W](step.monomial(r, k), ModInt(UInt64(residue), ring)))
         basis.append(terms^)
     return basis^
 

@@ -1,11 +1,42 @@
 """Root refinement reuses certified cells and rejects stale or forged results."""
 from apn_mojo import Rational, Ball
-from polynomials import Budget, QQ, NoContext, DensePoly, NumericOptions, PolyErrorKind, real_roots_exact, complex_roots_exact, refine_real_roots_exact, refine_complex_roots_exact, check_real_roots_exact, check_complex_roots_exact, NumericDensePoly, BallDomain, real_roots_numeric, refine_real_roots_numeric, check_real_roots_numeric
+from polynomials import Budget, QQ, NoContext, DensePoly, NumericOptions, PolyErrorKind, sturm_sequence, sign_changes, real_roots_exact, complex_roots_exact, refine_real_roots_exact, refine_complex_roots_exact, check_real_roots_exact, check_complex_roots_exact, NumericDensePoly, BallDomain, real_roots_numeric, refine_real_roots_numeric, check_real_roots_numeric
 from support.check import Checker
+
+
+def deep_refinement(mut c: Checker) raises:
+    # Single-root cells split by an enclosure of their root; every count must
+    # still be the Sturm count of its cell, including repeated roots, dyadic
+    # rational roots on the bisection grid, and nearly coincident roots.
+    var work = Budget()
+    var cases = List[List[QQ]]()
+    # (x - 1/2)^3 (x^2 - 2) (x + 3)
+    cases.append([QQ(Rational(3, 4)), QQ(Rational(-17, 4)), QQ(Rational(57, 8)), QQ(Rational(-7, 8)), QQ(Rational(-23, 4)), QQ(Rational(3, 2)), QQ(Rational(1))])
+    # (x - 1)(x - 1 - 2^-60) (x + 5/3)
+    var close = Rational(1) + Rational(1, 1 << 60)
+    var p0 = Rational(5, 3) * close
+    var p1 = Rational(5, 3) * (Rational(-1) - close) + close
+    var p2 = Rational(5, 3) - Rational(1) - close
+    cases.append([QQ(p0^), QQ(p1^), QQ(p2^), QQ(Rational(1))])
+    for k in range(len(cases)):
+        var f = DensePoly[QQ].from_coefficients(0, NoContext(), cases[k].copy(), work)
+        var coarse = NumericOptions(absolute_bits=1, max_subdivisions=1 << 20)
+        var deep = NumericOptions(absolute_bits=200, max_subdivisions=1 << 20)
+        var cover = real_roots_exact(f, coarse, work)
+        var refined = refine_real_roots_exact(f, cover, coarse, deep, work, complete_only=True)
+        c.check(check_real_roots_exact(f, refined, deep, work), String("deep refinement checks ", k))
+        var sequence = sturm_sequence(f, work)
+        var counted = 0
+        for cell in refined.cells:
+            var count = sign_changes(sequence, cell.interval.real_low, work) - sign_changes(sequence, cell.interval.real_high, work)
+            c.check(count == cell.count, String("deep refinement cell count is its Sturm count ", k))
+            counted += cell.count
+        c.check(counted == (4 if k == 0 else 3), String("every distinct root covered ", k))
 
 
 def main() raises:
     var c = Checker("root_refinement")
+    deep_refinement(c)
     var work = Budget()
     var f = DensePoly[QQ].from_coefficients(0, NoContext(), [QQ(Rational(-2)), QQ(Rational(0)), QQ(Rational(1))], work)
     var coarse = NumericOptions(absolute_bits=1, max_subdivisions=2)
