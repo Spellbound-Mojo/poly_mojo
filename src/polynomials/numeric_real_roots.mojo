@@ -357,6 +357,24 @@ def _check_real(coefficients: List[NumericBox], result: RealRootResult, options:
         if not _check_root_count_chain(exact.value(), result.sequence.value(), left, bound, total, chain, budget):
             return False
         previous_variations = _integer_variations(chain, result.sequence.value(), left, budget)
+    # With the chain verified, every distinct real root can be enclosed once at
+    # small dyadic points, and each cell's count is checked as the number of
+    # enclosed roots between its endpoints instead of by chain evaluations
+    # at the cell endpoints, which carry the bits of the Cauchy bound.
+    # Covers of a few cells keep direct evaluations, which cost less there
+    # than isolating every root.
+    var enclosed = exact and chain.bounded and len(result.cells) > 32
+    var oracle = Optional[_RootOracle]()
+    var roots = List[_Enclosure]()
+    var previous_index = 0
+    if enclosed:
+        ref sequence = result.sequence.value()
+        oracle = _root_oracle(exact.value(), sequence.polynomials[len(sequence.polynomials) - 1], budget)
+        roots = _isolate_all(oracle.value(), chain, sequence, budget)
+        var start = _locate(oracle.value(), roots, 0, len(roots), bound.neg(budget), budget)
+        if start[1]:
+            return False
+        previous_index = start[0]
     var derivative = _derivative_boxes(coefficients, budget)
     var complete = True
     var accurate = True
@@ -367,10 +385,18 @@ def _check_real(coefficients: List[NumericBox], result: RealRootResult, options:
             return False
         if i and result.cells[i - 1].interval.real_high != cell.interval.real_low:
             return False
-        var next_variations = _check_real_cell(coefficients, derivative, exact, result.sequence, cell, previous_variations, budget, chain)
-        if not next_variations:
-            return False
-        previous_variations = next_variations.value()
+        if enclosed:
+            if cell.method != 0 or len(cell.evaluations):
+                return False
+            var next = _locate(oracle.value(), roots, previous_index, len(roots), cell.interval.real_high, budget)
+            if next[1] or cell.count != next[0] - previous_index:
+                return False
+            previous_index = next[0]
+        else:
+            var next_variations = _check_real_cell(coefficients, derivative, exact, result.sequence, cell, previous_variations, budget, chain)
+            if not next_variations:
+                return False
+            previous_variations = next_variations.value()
         complete = complete and cell.count >= 0
         accurate = accurate and (cell.count == 0 or (cell.count > 0 and _accurate(cell.interval, options, budget)))
         isolated = isolated and cell.count >= 0 and cell.count <= 1

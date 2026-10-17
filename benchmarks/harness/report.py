@@ -230,6 +230,9 @@ def write_report(folder):
     issues = agreement(records)
     if records and records[0].get('family') == 'streaming':
         return streaming_report(records, env, folder)
+    if records and records[0].get('family') == 'roots':
+        from .real_roots import report as roots_report
+        return roots_report(records, env, folder)
     if records and records[0].get('family') == 'gcd':
         from .gcd import report as gcd_report
         return gcd_report(records, env, folder)

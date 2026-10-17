@@ -343,6 +343,10 @@ struct _IsolationTask(Movable):
     var high: QQ
     var low_variations: Int
     var high_variations: Int
+    var stuck: Int
+    """Bisections in a row that kept every root of the parent."""
+    var grid: Int
+    """Cluster refinement tries a part of 2**grid parts."""
 
 
 def _isolate_all(oracle: _RootOracle, chain: _IntegerChain, sequence: SturmSequence, mut budget: Budget) raises PolyError -> List[_Enclosure]:
@@ -361,11 +365,20 @@ def _isolate_all(oracle: _RootOracle, chain: _IntegerChain, sequence: SturmSeque
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
     var low = bound.neg(budget)
     var tasks = List[_IsolationTask]()
-    tasks.append(_IsolationTask(low.copy(), bound.copy(), _integer_variations(chain, sequence, low, budget), _integer_variations(chain, sequence, bound, budget)))
+    tasks.append(_IsolationTask(low.copy(), bound.copy(), _integer_variations(chain, sequence, low, budget), _integer_variations(chain, sequence, bound, budget), 0, 2))
     while len(tasks):
         budget.charge(1)
         var task = tasks.pop()
         var count = task.low_variations - task.high_variations
+        if count >= 2 and count <= 4 and task.stuck >= 2:
+            # A cluster survived repeated bisection: jump towards it with
+            # quadratic interval refinement, keeping only parts that still
+            # hold every root of the cluster.
+            if _cluster_step(oracle, chain, sequence, task, count, budget):
+                task.grid = min(task.grid * 2, 1 << 20)
+                tasks.append(task^)
+                continue
+            task.grid = max(2, task.grid // 2)
         if count == 0:
             continue
         if count == 1:
@@ -374,9 +387,77 @@ def _isolate_all(oracle: _RootOracle, chain: _IntegerChain, sequence: SturmSeque
             continue
         var m = _nonroot_cut(oracle, task.low, task.high, budget)
         var at = _integer_variations(chain, sequence, m, budget)
-        tasks.append(_IsolationTask(m.copy(), task.high.copy(), at, task.high_variations))
-        tasks.append(_IsolationTask(task.low.copy(), m^, task.low_variations, at))
+        var kept = 1 if at == task.high_variations or at == task.low_variations else 0
+        var stuck = (task.stuck + 1) * kept
+        tasks.append(_IsolationTask(m.copy(), task.high.copy(), at, task.high_variations, stuck, task.grid))
+        tasks.append(_IsolationTask(task.low.copy(), m^, task.low_variations, at, stuck, task.grid))
     return roots^
+
+
+def _derivative(c: List[Integer]) raises -> List[Integer]:
+    var result = List[Integer](capacity=max(0, len(c) - 1))
+    for i in range(1, len(c)):
+        result.append(c[i] * Integer(i))
+    if len(result) == 0:
+        result.append(Integer(0))
+    return result^
+
+
+def _cluster_step(oracle: _RootOracle, chain: _IntegerChain, sequence: SturmSequence, mut task: _IsolationTask, count: Int, mut budget: Budget) raises PolyError -> Bool:
+    # The (count - 1)-th derivative of g has a root near a cluster of count
+    # roots; a Newton step on it from the midpoint picks the part to test.
+    budget.charge(UInt64(len(oracle.g) * count))
+    var a: QQ
+    var b: QQ
+    try:
+        var h = oracle.g.copy()
+        for _ in range(count - 1):
+            h = _derivative(h)
+        var slope_poly = _derivative(h)
+        var width = task.high.value - task.low.value
+        var middle = (task.low.value + task.high.value) / Rational(2)
+        var p = middle.numerator()
+        var q = middle.denominator()
+        var precision = _error_bits(len(h) - 1, p, q) + max(0, _bits(width.denominator()) - _bits(width.numerator())) + task.grid + 64
+        var shift = _power_shift(q)
+        var value = _fixed(h, p, q, shift, precision)
+        var slope = _fixed(slope_poly, p, q, shift, precision)
+        if not slope:
+            return False
+        var guess = middle - Rational(value, slope)
+        var parts = Integer(1) << task.grid
+        var step = width / Rational(parts)
+        var position = (guess - task.low.value) / step
+        var index = position.numerator() // position.denominator()
+        var first = index - Integer(1)
+        var last = index + Integer(2)
+        if first < Integer(0):
+            first = Integer(0)
+        if last > parts:
+            last = parts.copy()
+        if first >= last or (first == Integer(0) and last == parts):
+            return False
+        a = QQ(task.low.value + step * Rational(first))
+        b = QQ(task.low.value + step * Rational(last))
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+    var low_variations = task.low_variations
+    var high_variations = task.high_variations
+    if a.value != task.low.value:
+        if _check_sign(oracle, a.value, budget) == 0:
+            return False
+        low_variations = _integer_variations(chain, sequence, a, budget)
+    if b.value != task.high.value:
+        if _check_sign(oracle, b.value, budget) == 0:
+            return False
+        high_variations = _integer_variations(chain, sequence, b, budget)
+    if low_variations - high_variations != count:
+        return False
+    task.low = a^
+    task.high = b^
+    task.low_variations = low_variations
+    task.high_variations = high_variations
+    return True
 
 
 def _nonroot_cut(oracle: _RootOracle, low: QQ, high: QQ, mut budget: Budget) raises PolyError -> QQ:

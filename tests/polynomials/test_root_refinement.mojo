@@ -33,7 +33,12 @@ def deep_refinement(mut c: Checker) raises:
     # T_9^2: nine double roots clustered towards +-1, and a root at 0.
     var t9 = DensePoly[QQ].from_coefficients(0, NoContext(), [QQ(Rational(0)), QQ(Rational(9)), QQ(Rational(0)), QQ(Rational(-120)), QQ(Rational(0)), QQ(Rational(432)), QQ(Rational(0)), QQ(Rational(-576)), QQ(Rational(0)), QQ(Rational(256))], work)
     cases.append(as_list(t9.mul(t9, work)))
-    var distinct: List[Int] = [4, 3, 12, 9]
+    # x^30 - 2 (100 x - 1)^2: a pair of roots about 10^-32 apart near 1/100.
+    var mignotte = List[QQ]()
+    for i in range(31):
+        mignotte.append(QQ(Rational(-2 if i == 0 else (400 if i == 1 else (-20000 if i == 2 else (1 if i == 30 else 0))))))
+    cases.append(mignotte^)
+    var distinct: List[Int] = [4, 3, 12, 9, 4]
     for k in range(len(cases)):
         var f = DensePoly[QQ].from_coefficients(0, NoContext(), cases[k].copy(), work)
         var coarse = NumericOptions(absolute_bits=1, max_subdivisions=1 << 20)
