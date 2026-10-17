@@ -236,10 +236,12 @@ def _refine_real_cells_to[S: RealRootSink](coefficients: List[NumericBox], deriv
         var known = variations.pop()
         var enclosed = enclosures.pop()
         var span = ranges.pop()
-        var enough = cell.count == 0 or (cell.count > 0 and _accurate(cell.interval, options, budget) and (not options.require_isolation or cell.count == 1))
+        # One accuracy test per positive cell serves both decisions below.
+        var narrow = cell.count > 0 and _accurate(cell.interval, options, budget)
+        var enough = cell.count == 0 or (narrow and (not options.require_isolation or cell.count == 1))
         if enough or splits == options.max_subdivisions:
             complete = complete and cell.count >= 0
-            accurate = accurate and (cell.count == 0 or (cell.count > 0 and _accurate(cell.interval, options, budget)))
+            accurate = accurate and (cell.count == 0 or narrow)
             isolated = isolated and cell.count >= 0 and cell.count <= 1
             items = _sum(items, 1)
             sink.write(cell^, budget)
