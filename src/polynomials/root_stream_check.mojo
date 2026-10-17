@@ -14,7 +14,7 @@ from .numeric_complex_roots import ComplexRootRegion, ComplexRootSink, _represen
 from .algebraic_types import _copy_sequence as _copy_sturm
 from .certificates import SturmSequence, _check_root_count_parts
 from .roots import sign_changes
-from ._root_ops import _compare
+from ._root_ops import _compare, _chain_variations
 from .root_stream import RootStreamReceipt
 
 
@@ -104,8 +104,8 @@ struct RealRootStreamChecker(RealRootSink, Movable):
         if Bool(sequence) != Bool(self._exact):
             raise PolyError(PolyErrorKind.DOMAIN, "root stream Sturm mismatch")
         if sequence:
-            var first = sign_changes(sequence.value(), self._edge, budget)
-            var last = sign_changes(sequence.value(), self._bound, budget)
+            var first = _chain_variations(sequence.value().polynomials, sequence.value().quotients, self._edge, budget)
+            var last = _chain_variations(sequence.value().polynomials, sequence.value().quotients, self._bound, budget)
             if not _check_root_count_parts(self._exact.value(), sequence.value(), self._edge, self._bound, first - last, budget):
                 raise PolyError(PolyErrorKind.DOMAIN, "invalid root stream Sturm evidence")
             self._sequence = _copy_sturm(sequence.value(), budget)

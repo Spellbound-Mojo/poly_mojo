@@ -1,5 +1,6 @@
 """Exact real-root multiplicities with independently checked squarefree evidence."""
 from apn_mojo import Rational
+from ._root_ops import _chain_variations
 from .coefficients import CoefficientRing, QQ
 from .dense import DensePoly
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _sum, _product
@@ -65,7 +66,7 @@ def real_root_multiplicities[C: CoefficientRing](poly: DensePoly[C], roots: Real
         var sequence = sturm_sequence(entry[0], budget)
         for i in range(len(roots.cells)):
             ref cell = roots.cells[i]
-            var count = sign_changes(sequence, cell.interval.real_low, budget) - sign_changes(sequence, cell.interval.real_high, budget)
+            var count = _chain_variations(sequence.polynomials, sequence.quotients, cell.interval.real_low, budget) - _chain_variations(sequence.polynomials, sequence.quotients, cell.interval.real_high, budget)
             multiplicities[i] = _sum(multiplicities[i], _product(count, entry[1]))
         sequences.append(sequence^)
     return RootMultiplicityCertificate(decomposition^, witnesses^, sequences^, multiplicities^)
@@ -115,12 +116,12 @@ def check_real_root_multiplicities[C: CoefficientRing](poly: DensePoly[C], roots
         ref sequence = certificate.sequences[k]
         var left = _copy_coefficient(roots.cells[0].interval.real_low, budget)
         var right = _copy_coefficient(roots.cells[len(roots.cells) - 1].interval.real_high, budget)
-        var total = sign_changes(sequence, left, budget) - sign_changes(sequence, right, budget)
+        var total = _chain_variations(sequence.polynomials, sequence.quotients, left, budget) - _chain_variations(sequence.polynomials, sequence.quotients, right, budget)
         if not _check_root_count_parts(factor, sequence, left, right, total, budget):
             return False
-        var previous = sign_changes(sequence, left, budget)
+        var previous = _chain_variations(sequence.polynomials, sequence.quotients, left, budget)
         for i in range(len(roots.cells)):
-            var next = sign_changes(sequence, roots.cells[i].interval.real_high, budget)
+            var next = _chain_variations(sequence.polynomials, sequence.quotients, roots.cells[i].interval.real_high, budget)
             var count = previous - next
             if count < 0 or count > roots.cells[i].count:
                 return False
