@@ -3,7 +3,8 @@ from polynomials import Budget, PolyErrorKind, ModInt, Modulus, DensePoly, Monom
 from polynomials.finite_field import factor_finite_field
 from support.corpus import read_cases, parse_polynomial, as_mod
 from support.check import Checker
-from polynomials._nmod import _field, _to, _modulus, _Modulus, _rem, _mulmod, _composer, _Composer, _compose
+from polynomials._nmod import _field, _to, _modulus, _Modulus, _rem, _mulmod, _composer, _Composer, _compose, _distinct_degree, _gcd, _derivative
+from polynomials._berlekamp import _berlekamp
 
 
 def exhaustive(prime: UInt64, mut c: Checker) raises:
@@ -175,10 +176,10 @@ def spectral_kernels(mut c: Checker) raises:
 
 
 def small_field_products(mut c: Checker) raises:
-    """Degree-400 inputs over GF(3) and GF(5), factored through the 32-bit transforms: products rebuild the input, seed independently."""
+    """Degree-400 inputs over GF(3), GF(5), GF(7) and GF(13), factored by byte-packed Berlekamp: products rebuild the input, seed independently."""
     var work = Budget()
     var state = UInt64(4242)
-    var primes: List[UInt64] = [3, 5]
+    var primes: List[UInt64] = [3, 5, 7, 13]
     for prime in primes:
         var ctx = Modulus(prime, work)
         var values = List[ModInt]()
@@ -199,6 +200,42 @@ def small_field_products(mut c: Checker) raises:
             for i in range(len(first.factors)):
                 same = same and again.factors[i][0] == first.factors[i][0] and again.factors[i][1] == first.factors[i][1]
         c.check(same, "small-field factors are seed independent")
+
+
+def _sorted(var factors: List[List[UInt64]]) -> List[List[UInt64]]:
+    """Factors ordered by length, then by coefficients from the top."""
+    for i in range(1, len(factors)):
+        var j = i
+        while j > 0:
+            ref a = factors[j - 1]
+            ref b = factors[j]
+            var greater = len(a) > len(b)
+            if len(a) == len(b):
+                var k = len(a) - 1
+                while k >= 0 and a[k] == b[k]:
+                    k -= 1
+                greater = k >= 0 and a[k] > b[k]
+            if not greater:
+                break
+            factors.swap_elements(j - 1, j)
+            j -= 1
+    return factors^
+
+
+def berlekamp_matches_distinct_degree(mut c: Checker) raises:
+    """Byte-packed Berlekamp and distinct-degree factorization find the same irreducibles on squarefree inputs."""
+    var work = Budget()
+    var state = UInt64(777)
+    var primes: List[UInt64] = [3, 5, 13]
+    for prime in primes:
+        var field = _field(prime)
+        for degree in [2, 37, 300]:
+            var f = draw(degree, True, prime, state)
+            if len(_gcd(f, _derivative(f, field, work), field, work)) > 1:
+                continue
+            var by_berlekamp = _sorted(_berlekamp(f, field, 0, work))
+            c.check(by_berlekamp == _sorted(_distinct_degree(f, field, 0, work)), "Berlekamp matches distinct-degree factorization")
+            c.check(_sorted(_berlekamp(f, field, 9, work)) == by_berlekamp, "Berlekamp factors are seed independent")
 
 
 def planted_binomials(mut c: Checker) raises:
@@ -277,5 +314,6 @@ def main() raises:
     large_prime(c)
     spectral_kernels(c)
     small_field_products(c)
+    berlekamp_matches_distinct_degree(c)
     planted_binomials(c)
     c.finish()
