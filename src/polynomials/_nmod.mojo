@@ -7,9 +7,12 @@ matrix inner loops perform no division. Every operation charges the shared
 budget in proportion to its coefficient work before doing it.
 """
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product, _sum
+from ._ntt import _modular_product
 
 comptime _KARATSUBA = 128
 """Operand length at which products switch from schoolbook to Karatsuba."""
+comptime _TRANSFORM = 512
+"""Shorter operand length at which products switch from Karatsuba to number-theoretic transforms."""
 
 
 @fieldwise_init
@@ -232,6 +235,15 @@ def _karatsuba(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) 
 def _mul(a: List[UInt64], b: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
     if len(a) == 0 or len(b) == 0:
         return List[UInt64]()
+    if min(len(a), len(b)) >= _TRANSFORM:
+        # The convolution of Montgomery residues aR, bR is abR^2; one REDC per
+        # coefficient returns it to Montgomery form.
+        var square = a == b
+        var c = _modular_product(a, b, len(a) + len(b) - 1, f.p, square, budget)
+        for i in range(len(c)):
+            c[i] = _redc(UInt128(c[i]), f)
+        _trim(c)
+        return c^
     return _karatsuba(a, b, f, budget)
 
 
