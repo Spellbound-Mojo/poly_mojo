@@ -1,7 +1,7 @@
 """Every degree through twice the Karatsuba threshold and sparse cross-checks."""
 from apn_mojo import Integer
 from polynomials import Budget, PolyErrorKind, CoefficientRing, ZZ, QQ, ModInt, Modulus, NoContext, MonomialOrder, SparsePoly, DensePoly
-from polynomials._nmod import _field, _mul, _schoolbook, _to, _TRANSFORM
+from polynomials._nmod import _field, _mul, _schoolbook, _to, _TRANSFORM, _TRANSFORM_SMALL
 from support.check import Checker
 from support.gen import coefficient
 from support.rng import SplitMix64
@@ -130,12 +130,16 @@ def transforms[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
 
 
 def native_transforms(mut c: Checker) raises:
-    """Montgomery residue products switch to transforms at _TRANSFORM and agree with schoolbook."""
+    """Montgomery residue products switch to transforms at their thresholds and agree with schoolbook."""
     var work = Budget()
     var rng = SplitMix64(808)
-    for p in [UInt64(3), UInt64(2147483647), (UInt64(1) << 62) - 57, UInt64(4611685941117976577)]:
+    for p in [UInt64(3), UInt64(2147483647), (UInt64(1) << 62) - 57, UInt64(4611685941117976577), UInt64(268435399)]:
         var f = _field(p)
-        for lengths in [(_TRANSFORM, _TRANSFORM), (_TRANSFORM + 1, 3 * _TRANSFORM), (2 * _TRANSFORM, 2 * _TRANSFORM)]:
+        var sizes: List[Tuple[Int, Int]] = [(_TRANSFORM, _TRANSFORM), (_TRANSFORM + 1, 3 * _TRANSFORM), (2 * _TRANSFORM, 2 * _TRANSFORM)]
+        if p == 268435399:
+            # Below _SMALL with two transform primes: the switch is at _TRANSFORM_SMALL.
+            sizes = [(_TRANSFORM_SMALL, _TRANSFORM_SMALL + 3)]
+        for lengths in sizes:
             var a = List[UInt64]()
             var b = List[UInt64]()
             for _ in range(lengths[0]):
