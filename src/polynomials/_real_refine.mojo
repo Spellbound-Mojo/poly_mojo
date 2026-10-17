@@ -16,6 +16,7 @@ from .errors import Budget, PolyError, PolyErrorKind, _charge_size
 from .division import divmod
 from ._images import _integer_dense
 from ._integer_ops import _primitive
+from ._root_ops import _order
 
 
 struct _RootOracle(Copyable, Movable):
@@ -161,19 +162,28 @@ def _compare_enclosure(enclosure: _Enclosure, m: Rational) raises PolyError -> I
     # The side of the root decided by the enclosure alone, or 2.
     try:
         if enclosure.exact:
-            return 0 if m == enclosure.low else (-1 if enclosure.low < m else 1)
-        if m < enclosure.low:
+            return -_order(m, enclosure.low)
+        if _order(m, enclosure.low) < 0:
             return 1
-        if enclosure.high < m:
+        if _order(enclosure.high, m) < 0:
             return -1
         return 2
     except e:
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
 
 
+def _ratio_bits(enclosure: _Enclosure, target: Rational) raises PolyError -> Int:
+    # An upper bound on log2((high - low) / target).
+    try:
+        var ratio = (enclosure.high - enclosure.low) / target
+        return _bits(ratio.numerator()) - _bits(ratio.denominator()) + 1
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
 def _wider(enclosure: _Enclosure, target: Rational) raises PolyError -> Bool:
     try:
-        return enclosure.high - enclosure.low > target
+        return _order(enclosure.high - enclosure.low, target) > 0
     except e:
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
 
@@ -187,6 +197,8 @@ def _tighten(oracle: _RootOracle, mut enclosure: _Enclosure, cell_width: QQ, gua
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
     while not enclosure.exact and _wider(enclosure, target):
         budget.charge(1)
+        # Never subdivide below the target: 2**grid parts of the enclosure.
+        enclosure.grid = max(2, min(enclosure.grid, _ratio_bits(enclosure, target) + 1))
         if _qir_step(oracle, enclosure, budget):
             enclosure.grid = min(enclosure.grid * 2, 1 << 20)
         else:
@@ -269,13 +281,44 @@ def _oracle_split(oracle: _RootOracle, mut enclosure: _Enclosure, low: QQ, high:
 
     The candidates and their order are those of the Sturm path: the first
     k/(k+1) point of the cell that is not a root of f, and the only root of f
-    in the cell is the enclosed root.
+    in the cell is the enclosed root. The enclosure is tightened to below the
+    cell width / 2**32 only when a candidate falls inside it.
     """
     var width = high.sub(low, budget)
     for k in range(1, degree + 2):
-        var fraction = QQ(Rational(k)).mul(QQ(Rational(k + 1)).inverse(budget), budget)
-        var middle = low.add(width.mul(fraction, budget), budget)
+        var middle: QQ
+        var dyadic = _dyadic_midpoint(low, high) if k == 1 else Optional[QQ]()
+        if dyadic:
+            middle = dyadic.take()
+        else:
+            var fraction = QQ(Rational(k)).mul(QQ(Rational(k + 1)).inverse(budget), budget)
+            middle = low.add(width.mul(fraction, budget), budget)
+        if _compare_enclosure(enclosure, middle.value) == 2:
+            _tighten(oracle, enclosure, width, 32, budget)
         var side = _side(oracle, enclosure, middle, budget)
         if side != 0:
             return (middle^, side)
     raise PolyError(PolyErrorKind.DOMAIN, "single-root cell has no nonroot split")
+
+
+def _dyadic_midpoint(low: QQ, high: QQ) raises PolyError -> Optional[QQ]:
+    # (low + high) / 2 in lowest terms when both denominators are powers of
+    # two, by shifts instead of normalized rational arithmetic.
+    try:
+        var a = low.value.denominator()
+        var b = high.value.denominator()
+        var ea = _power_shift(a)
+        var eb = _power_shift(b)
+        if ea < 0 or eb < 0:
+            return None
+        var e = max(ea, eb)
+        var total = (low.value.numerator() << (e - ea)) + (high.value.numerator() << (e - eb))
+        if not total:
+            return QQ(Rational(0))
+        # Strip the common powers of two from total / 2^(e + 1).
+        var magnitude = abs(total)
+        var twos = _bits(magnitude & -magnitude) - 1
+        var strip = min(twos, e + 1)
+        return QQ(Rational(_numerator=total >> strip, _denominator=Integer(1) << (e + 1 - strip)))
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))

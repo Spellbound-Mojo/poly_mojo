@@ -52,7 +52,8 @@ def main():
                     v = Fraction(int(root.p), int(root.q))
                     roots.append((v, v))
                 else:
-                    a, b = root.interval.a, root.interval.b
+                    interval = root._get_interval()
+                    a, b = interval.a, interval.b
                     roots.append((Fraction(int(a.p), int(a.q)), Fraction(int(b.p), int(b.q))))
             return roots
         if mode == 'count':
