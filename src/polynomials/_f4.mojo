@@ -45,6 +45,7 @@ algorithm in the packed or sparse engine.
 """
 from std.bit import count_leading_zeros
 from std.math import iota, max, min
+from std.sys.intrinsics import prefetch, PrefetchOptions
 from .coefficients import CoefficientRing, ModInt, Modulus
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _product, _sum
 from .monomial import MonomialOrder
@@ -673,6 +674,9 @@ comptime _BLOCK = 16
 
 comptime _Block = SIMD[DType.uint64, _BLOCK]
 
+comptime _AHEAD = 8
+"""Entries ahead of the update that `_axpy_block` prefetches the block for."""
+
 
 struct _Field(Copyable, Movable):
     """A prime with the constants that reduce modulo it, in every lane."""
@@ -717,13 +721,28 @@ def _axpy_block[small: Bool](data: Pointer[mut=True, UInt64, _], columns: Pointe
     selected, which then multiply all 64 bits.
     """
     var factor = factors.cast[DType.uint64]()
-    for k in range(1, n):
-        var at = data.unsafe_offset(_BLOCK * Int(columns.unsafe_offset(k).unsafe_load()))
-        var x = at.unsafe_load[width=_BLOCK]() + factor * _Block(UInt64(values.unsafe_offset(k).unsafe_load()))
-        comptime if small:
-            at.unsafe_store[width=_BLOCK](x)
-        else:
-            at.unsafe_store[width=_BLOCK](x.ge(square).select(x - square, x))
+    var k = 1
+    while k + _AHEAD < n:
+        # The block is far larger than the cache, and its columns follow no
+        # pattern the hardware could prefetch; the row knows them ahead.
+        var ahead = data.unsafe_offset(_BLOCK * Int(columns.unsafe_offset(k + _AHEAD).unsafe_load()))
+        comptime for line in range(0, _BLOCK, 8):
+            prefetch[PrefetchOptions().for_write().high_locality()](ahead.unsafe_offset(line))
+        _update_block[small](data, columns, values, k, factor, square)
+        k += 1
+    while k < n:
+        _update_block[small](data, columns, values, k, factor, square)
+        k += 1
+
+
+@always_inline
+def _update_block[small: Bool](data: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], k: Int, factor: _Block, square: _Block):
+    var at = data.unsafe_offset(_BLOCK * Int(columns.unsafe_offset(k).unsafe_load()))
+    var x = at.unsafe_load[width=_BLOCK]() + factor * _Block(UInt64(values.unsafe_offset(k).unsafe_load()))
+    comptime if small:
+        at.unsafe_store[width=_BLOCK](x)
+    else:
+        at.unsafe_store[width=_BLOCK](x.ge(square).select(x - square, x))
 
 
 struct _Lane(Movable):
@@ -1360,12 +1379,13 @@ def _mod_lanes(v: _Lanes, lanes: _Primes) -> _Lanes:
     return r.ge(lanes.primes).select(r - lanes.primes, r)
 
 
-@always_inline
+@no_inline
 def _axpy_lanes(data: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factor: SIMD[DType.uint32, _LANES], squares: _Lanes):
     """Add factor times a row, after its leading entry, to every lane of the dense accumulator.
 
     Both factors widen from 32 bits, so each product is one 32 by 32 bit
-    multiplication.
+    multiplication. Inlined, the widening is lost before instructions are
+    selected, which then multiply all 64 bits (as for `_axpy_block`).
     """
     var f = factor.cast[DType.uint64]()
     for k in range(1, n):
