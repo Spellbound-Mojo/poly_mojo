@@ -141,6 +141,8 @@ def check_digit_products(mut c: Checker) raises:
             var dy = len(y) - 2 * _PAD
             var low = List[UInt64](length=dx + dy + _PAD, fill=0)
             var high = List[UInt64](length=dx + dy + _PAD, fill=0)
+            var even = List[UInt64](length=2 * (dx + dy + _PAD), fill=0)
+            var odd = List[UInt64](length=2 * (dx + dy + _PAD), fill=0)
             var modulus = Integer(1) << Integer(64 * width)
             var product = limbs_value(a) * limbs_value(b)
             var subtract = rng.below(2) == 0
@@ -151,14 +153,14 @@ def check_digit_products(mut c: Checker) raises:
             # The shorter string first, as the kernel requires.
             if dx <= dy:
                 if subtract:
-                    _ifma[True](data.unsafe_ptr(), width, xs, dx, ys, dy, low.unsafe_ptr(), high.unsafe_ptr())
+                    _ifma[True](data.unsafe_ptr(), width, xs, dx, ys, dy, low.unsafe_ptr(), high.unsafe_ptr(), even.unsafe_ptr(), odd.unsafe_ptr())
                 else:
-                    _ifma[False](data.unsafe_ptr(), width, xs, dx, ys, dy, low.unsafe_ptr(), high.unsafe_ptr())
+                    _ifma[False](data.unsafe_ptr(), width, xs, dx, ys, dy, low.unsafe_ptr(), high.unsafe_ptr(), even.unsafe_ptr(), odd.unsafe_ptr())
             else:
                 if subtract:
-                    _ifma[True](data.unsafe_ptr(), width, ys, dy, xs, dx, low.unsafe_ptr(), high.unsafe_ptr())
+                    _ifma[True](data.unsafe_ptr(), width, ys, dy, xs, dx, low.unsafe_ptr(), high.unsafe_ptr(), even.unsafe_ptr(), odd.unsafe_ptr())
                 else:
-                    _ifma[False](data.unsafe_ptr(), width, ys, dy, xs, dx, low.unsafe_ptr(), high.unsafe_ptr())
+                    _ifma[False](data.unsafe_ptr(), width, ys, dy, xs, dx, low.unsafe_ptr(), high.unsafe_ptr(), even.unsafe_ptr(), odd.unsafe_ptr())
             c.check(limbs_value(data) == expected, "digit update " + String(step) + ": " + String(na) + " by " + String(nb) + " limbs into " + String(width))
 
 
