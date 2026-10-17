@@ -1525,6 +1525,9 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
         var sample_modular = 0
         var sample_exact = 0
         var hint = 0
+        # Slots of the last pair tried: when they fill a good part of the
+        # columns, the next pair's sweeps read the row instead of marking it.
+        var slots = 0
         for half in halves:
             var a = half[0]
             var b = half[1]
@@ -1542,7 +1545,8 @@ def _pair_routes[W: Int](mut engine: _Engine[ZZ, W, True], mut budget: Budget, p
                 var t0 = _clock()
                 var cost = 0
                 # The primes the last pair needed: attempts start a batch below.
-                k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, b, max(_FIRST_PRIMES, hint - _CERT_LANES), allowance, cost, counts, budget)
+                k = _modular_pair(lanes, matrix, pivot, coefficients, images, a, b, max(_FIRST_PRIMES, hint - _CERT_LANES), allowance, _DENSE * slots >= ncols, cost, counts, budget)
+                slots = lanes.last_slots
                 spent = cost
                 counts[6] += cost
                 counts[7] += _clock() - t0
@@ -1872,6 +1876,9 @@ comptime _CERT_LANES = 8
 
 comptime _CertLanes = SIMD[DType.uint64, _CERT_LANES]
 
+comptime _DENSE = 8
+"""A pair's sweeps read every column, without marks, when the last pair's slots exceed 1 / `_DENSE` of the columns."""
+
 comptime _SWEEP = 4
 """Most batches of `_CERT_LANES` primes one sweep of a pair reduces at once."""
 
@@ -1998,6 +2005,8 @@ struct _Basis(Movable):
     var basis: List[UInt64]
     var digits: List[UInt64]
     """The e_i in 32-bit digits, 2 `limbs` each."""
+    var qdigits: List[UInt64]
+    """Q in 32-bit digits, 2 `limbs` + 2 of them, the top ones zero."""
     var weights: List[Float64]
     var limbs: Int
     var modulus: Integer
@@ -2037,6 +2046,12 @@ struct _Basis(Movable):
         for limb in self.basis:
             self.digits.append(limb & 0xFFFFFFFF)
             self.digits.append(limb >> 32)
+        self.qdigits = List[UInt64](capacity=2 * self.limbs + 2)
+        for limb in self.product:
+            self.qdigits.append(limb & 0xFFFFFFFF)
+            self.qdigits.append(limb >> 32)
+        self.qdigits.append(0)
+        self.qdigits.append(0)
         var bytes = List[UInt8](length=8 * self.limbs, fill=0)
         for l in range(self.limbs):
             comptime for shift in range(8):
@@ -2089,26 +2104,54 @@ struct _Basis(Movable):
                 high = x >> 32
             var column = columns.unsafe_offset(_CERT_LANES * digits)
             column.unsafe_store[width=_CERT_LANES](column.unsafe_load[width=_CERT_LANES]() + high)
-        var carry = _CertLanes(0)
+        # Less m Q, m the estimate of floor(sum r_i c_i / p_i), in every lane
+        # at once, carries kept signed. The estimate's error is far below one,
+        # so the value lies in [-Q, 2Q): add Q where it is negative, then
+        # subtract Q where it is not below Q.
+        # m is below k 2^31: as m1 2^16 + m0, digit d of m Q is m0 q_d plus the
+        # low 16 bits of m1 q_d shifted up and the high bits of m1 q_(d-1),
+        # every product below 2^51.
+        var low = mask.cast[DType.int64]()
+        var m = estimate.cast[DType.int64]()
+        var m0 = m & 0xFFFF
+        var m1 = m >> 16
+        var carry = SIMD[DType.int64, _CERT_LANES](0)
+        var below = SIMD[DType.int64, _CERT_LANES](0)
         for d in range(digits + 2):
-            var x = columns.unsafe_offset(_CERT_LANES * d).unsafe_load[width=_CERT_LANES]() + carry
-            columns.unsafe_offset(_CERT_LANES * d).unsafe_store[width=_CERT_LANES](x & mask)
-            carry = x >> 32
+            var at = columns.unsafe_offset(_CERT_LANES * d)
+            var q = Int64(self.qdigits.unsafe_get(d))
+            var upper = m1 * q
+            var t = at.unsafe_load[width=_CERT_LANES]().cast[DType.int64]() + carry - m0 * q - ((upper & 0xFFFF) << 16) - below
+            below = upper >> 16
+            at.unsafe_store[width=_CERT_LANES]((t & low).cast[DType.uint64]())
+            carry = t >> 32
+        var negative = carry.lt(0)
+        carry = SIMD[DType.int64, _CERT_LANES](0)
+        for d in range(digits + 2):
+            var at = columns.unsafe_offset(_CERT_LANES * d)
+            var t = at.unsafe_load[width=_CERT_LANES]().cast[DType.int64]() + carry + negative.select(SIMD[DType.int64, _CERT_LANES](Int64(self.qdigits.unsafe_get(d))), SIMD[DType.int64, _CERT_LANES](0))
+            at.unsafe_store[width=_CERT_LANES]((t & low).cast[DType.uint64]())
+            carry = t >> 32
+        # The borrow of x - Q says where x is below Q.
+        var borrow = SIMD[DType.int64, _CERT_LANES](0)
+        for d in range(digits + 2):
+            var t = columns.unsafe_offset(_CERT_LANES * d).unsafe_load[width=_CERT_LANES]().cast[DType.int64]() + borrow - Int64(self.qdigits.unsafe_get(d))
+            borrow = t >> 32
+        var above = borrow.ge(0)
+        borrow = SIMD[DType.int64, _CERT_LANES](0)
+        for d in range(digits + 2):
+            var at = columns.unsafe_offset(_CERT_LANES * d)
+            var t = at.unsafe_load[width=_CERT_LANES]().cast[DType.int64]() + borrow - above.select(SIMD[DType.int64, _CERT_LANES](Int64(self.qdigits.unsafe_get(d))), SIMD[DType.int64, _CERT_LANES](0))
+            at.unsafe_store[width=_CERT_LANES]((t & low).cast[DType.uint64]())
+            borrow = t >> 32
         var n = self.limbs + 2
         for lane in range(_CERT_LANES):
             var data = work.unsafe_ptr().unsafe_offset(lane * n)
             for l in range(self.limbs + 1):
-                var low = columns.unsafe_offset(_CERT_LANES * 2 * l + lane).unsafe_load()
-                var high = columns.unsafe_offset(_CERT_LANES * (2 * l + 1) + lane).unsafe_load()
-                data.unsafe_offset(l).unsafe_store(low | (high << 32))
+                var low_digit = columns.unsafe_offset(_CERT_LANES * 2 * l + lane).unsafe_load()
+                var high_digit = columns.unsafe_offset(_CERT_LANES * (2 * l + 1) + lane).unsafe_load()
+                data.unsafe_offset(l).unsafe_store(low_digit | (high_digit << 32))
             data.unsafe_offset(self.limbs + 1).unsafe_store(0)
-            var m = UInt64(estimate[lane])
-            if m:
-                _sub_mul_1(data, n, m, self.product.unsafe_ptr(), self.limbs)
-            while (data.unsafe_offset(n - 1).unsafe_load() >> 63) != 0:
-                _add_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
-            while not self._below(data):
-                _sub_mul_1(data, n, 1, self.product.unsafe_ptr(), self.limbs)
 
     def _below(self, data: Pointer[mut=False, UInt64, _]) -> Bool:
         """Whether the nonnegative limbs + 2 limbs at data are below Q."""
@@ -2230,6 +2273,8 @@ struct _LaneRow(Movable):
     """Per slot, its column."""
     var residues: List[List[UInt32]]
     """Per batch swept so far, `_CERT_LANES` residues per slot of the entry the reducer met."""
+    var last_slots: Int
+    """The number of slots of the pair forgotten last."""
 
     def __init__(out self, ncols: Int, mut budget: Budget) raises PolyError:
         _allocation[UInt64](_product(_CERT_LANES + 1, ncols), budget)
@@ -2239,6 +2284,7 @@ struct _LaneRow(Movable):
         self.slot = List[Int](length=ncols, fill=-1)
         self.columns = List[Int]()
         self.residues = List[List[UInt32]]()
+        self.last_slots = 0
 
     def widen(mut self, stride: Int, mut budget: Budget) raises PolyError:
         """Room for `stride` residues per column; the row is zero."""
@@ -2289,7 +2335,8 @@ struct _LaneRow(Movable):
             self.marks.unsafe_get(w) = 0
 
     def forget(mut self):
-        """Forget the slots and their residues."""
+        """Forget the slots and their residues, keeping their count in `last_slots`."""
+        self.last_slots = len(self.columns)
         for c in self.columns:
             self.slot.unsafe_get(c) = -1
         self.columns.clear()
@@ -2307,7 +2354,7 @@ def _lane_update[reduce: Bool](at: Pointer[mut=True, UInt64, _], factor: _CertLa
 
 
 @no_inline
-def _lanes_add[B: Int, reduce: Bool](data: Pointer[mut=True, UInt64, _], marks: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], v0: Pointer[mut=False, UInt32, _], v1: Pointer[mut=False, UInt32, _], v2: Pointer[mut=False, UInt32, _], v3: Pointer[mut=False, UInt32, _], n: Int, factors: SIMD[DType.uint32, B * _CERT_LANES], squares: SIMD[DType.uint64, B * _CERT_LANES], skip: Int):
+def _lanes_add[B: Int, reduce: Bool, mark: Bool = True](data: Pointer[mut=True, UInt64, _], marks: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], v0: Pointer[mut=False, UInt32, _], v1: Pointer[mut=False, UInt32, _], v2: Pointer[mut=False, UInt32, _], v3: Pointer[mut=False, UInt32, _], n: Int, factors: SIMD[DType.uint32, B * _CERT_LANES], squares: SIMD[DType.uint64, B * _CERT_LANES], skip: Int):
     """Add factors times a row of residues, after its first `skip` entries, to the dense row of a B-batch sweep, and mark the columns.
 
     Batch i's factors are factors[i _CERT_LANES :] and its residues come
@@ -2328,17 +2375,22 @@ def _lanes_add[B: Int, reduce: Bool](data: Pointer[mut=True, UInt64, _], marks: 
             _lane_update[reduce](at.unsafe_offset(2 * _CERT_LANES), f.slice[_CERT_LANES, offset=2 * _CERT_LANES](), v2.unsafe_offset(_CERT_LANES * k), squares.slice[_CERT_LANES, offset=2 * _CERT_LANES]())
         comptime if B > 3:
             _lane_update[reduce](at.unsafe_offset(3 * _CERT_LANES), f.slice[_CERT_LANES, offset=3 * _CERT_LANES](), v3.unsafe_offset(_CERT_LANES * k), squares.slice[_CERT_LANES, offset=3 * _CERT_LANES]())
-        var mw = marks.unsafe_offset(c >> 6)
-        mw.unsafe_store(mw.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
+        comptime if mark:
+            var mw = marks.unsafe_offset(c >> 6)
+            mw.unsafe_store(mw.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
 
 
-def _lane_sweep[B: Int, W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], images: _PairPrimes, a: Int, b: Int, batch: Int, mut budget: Budget) raises PolyError -> Bool:
+def _lane_sweep[B: Int, dense: Bool, W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], images: _PairPrimes, a: Int, b: Int, batch: Int, mut budget: Budget) raises PolyError -> Bool:
     """Reduce S / L, for the S-polynomial of rows a and b, modulo the primes of batches `batch` to `batch` + B - 1 at once, recording the entries reducers meet.
 
     With L = la * lc(g_a) = lb * lc(g_b), S / L is the difference of the two
     monic rows. Returns False, with the row zero again, when a nonzero
     residue meets a column no row leads in: then S does not reduce to zero,
     and the exact check decides. Otherwise the row is zero again too.
+
+    The written columns are found by marks, or, when `dense`, by reading
+    every column after the pair's leading one, which saves a mark update per
+    term when most columns are written anyway.
     """
     comptime S = B * _CERT_LANES
     lanes.widen(S, budget)
@@ -2357,15 +2409,24 @@ def _lane_sweep[B: Int, W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: 
         var n = matrix.starts[r + 1] - s
         var g = matrix.sources[r]
         var factors = SIMD[DType.uint32, S](1) if half == 0 else (primes - 1).cast[DType.uint32]()
-        _lanes_add[B, False](data, marks, matrix.entries.unsafe_ptr().unsafe_offset(s), images.values[batch][g].unsafe_ptr(), images.values[batch + min(1, B - 1)][g].unsafe_ptr(), images.values[batch + min(2, B - 1)][g].unsafe_ptr(), images.values[batch + min(3, B - 1)][g].unsafe_ptr(), n, factors, squares, 0)
+        _lanes_add[B, False, not dense](data, marks, matrix.entries.unsafe_ptr().unsafe_offset(s), images.values[batch][g].unsafe_ptr(), images.values[batch + min(1, B - 1)][g].unsafe_ptr(), images.values[batch + min(2, B - 1)][g].unsafe_ptr(), images.values[batch + min(3, B - 1)][g].unsafe_ptr(), n, factors, squares, 0)
     budget.charge(UInt64(S * (matrix.starts[a + 1] - matrix.starts[a] + matrix.starts[b + 1] - matrix.starts[b])))
     comptime for i in range(B):
         data.unsafe_offset(S * first + _CERT_LANES * i).unsafe_store[width=_CERT_LANES](_CertLanes(0))
-    lanes.marks.unsafe_get(first // 64) &= ~(UInt64(1) << UInt64(first % 64))
-    var c = lanes.next_marked(first + 1)
+    comptime if not dense:
+        lanes.marks.unsafe_get(first // 64) &= ~(UInt64(1) << UInt64(first % 64))
+    var c = first + 1 if dense else lanes.next_marked(first + 1)
     while c < lanes.ncols:
-        lanes.marks.unsafe_get(c // 64) &= ~(UInt64(1) << UInt64(c % 64))
         var at = data.unsafe_offset(S * c)
+        comptime if dense:
+            var any = at.unsafe_load[width=_CERT_LANES]()
+            comptime for i in range(1, B):
+                any |= at.unsafe_offset(_CERT_LANES * i).unsafe_load[width=_CERT_LANES]()
+            if not any.ne(0).reduce_or():
+                c += 1
+                continue
+        else:
+            lanes.marks.unsafe_get(c // 64) &= ~(UInt64(1) << UInt64(c % 64))
         var v = SIMD[DType.uint64, S](0)
         comptime for i in range(B):
             v = v.insert[offset=_CERT_LANES * i](_cert_mod(at.unsafe_offset(_CERT_LANES * i).unsafe_load[width=_CERT_LANES](), images.batches[batch + i]))
@@ -2373,7 +2434,12 @@ def _lane_sweep[B: Int, W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: 
         if v.ne(0).reduce_or():
             var q = pivot.unsafe_get(c)
             if q < 0:
-                lanes.clear(S, c + 1)
+                comptime if dense:
+                    for rest in range(c + 1, lanes.ncols):
+                        comptime for i in range(B):
+                            data.unsafe_offset(S * rest + _CERT_LANES * i).unsafe_store[width=_CERT_LANES](_CertLanes(0))
+                else:
+                    lanes.clear(S, c + 1)
                 return False
             var slot = lanes.slot_of(c)
             comptime for i in range(B):
@@ -2383,12 +2449,12 @@ def _lane_sweep[B: Int, W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: 
             budget.charge(UInt64(S * n))
             var factors = v.eq(0).select(SIMD[DType.uint64, S](0), primes - v).cast[DType.uint32]()
             var g = matrix.sources.unsafe_get(q)
-            _lanes_add[B, True](data, marks, matrix.entries.unsafe_ptr().unsafe_offset(s), images.values[batch][g].unsafe_ptr(), images.values[batch + min(1, B - 1)][g].unsafe_ptr(), images.values[batch + min(2, B - 1)][g].unsafe_ptr(), images.values[batch + min(3, B - 1)][g].unsafe_ptr(), n, factors, squares, 1)
-        c = lanes.next_marked(c + 1)
+            _lanes_add[B, True, not dense](data, marks, matrix.entries.unsafe_ptr().unsafe_offset(s), images.values[batch][g].unsafe_ptr(), images.values[batch + min(1, B - 1)][g].unsafe_ptr(), images.values[batch + min(2, B - 1)][g].unsafe_ptr(), images.values[batch + min(3, B - 1)][g].unsafe_ptr(), n, factors, squares, 1)
+        c = c + 1 if dense else lanes.next_marked(c + 1)
     return True
 
 
-def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, mut images: _PairPrimes, a: Int, b: Int, first: Int, allowance: Int, mut cost: Int, mut counts: List[Int], mut budget: Budget) raises PolyError -> Int:
+def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coefficients: _Coefficients, mut images: _PairPrimes, a: Int, b: Int, first: Int, allowance: Int, dense: Bool, mut cost: Int, mut counts: List[Int], mut budget: Budget) raises PolyError -> Int:
     """The number of primes that proved the S-polynomial of rows a and b reduces to zero, or 0 if they did not.
 
     Modulo each prime p the reduction gives S = sum r_c R_c, R_c the row
@@ -2437,12 +2503,19 @@ def _modular_pair[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[I
         var t0 = _clock()
         var units = budget.remaining()
         var passed: Bool
-        if width == 4:
-            passed = _lane_sweep[4](lanes, matrix, pivot, images, a, b, batch, budget)
+        if dense:
+            if width == 4:
+                passed = _lane_sweep[4, True](lanes, matrix, pivot, images, a, b, batch, budget)
+            elif width == 2:
+                passed = _lane_sweep[2, True](lanes, matrix, pivot, images, a, b, batch, budget)
+            else:
+                passed = _lane_sweep[1, True](lanes, matrix, pivot, images, a, b, batch, budget)
+        elif width == 4:
+            passed = _lane_sweep[4, False](lanes, matrix, pivot, images, a, b, batch, budget)
         elif width == 2:
-            passed = _lane_sweep[2](lanes, matrix, pivot, images, a, b, batch, budget)
+            passed = _lane_sweep[2, False](lanes, matrix, pivot, images, a, b, batch, budget)
         else:
-            passed = _lane_sweep[1](lanes, matrix, pivot, images, a, b, batch, budget)
+            passed = _lane_sweep[1, False](lanes, matrix, pivot, images, a, b, batch, budget)
         counts[0] += _clock() - t0
         own += _modular_cost(Int(units - budget.remaining()), 0, 0)
         if not passed:
@@ -2842,8 +2915,12 @@ def _fraction(x: Integer, modulus: Integer, bits: Int) raises PolyError -> Optio
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
 
 
-def _euclid(x: Integer, modulus: Integer, bits: Int) raises -> Optional[Tuple[Integer, Integer]]:
-    """As `_fraction`, with Lehmer steps while the remainders are long (as `_reconstruct` in `_rational_groebner`)."""
+def _euclid(x: Integer, modulus: Integer, bits: Int, den_bits: Int = -1) raises -> Optional[Tuple[Integer, Integer]]:
+    """As `_fraction`, with Lehmer steps while the remainders are long (as `_reconstruct` in `_rational_groebner`).
+
+    With `den_bits` nonnegative the denominator is held below 2^den_bits
+    instead of 2^bits, as in `_Euclid.fraction`.
+    """
     var bound = Integer(1) << Integer(bits)
     var r0 = modulus.copy()
     var r1 = x.copy()
@@ -2889,7 +2966,7 @@ def _euclid(x: Integer, modulus: Integer, bits: Int) raises -> Optional[Tuple[In
         r1 = qr[1].copy()
         t0 = t1^
         t1 = t2^
-    if t1.sign() == 0 or t1.magnitude_bit_length() > bits:
+    if t1.sign() == 0 or t1.magnitude_bit_length() > (den_bits if den_bits >= 0 else bits):
         return None
     if t1.sign() < 0:
         return (Integer(0) - r1, Integer(0) - t1)

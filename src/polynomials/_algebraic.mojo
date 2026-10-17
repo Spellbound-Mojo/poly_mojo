@@ -24,17 +24,33 @@ from ._root_ops import _compare as _compare_q, _copy as _copy_q, _midpoint, _var
 from .roots import sturm_sequence, isolate_real_roots
 from .factor import factor
 from .algebraic_types import RealAlgebraic as _Real, AlgebraicComparisonCertificate as _Comparison, _copy_real, _copy_sequence, _rational
+from .algebraic_arithmetic import AlgebraicArithmeticCertificate
 
 
 struct _NormalizationCache(Movable):
     var polynomials: List[DensePoly[QQ]]
     var factorizations: List[Factorization[QQ]]
     var sequences: List[SturmSequence]
+    # Arithmetic results are a function of the operation and the exact operand
+    # witnesses, so a repeated step reuses its certificate unchanged.
+    var operations: List[Int]
+    var operands: List[Tuple[_Real, _Real]]
+    var results: List[AlgebraicArithmeticCertificate]
 
     def __init__(out self):
         self.polynomials = List[DensePoly[QQ]]()
         self.factorizations = List[Factorization[QQ]]()
         self.sequences = List[SturmSequence]()
+        self.operations = List[Int]()
+        self.operands = List[Tuple[_Real, _Real]]()
+        self.results = List[AlgebraicArithmeticCertificate]()
+
+
+def _same_witness(a: _Real, b: _Real, mut budget: Budget) raises PolyError -> Bool:
+    budget.charge(1)
+    if a.rational != b.rational or a.polynomial.degree() != b.polynomial.degree():
+        return False
+    return a.low == b.low and a.high == b.high and _dense_equal(a.polynomial, b.polynomial, budget)
 
 
 def _sturm_index(f: DensePoly[QQ], mut sequences: List[SturmSequence], mut budget: Budget) raises PolyError -> Int:
@@ -68,7 +84,7 @@ def _root_cached(f: DensePoly[QQ], low: QQ, high: QQ, mut cache: _NormalizationC
         raise PolyError(PolyErrorKind.DOMAIN, "an algebraic root needs a nonconstant polynomial")
     var ordering = _compare_q(low, high, budget)
     if ordering == 0:
-        if _sign_at(f, low, budget) != 0:
+        if not _sign_at(f, low, budget) == 0:
             raise PolyError(PolyErrorKind.DOMAIN, "the rational point is not a root")
         return _rational(low, budget)
     if ordering > 0 or _count_cached(f, low, high, cache.sequences, budget) != 1:

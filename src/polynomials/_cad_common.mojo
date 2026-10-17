@@ -43,9 +43,13 @@ def _coordinates(cells: List[CADCell], index: Int, variables: List[Int64], mut b
 
 
 def _signs(inputs: List[SparsePoly[QQ]], point: List[Tuple[Int64, RealAlgebraic]], mut evaluations: List[AlgebraicPolynomialEvaluation], mut signs: List[AlgebraicComparisonCertificate], mut budget: Budget) raises PolyError:
+    var cache = _NormalizationCache()
+    _signs_cached(inputs, point, evaluations, signs, cache, budget)
+
+
+def _signs_cached(inputs: List[SparsePoly[QQ]], point: List[Tuple[Int64, RealAlgebraic]], mut evaluations: List[AlgebraicPolynomialEvaluation], mut signs: List[AlgebraicComparisonCertificate], mut cache: _NormalizationCache, mut budget: Budget) raises PolyError:
     _allocation[AlgebraicPolynomialEvaluation](len(inputs), budget)
     _allocation[AlgebraicComparisonCertificate](len(inputs), budget)
-    var cache = _NormalizationCache()
     for f in inputs:
         budget.charge(1)
         var evaluation = _evaluate_sparse_cached(f, point, cache, budget)
