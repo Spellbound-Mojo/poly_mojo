@@ -14,7 +14,7 @@ from ._images import _integer_dense as _integer, _rational_dense as _rational, _
 from ._coefficient_ops import _quotient
 from ._hensel import _HenselState, _hensel, _hensel_start, _hensel_extend, _hensel_resume, _truncate, _trial_divide
 from ._integer_ops import _content, _primitive, _divide_scalar
-from ._lattice_factor import _van_hoeij_lifted
+from ._lattice_factor import _van_hoeij_lifted, _lattice_precision
 from ._gcd import _modular_primitive
 from .monomial import MonomialOrder
 from . import _nmod
@@ -56,8 +56,20 @@ def _recombine(f: DensePoly[ZZ], lifted: List[DensePoly[ZZ]], modulus: ZZ, allow
     var search = _Recombination(len(lifted), budget)
     var remaining = _copy(f, budget)
     var result = List[DensePoly[ZZ]]()
+    var fractions = List[Float64]()
+    var total = Float64(0)
+    var tolerance = Float64(1)
+    var fresh = False
     while search.ready():
         budget.charge(1)
+        if not fresh:
+            fractions = _subleading_fractions(remaining, lifted, modulus, budget)
+            total = 0
+            for i in range(len(search.active)):
+                budget.charge(1)
+                total += fractions[search.active[i]]
+            tolerance = _subleading_tolerance(remaining, modulus, budget)
+            fresh = True
         var degree = 0
         for i in search.selection.indices:
             budget.charge(1)
@@ -72,6 +84,20 @@ def _recombine(f: DensePoly[ZZ], lifted: List[DensePoly[ZZ]], modulus: ZZ, allow
         if chosen_degree < len(allowed) and not allowed[chosen_degree]:
             search.advance(budget)
             continue
+        # The x^(k-1) coefficient of lc(q) * h is lc(f) times the sum of the
+        # roots of h, so its residue lies within the tolerance of a multiple
+        # of the modulus. Compare the fractional parts first.
+        if tolerance < 0.5:
+            var part = Float64(0)
+            for i in search.selection.indices:
+                budget.charge(1)
+                part += fractions[search.active[i]]
+            if complement:
+                part = total - part
+            part -= _floor(part)
+            if min(part, 1 - part) > tolerance:
+                search.advance(budget)
+                continue
         # A true factor h with cofactor q reconstructs as lc(q) * h exactly, so
         # its constant term lc(q) * h(0) divides lc(f) * f(0). Test that first.
         var lead = _copy_coefficient(remaining.coefficients[remaining.degree()], budget)
@@ -107,12 +133,63 @@ def _recombine(f: DensePoly[ZZ], lifted: List[DensePoly[ZZ]], modulus: ZZ, allow
                 result.append(candidate^)
                 remaining = quotient.take()
             search.accept(budget)
+            fresh = False
         else:
             search.advance(budget)
     if remaining.degree() > 0:
         _allocation[DensePoly[ZZ]](1, budget)
         result.append(remaining^)
     return result^
+
+
+def _floor(x: Float64) -> Float64:
+    var t = Float64(Int(x))
+    return t - 1 if t > x else t
+
+
+def _fraction(r: Integer, modulus: Integer) raises PolyError -> Float64:
+    """r / modulus for 0 <= r < modulus, within 2^-52 of the exact ratio."""
+    try:
+        var shift = max(0, modulus.magnitude_bit_length() - 62)
+        return Float64(Int(r >> shift)) / Float64(Int(modulus >> shift))
+    except e:
+        raise PolyError(PolyErrorKind.CAPACITY, String(e))
+
+
+def _subleading_fractions(f: DensePoly[ZZ], lifted: List[DensePoly[ZZ]], modulus: ZZ, mut budget: Budget) raises PolyError -> List[Float64]:
+    """lc(f) * (subleading coefficient of each monic lifted factor) mod the
+    modulus, as a fraction of the modulus."""
+    ref lead = f.coefficients[f.degree()]
+    _allocation[Float64](len(lifted), budget)
+    var result = List[Float64](capacity=len(lifted))
+    for g in lifted:
+        budget.charge(1)
+        var r = _symmetric(lead.mul(g.coefficients[g.degree() - 1], budget).value, modulus.value, budget)
+        if r.sign() < 0:
+            r = ZZ(r).add(modulus, budget).value
+        result.append(_fraction(r, modulus.value))
+    return result^
+
+
+def _subleading_tolerance(f: DensePoly[ZZ], modulus: ZZ, mut budget: Budget) raises PolyError -> Float64:
+    """A bound on |lc(f) * (sum of the roots of any factor)| over the modulus,
+    plus the rounding slack of summing fractions.
+
+    The roots of f with |a| >= 1 have product at most M(f)/|lc(f)| <= ||f||_1
+    / |lc(f)|, and numbers at least 1 sum to at most their count less one plus
+    their product, so the sum of |a| over all roots is at most (d - 1) +
+    ||f||_1 / |lc(f)|."""
+    ref lead = f.coefficients[f.degree()]
+    var bound = ZZ.zero(NoContext())
+    for i in range(len(f.coefficients)):
+        budget.charge(1)
+        ref c = f.coefficients[i]
+        bound = bound.add(c.neg(budget) if c.value.sign() < 0 else _copy_coefficient(c, budget), budget)
+    var magnitude = lead.neg(budget) if lead.value.sign() < 0 else _copy_coefficient(lead, budget)
+    bound = bound.add(magnitude.mul(ZZ(Integer(f.degree() - 1)), budget), budget)
+    if bound.value.magnitude_bit_length() >= modulus.value.magnitude_bit_length():
+        return 1
+    return _fraction(bound.value, modulus.value) + Float64(2.0) ** -40
 
 
 comptime _PRIME_TRIALS = 3
@@ -197,7 +274,14 @@ def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], mut bud
 
 def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], allowed: List[Bool], mut budget: Budget) raises PolyError -> List[DensePoly[ZZ]]:
     var state = _hensel_start(modular, budget)
-    _hensel_extend(f, modular, _bound(f, budget), state, budget)
+    # Peel and run the lattice at the lattice's own precision; factors that
+    # need more are lifted further only when reconstruction asks for it.
+    var bound = _bound(f, budget)
+    var precision = _lattice_precision(f, len(modular), ZZ(Integer(Int(modular[0].ring.value))), budget)
+    var first = _copy_coefficient(bound, budget)
+    if precision and precision.value().value < bound.value:
+        first = _copy_coefficient(precision.value(), budget)
+    _hensel_extend(f, modular, first, state, budget)
     var lifting = (state.lifted.copy(), _copy_coefficient(state.modulus, budget))
     var remaining = _copy(f, budget)
     var result = List[DensePoly[ZZ]]()
@@ -207,7 +291,7 @@ def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], allowed
         budget.charge(1)
         var candidate = _primitive(_truncate(lifting[0][i].scale(remaining.coefficients[remaining.degree()], budget), lifting[1], budget), budget)
         var quotient = _trial_divide(remaining, candidate, budget)
-        if candidate.degree() > 0 and quotient:
+        if candidate.degree() > 0 and candidate.degree() == lifting[0][i].degree() and quotient:
             remaining = quotient.take()
             _allocation[DensePoly[ZZ]](1, budget)
             result.append(candidate^)
@@ -226,7 +310,12 @@ def _large_recombine(f: DensePoly[ZZ], modular: List[DensePoly[ModInt]], allowed
                 var resumed = _hensel_resume(active_lifted^, _copy_coefficient(lifting[1], budget))
                 rest = _van_hoeij_lifted(remaining, active_modular, _bound(remaining, budget), resumed, budget)
         else:
-            rest = _recombine(remaining, active_lifted, lifting[1], allowed, budget)
+            var remaining_bound = _bound(remaining, budget)
+            if lifting[1].value > remaining_bound.value:
+                rest = _recombine(remaining, active_lifted, lifting[1], allowed, budget)
+            else:
+                var full = _hensel(remaining, active_modular, remaining_bound, budget)
+                rest = _recombine(remaining, full[0], full[1], allowed, budget)
         for g in rest:
             budget.charge(1)
             _allocation[DensePoly[ZZ]](1, budget)

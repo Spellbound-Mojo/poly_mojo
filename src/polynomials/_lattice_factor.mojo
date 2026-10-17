@@ -173,6 +173,57 @@ def _cld_bound(f: DensePoly[ZZ], j: Int, mut budget: Budget) raises PolyError ->
     return best.mul(ZZ(Integer(n)), budget)
 
 
+def _reconstruct(f: DensePoly[ZZ], partition: List[List[QQ]], leading: ZZ, state: _HenselState, mut budget: Budget) raises PolyError -> Optional[List[DensePoly[ZZ]]]:
+    """The factors lc(f) prod_(j in group) g_j modulo the lifted modulus,
+    when every one divides f exactly with its group's degree."""
+    var remaining = _copy(f, budget)
+    var factors = List[DensePoly[ZZ]]()
+    for row in partition:
+        budget.charge(1)
+        var candidate = _constant(f, leading, budget)
+        var degree = 0
+        for j in range(len(row)):
+            budget.charge(1)
+            if not row[j].is_zero():
+                degree = _sum(degree, state.lifted[j].degree())
+                candidate = _truncate(candidate.mul(state.lifted[j], budget), state.modulus, budget)
+        candidate = _primitive(candidate, budget)
+        if candidate.degree() != degree or degree < 1:
+            return None
+        var quotient = _trial_divide(remaining, candidate, budget)
+        if not quotient:
+            return None
+        remaining = quotient.take()
+        _allocation[DensePoly[ZZ]](1, budget)
+        factors.append(candidate^)
+    if remaining.degree() != 0:
+        return None
+    return factors^
+
+
+def _lattice_precision(f: DensePoly[ZZ], count: Int, p: ZZ, mut budget: Budget) raises PolyError -> Optional[ZZ]:
+    """The modulus the first CLD lattice round lifts to, or no value when the
+    lattice would use traces."""
+    ref lc = f.coefficients[f.degree()]
+    if lc.value.magnitude_bit_length() < 1024 or f.degree() < 300:
+        return None
+    var padding = _zcopy(p, budget)
+    while padding.value.magnitude_bit_length() < _sum(count, 20):
+        budget.charge(1)
+        padding = padding.mul(p, budget)
+    var largest_cut = ZZ.one(NoContext())
+    for index in [0, f.degree() - 1]:
+        budget.charge(1)
+        var bound = _cld_bound(f, index, budget).mul(ZZ(Integer(2)), budget)
+        var cut = ZZ.one(NoContext())
+        while not _greater(cut, bound, budget):
+            budget.charge(1)
+            cut = cut.mul(p, budget)
+        if _greater(cut, largest_cut, budget):
+            largest_cut = cut^
+    return largest_cut.mul(padding, budget)
+
+
 def _van_hoeij(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconstruction_bound: ZZ, mut budget: Budget) raises PolyError -> List[DensePoly[ZZ]]:
     var state = _hensel_start(images, budget)
     return _van_hoeij_lifted(f, images, reconstruction_bound, state, budget)
@@ -248,10 +299,7 @@ def _van_hoeij_lifted(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconst
                 largest_cut = _zcopy(cut, budget)
                 cuts.append(cut^)
             var target = largest_cut.mul(padding, budget)
-            var lifting = _zcopy(target, budget)
-            if _greater(reconstruction_bound, lifting, budget):
-                lifting = _zcopy(reconstruction_bound, budget)
-            _hensel_extend(f, images, lifting, state, budget)
+            _hensel_extend(f, images, target, state, budget)
             ref lifted = state.lifted
             ref modulus = state.modulus
             # columns[i][j] = (lc^(j+1) Tr_(j+1)(g_i) mod cut_j*padding - low) / cut_j.
@@ -288,10 +336,7 @@ def _van_hoeij_lifted(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconst
                     largest_cut = _zcopy(cut, budget)
                 cuts.append(cut^)
             var target = largest_cut.mul(padding, budget)
-            var lifting = _zcopy(target, budget)
-            if _greater(reconstruction_bound, lifting, budget):
-                lifting = _zcopy(reconstruction_bound, budget)
-            _hensel_extend(f, images, lifting, state, budget)
+            _hensel_extend(f, images, target, state, budget)
             ref lifted = state.lifted
             ref modulus = state.modulus
             # columns[i][k] = (coefficient order[k] of g_i' f/g_i mod cut_k*padding - low) / cut_k.
@@ -349,26 +394,18 @@ def _van_hoeij_lifted(f: DensePoly[ZZ], images: List[DensePoly[ModInt]], reconst
         done = traces_count
         var partition = _projection_rref(rows, len(rows), count, budget)
         if _partition(partition, count, budget):
-            var remaining = _copy(f, budget)
-            var factors = List[DensePoly[ZZ]]()
-            var valid = True
-            for row in partition:
-                budget.charge(1)
-                var candidate = _constant(f, leading, budget)
-                for j in range(count):
-                    budget.charge(1)
-                    if not row[j].is_zero():
-                        candidate = _truncate(candidate.mul(state.lifted[j], budget), state.modulus, budget)
-                candidate = _primitive(candidate, budget)
-                var quotient = _trial_divide(remaining, candidate, budget)
-                if candidate.degree() < 1 or not quotient:
-                    valid = False
-                    break
-                remaining = quotient.take()
-                _allocation[DensePoly[ZZ]](1, budget)
-                factors.append(candidate^)
-            if valid and remaining.degree() == 0:
-                return factors^
+            # Try the lattice's precision first. A divisor of f with the
+            # modular image of a group and its full degree is the unique
+            # such factor, so a lower precision cannot change the answer.
+            var factors = _reconstruct(f, partition, leading, state, budget)
+            # Lift for the full bound only once the lattice has merged some
+            # factors or holds every column; until then, feed it further.
+            var settled = len(partition) < count or traces_count >= f.degree()
+            if not factors and settled and _greater(reconstruction_bound, state.modulus, budget):
+                _hensel_extend(f, images, reconstruction_bound, state, budget)
+                factors = _reconstruct(f, partition, leading, state, budget)
+            if factors:
+                return factors.take()
         if traces_count < f.degree():
             traces_count = min(f.degree(), _product(2, traces_count))
         else:
