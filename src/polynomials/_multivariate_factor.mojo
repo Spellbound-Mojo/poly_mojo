@@ -498,7 +498,11 @@ def _atoms(f: SparsePoly[QQ], mut budget: Budget) raises PolyError -> List[Spars
     if _squarefree_image(primitive, main, budget):
         squarefree = primitive._copy(budget)
     else:
-        squarefree = _exact_poly(primitive, _gcd_value(primitive, derivative(primitive, main, budget), budget), budget)
+        # The integer gcd takes the modular and heuristic paths; the rational
+        # one would fall back to subresultant sequences.
+        var integer = _integer_image(primitive, budget)
+        var common = _gcd_value(integer, derivative(integer, main, budget), budget)
+        squarefree = _exact_poly(primitive, _rational_image(common, budget), budget)
     _ = variables.pop()
     var wang = _wang_atoms(squarefree, main, variables, budget)
     if wang:
