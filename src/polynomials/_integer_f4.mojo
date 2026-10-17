@@ -55,7 +55,7 @@ comptime _IFMA_MIN = 12
 comptime _ADX = CompilationTarget._has_feature["adx"]() and CompilationTarget._has_feature["bmi2"]()
 """Whether the target has mulx, adcx and adox, for multiply-add chains in two carry flags."""
 
-comptime _ROWS = 8
+comptime _ROWS = 4
 """With mulx, adcx and adox, products whose longer factor has at least this many limbs go a row at a time."""
 
 comptime _PAD = 32
@@ -624,12 +624,12 @@ def _add_mul_1[whole: Bool = False, extend: Bool = False](data: Pointer[mut=True
     var l = 0
     comptime if _ADX:
         if m >= _ROWS:
-            # Whole groups of four limbs in assembly, the value filled in first.
-            l = m & ~3
+            # In assembly, the value filled in first.
+            l = m
             comptime if extend:
                 for k in range(valid, l):
                     data.unsafe_offset(k).unsafe_store(fill)
-            carry = _adx_add_mul_4(data, f, other, l)
+            carry = _adx_add_mul(data, f, other, l)
     while l < m:
         var p = g * UInt128(other.unsafe_offset(l).unsafe_load())
         var low = UInt64(p & UInt128(UInt64.MAX))
@@ -656,11 +656,11 @@ def _sub_mul_1[whole: Bool = False, extend: Bool = False](data: Pointer[mut=True
     var l = 0
     comptime if _ADX:
         if m >= _ROWS:
-            l = m & ~3
+            l = m
             comptime if extend:
                 for k in range(valid, l):
                     data.unsafe_offset(k).unsafe_store(fill)
-            borrow = _adx_sub_mul_4(data, f, other, l)
+            borrow = _adx_sub_mul(data, f, other, l)
     while l < m:
         var p = g * UInt128(other.unsafe_offset(l).unsafe_load())
         var low = UInt64(p & UInt128(UInt64.MAX))
@@ -677,11 +677,12 @@ def _sub_mul_1[whole: Bool = False, extend: Bool = False](data: Pointer[mut=True
 
 
 @always_inline
-def _adx_add_mul_4(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int) -> UInt64:
-    """data[0:n] += f * other[0:n] for n a positive multiple of four; return the carry out, below 2^64.
+def _adx_add_mul(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int) -> UInt64:
+    """data[0:n] += f * other[0:n] for n >= 1; return the carry out, below 2^64.
 
     The products' high words go in by adcx (the carry flag) and the data by
     adox (the overflow flag): two carry chains that do not wait on each other.
+    The n mod 4 odd limbs go one at a time, the rest four at a time.
     """
     return inlined_assembly[
         """
@@ -689,45 +690,62 @@ def _adx_add_mul_4(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer
         mov $2, %rsi
         mov $3, %rcx
         mov $4, %rdx
-        lea (%rdi,%rcx,8), %rdi
-        lea (%rsi,%rcx,8), %rsi
-        neg %rcx
+        mov %rcx, %r11
+        shr $$2, %r11
+        and $$3, %rcx
         xor %r8d, %r8d
+        jrcxz 3f
         1:
-        mulx (%rsi,%rcx,8), %r9, %r10
+        mulx (%rsi), %r9, %r10
         adcx %r8, %r9
-        adox (%rdi,%rcx,8), %r9
-        mov %r9, (%rdi,%rcx,8)
-        mulx 8(%rsi,%rcx,8), %r9, %r8
-        adcx %r10, %r9
-        adox 8(%rdi,%rcx,8), %r9
-        mov %r9, 8(%rdi,%rcx,8)
-        mulx 16(%rsi,%rcx,8), %r9, %r10
-        adcx %r8, %r9
-        adox 16(%rdi,%rcx,8), %r9
-        mov %r9, 16(%rdi,%rcx,8)
-        mulx 24(%rsi,%rcx,8), %r9, %r8
-        adcx %r10, %r9
-        adox 24(%rdi,%rcx,8), %r9
-        mov %r9, 24(%rdi,%rcx,8)
-        lea 4(%rcx), %rcx
-        jrcxz 2f
+        adox (%rdi), %r9
+        mov %r9, (%rdi)
+        mov %r10, %r8
+        lea 8(%rsi), %rsi
+        lea 8(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 3f
         jmp 1b
+        3:
+        mov %r11, %rcx
+        jrcxz 4f
         2:
+        mulx (%rsi), %r9, %r10
+        adcx %r8, %r9
+        adox (%rdi), %r9
+        mov %r9, (%rdi)
+        mulx 8(%rsi), %r9, %r8
+        adcx %r10, %r9
+        adox 8(%rdi), %r9
+        mov %r9, 8(%rdi)
+        mulx 16(%rsi), %r9, %r10
+        adcx %r8, %r9
+        adox 16(%rdi), %r9
+        mov %r9, 16(%rdi)
+        mulx 24(%rsi), %r9, %r8
+        adcx %r10, %r9
+        adox 24(%rdi), %r9
+        mov %r9, 24(%rdi)
+        lea 32(%rsi), %rsi
+        lea 32(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 4f
+        jmp 2b
+        4:
         mov $$0, %r9
         adcx %r9, %r8
         adox %r9, %r8
         mov %r8, $0
         """,
         UInt64,
-        constraints="=&r,r,r,r,r,~{rdi},~{rsi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{memory},~{cc}",
+        constraints="=&r,r,r,r,r,~{rdi},~{rsi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{r11},~{memory},~{cc}",
     ](data, other, n, f)
 
 @always_inline
-def _adx_sub_mul_4(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int) -> UInt64:
-    """data[0:n] -= f * other[0:n] for n a positive multiple of four; return the borrow out.
+def _adx_sub_mul(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer[mut=False, UInt64, _], n: Int) -> UInt64:
+    """data[0:n] -= f * other[0:n] for n >= 1; return the borrow out.
 
-    As `_adx_add_mul_4`, adding the complement of the product with the
+    As `_adx_add_mul`, adding the complement of the product with the
     overflow flag set first, so the overflow out is one minus the borrow.
     """
     return inlined_assembly[
@@ -736,37 +754,55 @@ def _adx_sub_mul_4(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer
         mov $2, %rsi
         mov $3, %rcx
         mov $4, %rdx
-        lea (%rdi,%rcx,8), %rdi
-        lea (%rsi,%rcx,8), %rsi
-        neg %rcx
+        mov %rcx, %r11
+        shr $$2, %r11
+        and $$3, %rcx
         mov $$0x7fffffffffffffff, %r8
         add $$1, %r8
         mov $$0, %r8
+        jrcxz 3f
         1:
-        mulx (%rsi,%rcx,8), %r9, %r10
+        mulx (%rsi), %r9, %r10
         adcx %r8, %r9
         not %r9
-        adox (%rdi,%rcx,8), %r9
-        mov %r9, (%rdi,%rcx,8)
-        mulx 8(%rsi,%rcx,8), %r9, %r8
-        adcx %r10, %r9
-        not %r9
-        adox 8(%rdi,%rcx,8), %r9
-        mov %r9, 8(%rdi,%rcx,8)
-        mulx 16(%rsi,%rcx,8), %r9, %r10
-        adcx %r8, %r9
-        not %r9
-        adox 16(%rdi,%rcx,8), %r9
-        mov %r9, 16(%rdi,%rcx,8)
-        mulx 24(%rsi,%rcx,8), %r9, %r8
-        adcx %r10, %r9
-        not %r9
-        adox 24(%rdi,%rcx,8), %r9
-        mov %r9, 24(%rdi,%rcx,8)
-        lea 4(%rcx), %rcx
-        jrcxz 2f
+        adox (%rdi), %r9
+        mov %r9, (%rdi)
+        mov %r10, %r8
+        lea 8(%rsi), %rsi
+        lea 8(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 3f
         jmp 1b
+        3:
+        mov %r11, %rcx
+        jrcxz 4f
         2:
+        mulx (%rsi), %r9, %r10
+        adcx %r8, %r9
+        not %r9
+        adox (%rdi), %r9
+        mov %r9, (%rdi)
+        mulx 8(%rsi), %r9, %r8
+        adcx %r10, %r9
+        not %r9
+        adox 8(%rdi), %r9
+        mov %r9, 8(%rdi)
+        mulx 16(%rsi), %r9, %r10
+        adcx %r8, %r9
+        not %r9
+        adox 16(%rdi), %r9
+        mov %r9, 16(%rdi)
+        mulx 24(%rsi), %r9, %r8
+        adcx %r10, %r9
+        not %r9
+        adox 24(%rdi), %r9
+        mov %r9, 24(%rdi)
+        lea 32(%rsi), %rsi
+        lea 32(%rdi), %rdi
+        lea -1(%rcx), %rcx
+        jrcxz 4f
+        jmp 2b
+        4:
         mov $$0, %r9
         adcx %r9, %r8
         adox %r9, %r9
@@ -775,41 +811,18 @@ def _adx_sub_mul_4(data: Pointer[mut=True, UInt64, _], f: UInt64, other: Pointer
         mov %r8, $0
         """,
         UInt64,
-        constraints="=&r,r,r,r,r,~{rdi},~{rsi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{memory},~{cc}",
+        constraints="=&r,r,r,r,r,~{rdi},~{rsi},~{rcx},~{rdx},~{r8},~{r9},~{r10},~{r11},~{memory},~{cc}",
     ](data, other, n, f)
+
 
 @always_inline
 def _mul_row[subtract: Bool](data: Pointer[mut=True, UInt64, _], f: UInt64, b: Pointer[mut=False, UInt64, _], n: Int) -> UInt64:
-    """data[0:n] += f * b[0:n], or -= when `subtract`; return the carry or borrow out, below 2^64.
+    """data[0:n] += f * b[0:n], or -= when `subtract`, for n >= 1; return the carry or borrow out, below 2^64."""
+    comptime if subtract:
+        return _adx_sub_mul(data, f, b, n)
+    else:
+        return _adx_add_mul(data, f, b, n)
 
-    Whole groups of four limbs go through mulx, adcx and adox.
-    """
-    var q = n & ~3
-    var carry = UInt64(0)
-    if q > 0:
-        comptime if subtract:
-            carry = _adx_sub_mul_4(data, f, b, q)
-        else:
-            carry = _adx_add_mul_4(data, f, b, q)
-    var g = UInt128(f)
-    for l in range(q, n):
-        var p = g * UInt128(b.unsafe_offset(l).unsafe_load())
-        var low = UInt64(p & UInt128(UInt64.MAX))
-        var high = UInt64(p >> 64)
-        var e = data.unsafe_offset(l).unsafe_load()
-        comptime if subtract:
-            low += carry
-            high += UInt64(1) if low < carry else UInt64(0)
-            data.unsafe_offset(l).unsafe_store(e - low)
-            carry = high + (UInt64(1) if e < low else UInt64(0))
-        else:
-            low += e
-            high += UInt64(1) if low < e else UInt64(0)
-            low += carry
-            high += UInt64(1) if low < carry else UInt64(0)
-            data.unsafe_offset(l).unsafe_store(low)
-            carry = high
-    return carry
 
 def _rows[subtract: Bool](data: Pointer[mut=True, UInt64, _], width: Int, a: Pointer[mut=False, UInt64, _], na: Int, b: Pointer[mut=False, UInt64, _], nb: Int):
     """`_accumulate` with mulx, adcx and adox, a row per limb of a.
@@ -2148,17 +2161,53 @@ struct _LaneRow(Movable):
         self.columns.clear()
         self.residues.clear()
 
-    def add(mut self, columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factor: _Lanes, squares: _Lanes, skip: Int):
+    def add(mut self, columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factor: SIMD[DType.uint32, _LANES], squares: _Lanes, skip: Int):
         """Add factor times a row of residues, after its first `skip` entries; entries stay below p^2."""
-        var data = self.data.unsafe_ptr()
-        var marks = self.marks.unsafe_ptr()
-        for k in range(skip, n):
-            var c = Int(columns.unsafe_offset(k).unsafe_load())
-            var at = data.unsafe_offset(_LANES * c)
-            var x = at.unsafe_load[width=_LANES]() + factor * values.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
+        _lanes_add[_LANES, True](self.data.unsafe_ptr(), self.marks.unsafe_ptr(), columns, values, n, factor, squares, skip)
+
+
+@no_inline
+def _lanes_add[S: Int, reduce: Bool](data: Pointer[mut=True, UInt64, _], marks: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], n: Int, factors: SIMD[DType.uint32, _LANES], squares: _Lanes, skip: Int):
+    """Add factors times a row of residues, after its first `skip` entries, to every lane of a dense row whose columns are S apart, and mark the columns.
+
+    With `reduce` each entry is brought below p^2 again. Both factors widen
+    from 32 bits, so each product is one 32 by 32 bit multiplication; this
+    stays out of line, since inlined the widening is lost before instructions
+    are selected.
+    """
+    var factor = factors.cast[DType.uint64]()
+    for k in range(skip, n):
+        var c = Int(columns.unsafe_offset(k).unsafe_load())
+        var at = data.unsafe_offset(S * c)
+        var x = at.unsafe_load[width=_LANES]() + factor * values.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
+        comptime if reduce:
             at.unsafe_store[width=_LANES](x.ge(squares).select(x - squares, x))
-            var word = marks.unsafe_offset(c >> 6)
-            word.unsafe_store(word.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
+        else:
+            at.unsafe_store[width=_LANES](x)
+        var mw = marks.unsafe_offset(c >> 6)
+        mw.unsafe_store(mw.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
+
+
+@no_inline
+def _lanes_add_two[reduce: Bool](data: Pointer[mut=True, UInt64, _], marks: Pointer[mut=True, UInt64, _], columns: Pointer[mut=False, Int32, _], values: Pointer[mut=False, UInt32, _], others: Pointer[mut=False, UInt32, _], n: Int, factors: SIMD[DType.uint32, _LANES], more: SIMD[DType.uint32, _LANES], squares: _Lanes, more_squares: _Lanes, skip: Int):
+    """As `_lanes_add` for two batches, `_LANES` apart in each column."""
+    comptime S = 2 * _LANES
+    var f0 = factors.cast[DType.uint64]()
+    var f1 = more.cast[DType.uint64]()
+    for k in range(skip, n):
+        var c = Int(columns.unsafe_offset(k).unsafe_load())
+        var at = data.unsafe_offset(S * c)
+        var x = at.unsafe_load[width=_LANES]() + f0 * values.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
+        var at1 = at.unsafe_offset(_LANES)
+        var y = at1.unsafe_load[width=_LANES]() + f1 * others.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
+        comptime if reduce:
+            at.unsafe_store[width=_LANES](x.ge(squares).select(x - squares, x))
+            at1.unsafe_store[width=_LANES](y.ge(more_squares).select(y - more_squares, y))
+        else:
+            at.unsafe_store[width=_LANES](x)
+            at1.unsafe_store[width=_LANES](y)
+        var mw = marks.unsafe_offset(c >> 6)
+        mw.unsafe_store(mw.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
 
 
 def _lane_pass_two[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], values: List[List[UInt32]], others: List[List[UInt32]], primes: _Primes, more: _Primes, a: Int, b: Int, batch: Int, limit: Int, mut budget: Budget) raises PolyError -> Bool:
@@ -2172,18 +2221,9 @@ def _lane_pass_two[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[
         var s = matrix.starts[r]
         var n = matrix.starts[r + 1] - s
         var columns = matrix.entries.unsafe_ptr().unsafe_offset(s)
-        var v0 = values[matrix.sources[r]].unsafe_ptr()
-        var v1 = others[matrix.sources[r]].unsafe_ptr()
-        var f0 = _Lanes(1) if half == 0 else primes.primes - 1
-        var f1 = _Lanes(1) if half == 0 else more.primes - 1
-        for k in range(n):
-            var c = Int(columns.unsafe_offset(k).unsafe_load())
-            var at = data.unsafe_offset(S * c)
-            at.unsafe_store[width=_LANES](at.unsafe_load[width=_LANES]() + f0 * v0.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]())
-            var at1 = at.unsafe_offset(_LANES)
-            at1.unsafe_store[width=_LANES](at1.unsafe_load[width=_LANES]() + f1 * v1.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]())
-            var word = marks.unsafe_offset(c >> 6)
-            word.unsafe_store(word.unsafe_load() | (UInt64(1) << UInt64(c & 63)))
+        var f0 = SIMD[DType.uint32, _LANES](1) if half == 0 else (primes.primes - 1).cast[DType.uint32]()
+        var f1 = SIMD[DType.uint32, _LANES](1) if half == 0 else (more.primes - 1).cast[DType.uint32]()
+        _lanes_add_two[False](data, marks, columns, values[matrix.sources[r]].unsafe_ptr(), others[matrix.sources[r]].unsafe_ptr(), n, f0, f1, primes.squares, more.squares, 0)
     budget.charge(UInt64(S * (matrix.starts[a + 1] - matrix.starts[a] + matrix.starts[b + 1] - matrix.starts[b])))
     data.unsafe_offset(S * first).unsafe_store[width=_LANES](_Lanes(0))
     data.unsafe_offset(S * first + _LANES).unsafe_store[width=_LANES](_Lanes(0))
@@ -2213,22 +2253,10 @@ def _lane_pass_two[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[
             var s = matrix.starts.unsafe_get(q)
             var n = matrix.starts.unsafe_get(q + 1) - s
             budget.charge(UInt64(S * n))
-            var f0 = u.eq(0).select(_Lanes(0), primes.primes - u)
-            var f1 = w.eq(0).select(_Lanes(0), more.primes - w)
-            var columns = matrix.entries.unsafe_ptr().unsafe_offset(s)
+            var f0 = u.eq(0).select(_Lanes(0), primes.primes - u).cast[DType.uint32]()
+            var f1 = w.eq(0).select(_Lanes(0), more.primes - w).cast[DType.uint32]()
             var g = matrix.sources.unsafe_get(q)
-            var v0 = values[g].unsafe_ptr()
-            var v1 = others[g].unsafe_ptr()
-            for k in range(1, n):
-                var e = Int(columns.unsafe_offset(k).unsafe_load())
-                var to0 = data.unsafe_offset(S * e)
-                var x = to0.unsafe_load[width=_LANES]() + f0 * v0.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
-                to0.unsafe_store[width=_LANES](x.ge(primes.squares).select(x - primes.squares, x))
-                var to1 = to0.unsafe_offset(_LANES)
-                var y = to1.unsafe_load[width=_LANES]() + f1 * v1.unsafe_offset(_LANES * k).unsafe_load[width=_LANES]().cast[DType.uint64]()
-                to1.unsafe_store[width=_LANES](y.ge(more.squares).select(y - more.squares, y))
-                var word = marks.unsafe_offset(e >> 6)
-                word.unsafe_store(word.unsafe_load() | (UInt64(1) << UInt64(e & 63)))
+            _lanes_add_two[True](data, marks, matrix.entries.unsafe_ptr().unsafe_offset(s), values[g].unsafe_ptr(), others[g].unsafe_ptr(), n, f0, f1, primes.squares, more.squares, 1)
         c = lanes.next_marked(c + 1)
     return True
 
@@ -2244,8 +2272,8 @@ def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int]
     var data = lanes.data.unsafe_ptr()
     var sa = matrix.starts[a]
     var sb = matrix.starts[b]
-    lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sa), values[matrix.sources[a]].unsafe_ptr(), matrix.starts[a + 1] - sa, _Lanes(1), primes.squares, 0)
-    lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sb), values[matrix.sources[b]].unsafe_ptr(), matrix.starts[b + 1] - sb, primes.primes - 1, primes.squares, 0)
+    lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sa), values[matrix.sources[a]].unsafe_ptr(), matrix.starts[a + 1] - sa, SIMD[DType.uint32, _LANES](1), primes.squares, 0)
+    lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(sb), values[matrix.sources[b]].unsafe_ptr(), matrix.starts[b + 1] - sb, (primes.primes - 1).cast[DType.uint32](), primes.squares, 0)
     budget.charge(UInt64(_LANES * (matrix.starts[a + 1] - sa + matrix.starts[b + 1] - sb)))
     var first = Int(matrix.entries[sa])
     data.unsafe_offset(_LANES * first).unsafe_store[width=_LANES](_Lanes(0))
@@ -2272,7 +2300,7 @@ def _lane_pass[W: Int](mut lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int]
             var s = matrix.starts.unsafe_get(q)
             var n = matrix.starts.unsafe_get(q + 1) - s
             budget.charge(UInt64(_LANES * n))
-            var factor = v.eq(0).select(_Lanes(0), primes.primes - v)
+            var factor = v.eq(0).select(_Lanes(0), primes.primes - v).cast[DType.uint32]()
             lanes.add(matrix.entries.unsafe_ptr().unsafe_offset(s), values[matrix.sources.unsafe_get(q)].unsafe_ptr(), n, factor, primes.squares, 1)
         c = lanes.next_marked(c + 1)
     return True
@@ -2386,23 +2414,45 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
     var half_q = List[UInt64](length=basis.limbs, fill=0)
     for l in range(basis.limbs):
         half_q[l] = (basis.product[l] >> 1) | ((basis.product[l + 1] << 63) if l + 1 < basis.limbs else UInt64(0))
+    # Q shifted to a normalized divisor, for rescaling values in place.
+    var shift = Int(count_leading_zeros(basis.product[basis.limbs - 1]))
+    var divisor = List[UInt64](length=basis.limbs, fill=0)
+    for l in range(basis.limbs):
+        var low = basis.product[l] << UInt64(shift)
+        var high = (basis.product[l - 1] >> UInt64(64 - shift)) if shift > 0 and l > 0 else UInt64(0)
+        divisor[l] = low | high
+    var scaled = List[UInt64](length=2 * basis.limbs + 4, fill=0)
+    # Each slot's element, and per element the factors times its leading
+    # coefficient's inverse, modulo each prime, as of `version`.
+    var elements = List[Int](capacity=nslots)
+    for slot in range(nslots):
+        elements.append(matrix.sources.unsafe_get(pivot.unsafe_get(lanes.columns.unsafe_get(slot))))
+    var ngens = len(coefficients.limbs)
+    var combined = List[UInt64](length=ngens * k, fill=0)
+    var stamps = List[Int](length=ngens, fill=-1)
+    var version = 0
     var top = nslots
     var ready = 0
     # Later columns first: their denominators tend to contain the earlier ones'.
     for slot in range(nslots - 1, -1, -1):
-        var g = matrix.sources[pivot[lanes.columns[slot]]]
+        var g = elements.unsafe_get(slot)
         if top - slot >= ready:
             top = slot
             ready = min(_LANES, slot + 1)
             for j in range(ready):
-                var h = matrix.sources[pivot[lanes.columns[slot - j]]]
+                var h = elements.unsafe_get(slot - j)
                 var from_ = lanes.residues.unsafe_ptr().unsafe_offset((slot - j) * limit)
+                var scale = combined.unsafe_ptr().unsafe_offset(h * k)
+                if stamps.unsafe_get(h) != version:
+                    stamps.unsafe_get(h) = version
+                    for batch in range(k // _LANES):
+                        var inverse = images.inverses[batch].unsafe_ptr().unsafe_offset(_LANES * h).unsafe_load[width=_LANES]()
+                        var f = factors.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_load[width=_LANES]()
+                        scale.unsafe_offset(_LANES * batch).unsafe_store[width=_LANES](_mod_lanes(f * inverse, images.batches[batch]))
                 for batch in range(k // _LANES):
                     ref primes = images.batches[batch]
                     var v = from_.unsafe_offset(_LANES * batch).unsafe_load[width=_LANES]().cast[DType.uint64]()
-                    var inverse = images.inverses[batch].unsafe_ptr().unsafe_offset(_LANES * h).unsafe_load[width=_LANES]()
-                    var x = _mod_lanes(v * factors.unsafe_ptr().unsafe_offset(_LANES * batch).unsafe_load[width=_LANES](), primes)
-                    var y = _mod_lanes(x * inverse, primes)
+                    var y = _mod_lanes(v * scale.unsafe_offset(_LANES * batch).unsafe_load[width=_LANES](), primes)
                     comptime for l in range(_LANES):
                         block.unsafe_get(_LANES * (_LANES * batch + l) + j) = y[l]
             basis.values(block, block_values, sums)
@@ -2444,9 +2494,19 @@ def _proves[W: Int](lanes: _LaneRow, matrix: _Matrix[W], pivot: List[Int], coeff
             for i in range(k):
                 var p = images.primes[i]
                 factors[i] = factors[i] * _remainder_of(b_limbs.unsafe_ptr(), len(b_limbs), p) % p
+            version += 1
             # Earlier n_c grow by the new factor; account for it in the bound now.
             worst += b.magnitude_bit_length()
-            ready = 0
+            # The values formed ahead are now b times theirs modulo Q: rescale
+            # them when that is cheaper than forming them again.
+            var lane = top - slot
+            var remaining = ready - lane - 1
+            var factor = _shifted_limbs(b_limbs, shift)
+            if remaining > 0 and len(factor) <= basis.limbs and remaining * (2 * len(factor) + 1) < 2 * k:
+                for j in range(lane + 1, ready):
+                    _rescale(block_values.unsafe_ptr().unsafe_offset(j * n), basis.limbs, factor, divisor, shift, scaled)
+            else:
+                ready = 0
         # n_c times D / D_now, which is below 2^(bits D - bits D_now + 1) at the end:
         # counted here by charging the later growth to `worst` as it happens.
         worst = max(worst, n_bits + coefficients.bits[g])
@@ -2465,6 +2525,33 @@ def _bits_at(x: Pointer[mut=False, UInt64, _], n: Int) -> Int:
     if l < 0:
         return 0
     return 64 * l + 64 - Int(count_leading_zeros(x.unsafe_offset(l).unsafe_load()))
+
+
+def _shifted_limbs(limbs: List[UInt64], shift: Int) -> List[UInt64]:
+    """The magnitude limbs times 2^shift, for shift below 64, without leading zeros."""
+    var result = List[UInt64](capacity=len(limbs) + 1)
+    var carry = UInt64(0)
+    for limb in limbs:
+        result.append((limb << UInt64(shift)) | carry)
+        carry = (limb >> UInt64(64 - shift)) if shift > 0 else UInt64(0)
+    result.append(carry)
+    while len(result) and result[len(result) - 1] == 0:
+        _ = result.pop()
+    return result^
+
+
+def _rescale(x: Pointer[mut=True, UInt64, _], n: Int, factor: List[UInt64], divisor: List[UInt64], shift: Int, mut scratch: List[UInt64]):
+    """Set x[0:n], below Q, to x times b modulo Q, given factor = b 2^shift and divisor = Q 2^shift (n limbs, normalized)."""
+    var length = n + len(factor)
+    var w = scratch.unsafe_ptr()
+    for l in range(length + 1):
+        w.unsafe_offset(l).unsafe_store(0)
+    for l in range(len(factor)):
+        _add_mul_1(w.unsafe_offset(l), length - l, factor[l], x, n)
+    _remainder_limbs(w, length, divisor.unsafe_ptr(), n)
+    for l in range(n):
+        var high = (w.unsafe_offset(l + 1).unsafe_load() << UInt64(64 - shift)) if shift > 0 and l + 1 < n else UInt64(0)
+        x.unsafe_offset(l).unsafe_store((w.unsafe_offset(l).unsafe_load() >> UInt64(shift)) | high)
 
 
 def _compare_at(x: Pointer[mut=False, UInt64, _], n: Int, y: Pointer[mut=False, UInt64, _]) -> Int:
