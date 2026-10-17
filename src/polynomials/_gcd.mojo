@@ -105,10 +105,6 @@ def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budge
     var common = _gcd_value(cf, ch, budget)
     var pf = _exact_poly(f, cf, budget)
     var ph = _exact_poly(h, ch, budget)
-    comptime if C == ZZ:
-        if len(variables) == 1 and max(pf.degree_in(variable, budget), ph.degree_in(variable, budget)) >= _MODULAR_THRESHOLD:
-            var primitive = _modular_primitive(rebind[SparsePoly[ZZ]](pf), rebind[SparsePoly[ZZ]](ph), variable, budget)
-            return _normalized(common.mul(rebind[SparsePoly[C]](primitive), budget), budget)
     var sequence = _prs(pf, ph, variable, False, budget, history=False)
     var last = _zero(f, budget)
     if len(sequence):

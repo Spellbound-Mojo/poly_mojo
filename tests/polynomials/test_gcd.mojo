@@ -10,6 +10,8 @@ from support.check import Checker
 from polynomials.gcd import gcd, gcd_value
 from polynomials._euclidean import _extended
 from polynomials._dense_ops import _gcd as _field_gcd
+from polynomials.division import divide_exact
+from support.gen import polynomial
 from polynomials.certificates import check_common_divisor, check_bezout, check_coprimality
 
 def generated[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
@@ -141,6 +143,44 @@ def multi_prime_cases(mut c: Checker) raises:
         c.check(gcd_value(f, h, work) == gcd(f, h, work).gcd, "gcd_value equals the gcd of the full result")
 
 
+def division_cases[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
+    """Exact sparse division on packed keys: exact multiples, inexact inputs, and the wide fallback."""
+    var work = Budget()
+    var rng = SplitMix64(7717)
+    var orders = List[MonomialOrder]()
+    orders.append(MonomialOrder(MonomialOrder.GREVLEX, [0, 1, 2, 3], work))
+    orders.append(MonomialOrder(MonomialOrder.LEX, [2, 0, 3, 1], work))
+    orders.append(MonomialOrder())
+    for order in orders:
+        for round in range(12):
+            var q = polynomial[C](ctx, order, rng, work, terms=3 + round % 5, variables=4, degree=2 + round % 3)
+            var g = polynomial[C](ctx, order, rng, work, terms=1 + round % 4, variables=4, degree=1 + round % 4)
+            if g.is_zero() or q.is_zero():
+                continue
+            var f = q.mul(g, work)
+            var got = divide_exact(f, g, work)
+            c.check(Bool(got) and got.value() == q, "packed exact quotient")
+            var r = polynomial[C](ctx, order, rng, work, terms=2, variables=4, degree=3)
+            var perturbed = f.add(r, work)
+            var inexact = divide_exact(perturbed, g, work)
+            if inexact:
+                c.check(inexact.value().mul(g, work) == perturbed, "accepted quotient is exact")
+            if len(g.variables(work)):
+                # q g + 1 is not a multiple of a nonconstant g.
+                c.check(not divide_exact(f.add(SparsePoly[C].constant(C.one(ctx), order, work), work), g, work), "inexact input rejected")
+    # Thirty variables of degree 31 need 150 key bits: the generic path answers.
+    var order = MonomialOrder()
+    var wide = SparsePoly[C].constant(C.one(ctx), order, work)
+    for v in range(30):
+        var power = SparsePoly[C].variable(Int64(v), order, ctx, work).pow(31, work)
+        if v < 2:
+            power = power.add(SparsePoly[C].constant(C.one(ctx), order, work), work)
+        wide = wide.mul(power, work)
+    var x = SparsePoly[C].variable(0, order, ctx, work).pow(31, work).add(SparsePoly[C].constant(C.one(ctx), order, work), work)
+    var quotient = divide_exact(wide, x, work)
+    c.check(Bool(quotient) and quotient.value().mul(x, work) == wide, "wide exponents fall back to the generic division")
+
+
 def main() raises:
     var c = Checker("gcd")
     var work = Budget()
@@ -186,4 +226,7 @@ def main() raises:
     modular_cases(c)
     word_field_cases(c)
     multi_prime_cases(c)
+    division_cases[ZZ](NoContext(), c)
+    division_cases[QQ](NoContext(), c)
+    division_cases[ModInt](Modulus(101, work), c)
     c.finish()
