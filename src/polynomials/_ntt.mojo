@@ -797,21 +797,27 @@ def _modular_product(a: List[UInt64], b: List[UInt64], count: Int, p: UInt64, sq
         return single^
     _charge_size(_product(out, _product(k, k)), budget)
     var g = _garner(k)
-    # x mod p = sum v_i (q_0 ... q_(i-1) mod p).
+    # x mod p = sum v_i (q_0 ... q_(i-1) mod p), all by Shoup products: each
+    # term is below 2p, with no division per coefficient.
+    var one_p = _shoup_quotient(1, p)
     var weights = List[UInt64](capacity=k)
+    var weight_quotients = List[UInt64](capacity=k)
     var w = UInt64(1)
     for i in range(k):
         weights.append(w)
+        weight_quotients.append(_shoup_quotient(w, p))
         w = _mod_mul(w, primes[i] % p, p)
     var digits = List[UInt64](length=k, fill=0)
     var result = List[UInt64](length=count, fill=0)
     for i in range(out):
-        var value = residues[0][i] % p
+        var value: UInt64
         if k > 1:
             _digits(g, residues, i, digits)
-            value = digits[0] % p
+            value = _reduce_2q(_shoup(digits[0], 1, one_p, p), p)
             for j in range(1, k):
-                value = (value + _mod_mul(digits[j] % p, weights[j], p)) % p
+                value = _reduce_2q(value + _reduce_2q(_shoup(digits[j], weights[j], weight_quotients[j], p), p), p)
+        else:
+            value = _reduce_2q(_shoup(residues[0][i], 1, one_p, p), p)
         result[i] = value
     return result^
 
@@ -1021,13 +1027,21 @@ struct _Convolver(Movable):
         _charge_size(_product(count, _product(k, k)), budget)
         var digits = List[UInt64](length=k, fill=0)
         var result = List[UInt64](length=count, fill=0)
+        # The same Shoup-product combine as _modular_product, with no division per coefficient.
+        var p = self.p
+        var one_p = _shoup_quotient(1, p)
+        var weight_quotients = List[UInt64](capacity=k)
+        for j in range(k):
+            weight_quotients.append(_shoup_quotient(self.weights[j], p))
         for i in range(count):
-            var value = residues[0][i] % self.p
+            var value: UInt64
             if k > 1:
                 _digits(self.garner, residues, i, digits)
-                value = digits[0] % self.p
+                value = _reduce_2q(_shoup(digits[0], 1, one_p, p), p)
                 for j in range(1, k):
-                    value = (value + _mod_mul(digits[j] % self.p, self.weights[j], self.p)) % self.p
+                    value = _reduce_2q(value + _reduce_2q(_shoup(digits[j], self.weights[j], weight_quotients[j], p), p), p)
+            else:
+                value = _reduce_2q(_shoup(residues[0][i], 1, one_p, p), p)
             result[i] = value
         return result^
 
