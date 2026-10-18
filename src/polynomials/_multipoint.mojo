@@ -11,7 +11,7 @@ proportion to its coefficient work, independent of timing.
 """
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product
 from ._nmod import _Field, _dot, _mulm, _addm, _subm, _negm, _to, _invm, _mul, _schoolbook, _trim, _reversed, _slice, _sub, _add, _divmod_classic
-from ._ntt import _modular_product
+from ._ntt import _modular_product, _Convolver, _transform_length
 
 comptime _TRANSFORM = 128
 """Shorter operand length from which products use transforms instead of Karatsuba."""
@@ -136,6 +136,43 @@ def _horner(r: List[UInt64], x: UInt64, f: _Field) -> UInt64:
     return value
 
 
+struct _Convolvers(Movable):
+    """Cyclic convolvers modulo one prime, built once per transform length."""
+    var p: UInt64
+    var by_log: List[Optional[_Convolver]]
+
+    def __init__(out self, p: UInt64):
+        self.p = p
+        self.by_log = List[Optional[_Convolver]]()
+
+    def cyclic(mut self, x: List[UInt64], y: List[UInt64], n: Int, count: Int, mut budget: Budget) raises PolyError -> List[UInt64]:
+        """The first `count` coefficients of the cyclic convolution of length n (a power of two) of x and y."""
+        var log = 0
+        while (1 << log) < n:
+            log += 1
+        while len(self.by_log) <= log:
+            self.by_log.append(None)
+        if not self.by_log[log]:
+            self.by_log[log] = _Convolver(self.p, n, budget)
+        ref convolver = self.by_log[log].value()
+        return convolver.multiply(convolver.transform(x, budget), convolver.transform(y, budget), count, budget)
+
+
+def _middle_cyclic(a: List[UInt64], node: List[UInt64], skip: Int, keep: Int, f: _Field, mut convolvers: _Convolvers, mut budget: Budget) raises PolyError -> List[UInt64]:
+    """The same window as _middle, from a cyclic convolution of length at least len(a).
+
+    With skip = deg(node) and len(a) = skip + keep, the full product has
+    length len(a) + skip; its part beyond the cyclic length n >= len(a) wraps
+    onto indices below skip, outside the window.
+    """
+    var product = convolvers.cyclic(_reversed(node, len(node), budget), a, _transform_length(len(a)), skip + keep, budget)
+    _allocation[UInt64](keep, budget)
+    var result = List[UInt64](length=keep, fill=0)
+    for k in range(keep):
+        result[k] = _mulm(product[skip + k], 1, f)
+    return result^
+
+
 def _middle(a: List[UInt64], node: List[UInt64], skip: Int, keep: Int, f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
     """Coefficients skip ... skip + keep - 1 of rev(node) * a, zero-padded to length keep."""
     var product = _mullow_fast(_reversed(node, len(node), budget), a, skip + keep, f, budget)
@@ -173,6 +210,7 @@ def _evaluate(tree: _Tree, poly: List[UInt64], f: _Field, mut budget: Budget) ra
     var first = _mullow_fast(_reversed(reduced, n, budget), inverse, n, f, budget)
     first.resize(n, 0)
     var current: List[List[UInt64]] = [first^]
+    var convolvers = _Convolvers(f.p)
     var level = top
     while level > stop:
         level -= 1
@@ -184,8 +222,12 @@ def _evaluate(tree: _Tree, poly: List[UInt64], f: _Field, mut budget: Budget) ra
             if 2 * j + 1 < len(nodes):
                 var left = len(nodes[2 * j]) - 1
                 var right = len(nodes[2 * j + 1]) - 1
-                next.append(_middle(current[j], nodes[2 * j + 1], right, left, f, budget))
-                next.append(_middle(current[j], nodes[2 * j], left, right, f, budget))
+                if min(left, right) >= _TRANSFORM:
+                    next.append(_middle_cyclic(current[j], nodes[2 * j + 1], right, left, f, convolvers, budget))
+                    next.append(_middle_cyclic(current[j], nodes[2 * j], left, right, f, convolvers, budget))
+                else:
+                    next.append(_middle(current[j], nodes[2 * j + 1], right, left, f, budget))
+                    next.append(_middle(current[j], nodes[2 * j], left, right, f, budget))
             else:
                 next.append(current[j].copy())
         current = next^
