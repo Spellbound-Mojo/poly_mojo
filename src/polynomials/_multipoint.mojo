@@ -13,7 +13,7 @@ from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size,
 from ._nmod import _Field, _dot, _mulm, _addm, _subm, _negm, _to, _invm, _mul, _schoolbook, _trim, _reversed, _slice, _sub, _add, _divmod_classic
 from ._ntt import _modular_product
 
-comptime _TRANSFORM = 384
+comptime _TRANSFORM = 128
 """Shorter operand length from which products use transforms instead of Karatsuba."""
 comptime _NEWTON = 64
 """Divisor degree and quotient length from which remainders use a Newton inverse."""
