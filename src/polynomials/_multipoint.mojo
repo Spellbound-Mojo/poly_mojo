@@ -281,6 +281,39 @@ def _inverse_weights(tree: _Tree, f: _Field, mut budget: Budget) raises PolyErro
     return result^
 
 
+def _direct_inverse_weights(points: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
+    """1 / prod_(j != i) (a_i - a_j) for every point, from the n (n - 1) differences directly; DOMAIN for repeated points.
+
+    For few points this is cheaper than evaluating M' along a remainder
+    tree; the values, and so every result built from them, are the same.
+    """
+    var count = len(points)
+    _charge_size(_product(count, count) + 1, budget)
+    _allocation[UInt64](2 * count, budget)
+    var weights = List[UInt64](length=count, fill=f.one)
+    for i in range(count):
+        var a = points[i]
+        var w = weights[i]
+        for j in range(i + 1, count):
+            var d = _subm(a, points[j], f)
+            w = _mulm(w, d, f)
+            weights[j] = _mulm(weights[j], _negm(d, f), f)
+        weights[i] = w
+    var prefix = List[UInt64](capacity=count)
+    var running = f.one
+    for i in range(count):
+        if weights[i] == 0:
+            raise PolyError(PolyErrorKind.DOMAIN, "interpolation nodes must be distinct")
+        prefix.append(running)
+        running = _mulm(running, weights[i], f)
+    var inverse = _invm(running, f, budget)
+    var result = List[UInt64](length=count, fill=0)
+    for i in range(count - 1, -1, -1):
+        result[i] = _mulm(inverse, prefix[i], f)
+        inverse = _mulm(inverse, weights[i], f)
+    return result^
+
+
 def _interpolate(tree: _Tree, values: List[UInt64], weights: List[UInt64], f: _Field, mut budget: Budget) raises PolyError -> List[UInt64]:
     """The polynomial of degree below the point count through (a_i, values[i]), given the inverse weights."""
     var count = len(tree.points)

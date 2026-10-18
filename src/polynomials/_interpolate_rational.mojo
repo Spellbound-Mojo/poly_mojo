@@ -16,8 +16,10 @@ from .coefficients import QQ, NoContext, _prime
 from .dense import DensePoly
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product
 from ._nmod import _Field, _field, _mulm, _addm, _subm, _to, _from, _invm
-from ._multipoint import _Tree, _inverse_weights, _interpolate
+from ._multipoint import _Tree, _inverse_weights, _interpolate, _direct_inverse_weights
 
+comptime _DIRECT_WEIGHTS = 256
+"""Node counts up to which each prime's barycentric weights come from the pairwise differences directly."""
 comptime _NODE_BITS = 19
 """Nodes of magnitude below 2^19 keep the residue counts over primes up to 2X cheap."""
 comptime _SAFETY_BITS = 8
@@ -196,8 +198,10 @@ def _interpolate_integer_nodes(variable: Int64, points: List[QQ], values: List[Q
         for i in range(n):
             var x = UInt64(nodes[i]) if nodes[i] >= 0 else p - UInt64(-nodes[i])
             xs.append(_to(x, f))
+        var weights = _direct_inverse_weights(xs, f, budget) if n <= _DIRECT_WEIGHTS else List[UInt64]()
         var tree = _Tree(xs^, f, budget)
-        var weights = _inverse_weights(tree, f, budget)
+        if n > _DIRECT_WEIGHTS:
+            weights = _inverse_weights(tree, f, budget)
         var image = _interpolate(tree, ys, weights, f, budget)
         var plain = List[UInt64](length=n, fill=0)
         for k in range(min(n, len(image))):
