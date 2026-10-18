@@ -27,7 +27,7 @@ def _exact_log[C: CoefficientField](a: _CoefficientView[C, _], length: Int, cont
 
 
 def _exact_exp[C: CoefficientField](a: _CoefficientView[C, _], length: Int, context: C.Context, mut budget: Budget) raises PolyError -> List[C]:
-    comptime threshold = 1024 if C == ModInt else 128
+    comptime threshold = 1024 if C == ModInt else 32
     if length < threshold or len(a) < 16:
         return _exp_values[_ExactOps[C]](_view(a), length, context, budget)
     return _newton_exp(_view(a), length, context, budget)

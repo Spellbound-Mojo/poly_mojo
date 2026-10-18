@@ -19,7 +19,7 @@ struct _ExactOps[C: CoefficientRing](_ScalarOps):
     def multiply(a: _CoefficientView[Self.Scalar, _], b: _CoefficientView[Self.Scalar, _], length: Int, context: Self.Context, mut budget: Budget) raises PolyError -> List[Self.Scalar]:
         # Keep the small kernel visible to callers; the larger work-stack
         # implementation must not make short Horner products pay call overhead.
-        if min(length, min(len(a), len(b))) < 64:
+        if min(length, min(len(a), len(b))) < (_RATIONAL_TRANSFORM if Self.C == QQ else 64):
             return _convolve_values[Self](_view(a), _view(b), length, context, budget)
         return _exact_product(_view(a), _view(b), length, context, budget)
 
@@ -55,6 +55,9 @@ struct _ExactOps[C: CoefficientRing](_ScalarOps):
         return value.is_zero()
 
 
+comptime _RATIONAL_TRANSFORM = 8
+"""Rational products from this many terms on run on integer numerators by transforms."""
+
 @fieldwise_init
 struct _LowProduct[C: CoefficientRing](Movable):
     var a: List[Self.C]
@@ -68,11 +71,12 @@ def _exact_product[C: CoefficientRing](a: _CoefficientView[C, _], b: _Coefficien
         raise PolyError(PolyErrorKind.DOMAIN, "negative truncation order")
     var na = min(length, len(a))
     var nb = min(length, len(b))
-    if min(na, nb) < 64:
+    if min(na, nb) < (_RATIONAL_TRANSFORM if C == QQ else 64):
         return _convolve_values[_ExactOps[C]](_view(a), _view(b), length, context, budget)
     comptime if C == ModInt or C == ZZ or C == QQ:
-        # Rational operands first pay for a common denominator and its gcds.
-        if C != QQ or min(na, nb) >= 128:
+        # Rational operands pay once for a common denominator and its gcds,
+        # which the transform recovers from a few terms on.
+        if C != QQ or min(na, nb) >= _RATIONAL_TRANSFORM:
             var transformed = _transform_product(a, b, na, nb, length, budget)
             if transformed:
                 return transformed.take()
