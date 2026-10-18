@@ -21,6 +21,8 @@ from ._univariate_modular import _univariate_gcd
 
 comptime _ATTEMPTS = 6
 comptime _MAX_BITS = 1 << 21
+# Inputs with fewer terms than this run GCDHEU before sparse Brown (measured faster there).
+comptime _SMALL_TERMS = 512
 
 
 def _fail(e: Error) -> PolyError:
@@ -186,6 +188,11 @@ def _variables_of(f: SparsePoly[ZZ], g: SparsePoly[ZZ], mut budget: Budget) rais
             vs.append(v)
     sort(vs)
     return vs^
+
+
+def _small_for_heuristic(f: SparsePoly[ZZ], g: SparsePoly[ZZ], variables: List[Int64]) -> Bool:
+    """Whether to run GCDHEU before sparse Brown: three or more variables and few terms."""
+    return len(variables) >= 3 and len(f.terms) + len(g.terms) < _SMALL_TERMS
 
 
 def _heuristic(f: SparsePoly[ZZ], g: SparsePoly[ZZ], mut budget: Budget) raises PolyError -> Optional[SparsePoly[ZZ]]:
