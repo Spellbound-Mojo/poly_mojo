@@ -1,5 +1,5 @@
 """Independently planted multivariate factors and lifting regressions."""
-from apn_mojo import Rational
+from apn_mojo import Rational, Integer
 from polynomials import Budget, QQ, DensePoly, SparsePoly, MonomialOrder, factor, factor_multivariate, factor_multivariate_integer, check_multivariate_factorization, PolyErrorKind
 from polynomials._multivariate_factor import _lift, _recombine_lifted
 from support.check import Checker
@@ -114,6 +114,22 @@ def main() raises:
             if (entry[0] == planted or entry[0] == planted.neg(work)) and entry[1] == 1:
                 sparse_matched += 1
     c.check(len(sparse_result.factors) == 3 and sparse_matched == 3 and check_multivariate_factorization(sparse_integer, sparse_result, work), "sparse six-variable factors lift to the planted irreducibles")
+    # Perfect powers factor through their root: even powers with negative
+    # content, a nested power, a non-power and an odd negative power.
+    var power_a = parse_polynomial("x0*x1 + 2", order, work)
+    var power_b = parse_polynomial("x1^2 + x0*x2 + 3", order, work)
+    var shapes: List[Tuple[Int, Int, Int]] = [(2, 2, -5), (2, 4, 6), (2, 3, 1), (3, 3, -1)]
+    for shape in shapes:
+        var g = power_a.pow(UInt64(shape[0]), work).mul(power_b.pow(UInt64(shape[1]), work), work).scale(QQ(Rational(shape[2])), work)
+        var integer_power = as_zz(g, work)
+        var got = factor_multivariate_integer(integer_power, work)
+        var multiplicities = 0
+        for entry in got.factors:
+            if entry[0] == as_zz(power_a, work):
+                multiplicities += entry[1] * 10
+            if entry[0] == as_zz(power_b, work):
+                multiplicities += entry[1]
+        c.check(len(got.factors) == 2 and multiplicities == shape[0] * 10 + shape[1] and got.unit.value == Integer(shape[2]) and check_multivariate_factorization(integer_power, got, work), "perfect power shortcut keeps factors, multiplicities and unit")
     var tiny = Budget(1)
     var exhausted = False
     try:
