@@ -651,10 +651,28 @@ struct _SparseStep(Movable):
         var sums = List[List[Integer]]()
         for _ in range(count):
             sums.append(List[Integer](length=top + 1, fill=Integer(0)))
+        # tables[k][e] = beta_k^e modulo p, grown on demand.
+        var tables = List[List[Integer]](length=len(self.inner), fill=[Integer(1)])
         for term in g.terms:
             budget.charge(1)
-            var e = Int(term.monomial.exponent(self.main, budget))
-            var z = self._value(_without(term.monomial, self.main, budget), budget)
+            var e = 0
+            var z = Integer(1)
+            for pair in term.monomial.pairs:
+                budget.charge(1)
+                if pair[0] == self.main:
+                    e = Int(pair[1])
+                    continue
+                var index = -1
+                for k in range(len(self.inner)):
+                    if self.inner[k] == pair[0]:
+                        index = k
+                if index < 0:
+                    raise PolyError(PolyErrorKind.DOMAIN, "monomial outside the lifted variables")
+                var exponent = Int(pair[1])
+                while len(tables[index]) <= exponent:
+                    budget.charge(1)
+                    tables[index].append(_mulmod(tables[index][len(tables[index]) - 1], self.beta[index], self.p, budget))
+                z = _mulmod(z, tables[index][exponent], self.p, budget)
             var power = Integer(1)
             for j in range(count):
                 power = _mulmod(power, z, self.p, budget)
