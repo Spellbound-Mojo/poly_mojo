@@ -12,7 +12,8 @@ tree, Garner's mixed radix recombines the residues, and f = H / D.
 """
 from apn_mojo import Integer, Rational, gcd
 from std.math import log2
-from .coefficients import QQ, NoContext, _prime
+from .coefficients import QQ, NoContext
+from .primes import prime
 from .dense import DensePoly
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _product
 from ._nmod import _Field, _field, _mulm, _addm, _subm, _to, _from, _invm
@@ -89,15 +90,13 @@ def _primes_upto(limit: Int) -> List[Int]:
 
 
 def _word_primes(count: Int, above: UInt64, mut budget: Budget) raises PolyError -> List[UInt64]:
-    """`count` primes below 2^62, from the top down, all above `above`."""
+    """`count` primes below 2^62, from the top down, all above `above`: the cached sequence of `prime`."""
     var primes = List[UInt64](capacity=count)
-    var candidate = (UInt64(1) << 62) - 1
-    while len(primes) < count:
+    for i in range(count):
+        var candidate = prime(i, budget)
         if candidate <= above:
             raise PolyError(PolyErrorKind.CAPACITY, "not enough word primes for interpolation")
-        if _prime(candidate, budget):
-            primes.append(candidate)
-        candidate -= 2
+        primes.append(candidate)
     return primes^
 
 
@@ -136,14 +135,17 @@ def _interpolate_integer_nodes(variable: Int64, points: List[QQ], values: List[Q
         for i in range(n):
             valuation[i] = 0
         var q = p
+        var counts = List[Int]()
         while True:
-            var counts = Dict[Int, Int]()
+            # Residue classes modulo q <= span, counted in an array.
+            counts.clear()
+            counts.resize(q, 0)
             for i in range(n):
-                residue[i] = nodes[i] % q
-                counts[residue[i]] = counts.get(residue[i], 0) + 1
+                residue[i] = ((nodes[i] % q) + q) % q
+                counts[residue[i]] += 1
             var collided = False
             for i in range(n):
-                var c = counts.get(residue[i], 1) - 1
+                var c = counts[residue[i]] - 1
                 if c:
                     collided = True
                     valuation[i] += c
