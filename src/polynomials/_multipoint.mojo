@@ -165,11 +165,19 @@ def _middle_cyclic(a: List[UInt64], node: List[UInt64], skip: Int, keep: Int, f:
     length len(a) + skip; its part beyond the cyclic length n >= len(a) wraps
     onto indices below skip, outside the window.
     """
-    var product = convolvers.cyclic(_reversed(node, len(node), budget), a, _transform_length(len(a)), skip + keep, budget)
+    # Rotating rev(node) cyclically by -skip moves the window to the start,
+    # so only `keep` coefficients are reconstructed.
+    var n = _transform_length(len(a))
+    var reversed = _reversed(node, len(node), budget)
+    _allocation[UInt64](n, budget)
+    var rotated = List[UInt64](length=n, fill=0)
+    for i in range(len(reversed)):
+        rotated[(i - skip + n) % n] = reversed[i]
+    var product = convolvers.cyclic(rotated, a, n, keep, budget)
     _allocation[UInt64](keep, budget)
     var result = List[UInt64](length=keep, fill=0)
     for k in range(keep):
-        result[k] = _mulm(product[skip + k], 1, f)
+        result[k] = _mulm(product[k], 1, f)
     return result^
 
 
