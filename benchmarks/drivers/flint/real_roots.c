@@ -12,7 +12,7 @@
      sturm        fmpz_poly_num_real_roots_sturm
      bitsN        refinement to width 2^-N (the harness reference)
 
-   FLINT 3.6 has no fmpz_poly_isolate_real_roots, arb_fmpz_poly_real_roots,
+   FLINT has no fmpz_poly_isolate_real_roots, arb_fmpz_poly_real_roots,
    or arb_fmpz_poly_refine_root_arb; complex_roots is its certified real
    root solver (it finds every complex root, so the time covers them all).
    The answer lists the count and then, per real root, `m e m e` for the
@@ -117,6 +117,7 @@ static slong solve(acb_ptr * out, const fmpz_poly_t p, slong bits)
 
 int main(int argc, char ** argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--version") == 0) { puts(flint_version); return 0; }
     if (argc != 7) { fprintf(stderr, "usage: real_roots INPUT ANSWER RESULT MODE MIN_SECONDS MIN_REPS\n"); return 2; }
     const char * mode = argv[4];
     double limit = atof(argv[5]) * 1e9;

@@ -362,7 +362,8 @@ class PythonTool:
 
     def version(self):
         if self.library == 'flint':
-            return '0.9.0 (FLINT 3.6.0)'
+            import flint
+            return f'{flint.__version__} (FLINT {flint.__FLINT_VERSION__})'
         import sympy
         return f'{sympy.__version__} (gmpy ground types)'
 

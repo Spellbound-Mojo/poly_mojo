@@ -5,14 +5,14 @@ Wilkinson prod (x - i), Chebyshev T_n, random dense polynomials with
 coefficients in {-1, 1} and of 64 and 1024 bits, and products with repeated
 factors. Each polynomial runs in five modes:
 
-| mode | Poly Mojo | FLINT 3.6 (C driver) | SymPy | msolve |
+| mode | Poly Mojo | FLINT (C driver) | SymPy | msolve |
 |---|---|---|---|---|
 | isolate | `dense.real_root_cover` | `arb_fmpz_poly_complex_roots` on the squarefree part | `Poly.intervals` | default run |
 | refine53, refine1000 | `roots.refine` of the cover | the same to width 2^-bits | `Poly.intervals(eps=...)` | `-p bits` |
 | exact | `dense.real_roots` | | `Poly.real_roots` | |
 | count | `dense.count_roots` (Descartes; and `sturm_sequence` + `roots.count_roots`) | `fmpz_poly_num_real_roots` (and `_sturm`) | `Poly.count_roots` | |
 
-FLINT 3.6 has no `fmpz_poly_isolate_real_roots`, `arb_fmpz_poly_real_roots`,
+FLINT has no `fmpz_poly_isolate_real_roots`, `arb_fmpz_poly_real_roots`,
 or `arb_fmpz_poly_refine_root_arb`; `arb_fmpz_poly_complex_roots` is its
 certified solver and reports the real roots exactly as real.
 
@@ -370,7 +370,8 @@ class FlintRoots(RootsTool):
         self.modes = ('count',) if sturm else ('isolate', 'refine53', 'refine1000', 'count')
 
     def version(self):
-        return '3.6.0 (libflint, C driver)'
+        version = subprocess.check_output([str(flint_binary()), '--version'], text=True).strip()
+        return f'{version} (libflint, C driver)'
 
     def prepare(self, case, work, settings):
         write_input(work / 'input.txt', case)
