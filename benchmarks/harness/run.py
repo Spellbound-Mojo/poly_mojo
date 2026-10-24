@@ -165,7 +165,10 @@ def run_case(tool, case, settings, baseline):
     if tool.in_process:
         record['peak_incremental_kib'] = result['peak_kb'] - result['rss_before_kb']
     else:
-        record['peak_incremental_kib'] = max(process.cgroup_peak_kb - baseline['cgroup_peak_kb'], 0)
+        peak, base_peak = process.cgroup_peak_kb, baseline['cgroup_peak_kb']
+        record['peak_incremental_kib'] = max(peak - base_peak, 0) if peak is not None and base_peak is not None else None
+        if record['peak_incremental_kib'] is None:
+            record['memory_note'] = 'Whole-process peak unavailable: no writable memory cgroup.'
         record['baseline'] = baseline
     if 'check_ns' in result and result.get('check_ns'):
         record['check_s'] = result['check_ns'] / 1e9
@@ -193,10 +196,12 @@ def baseline_for(tool, case, settings, cache):
                             cpu=settings['cpu'], stdout=work / 'stdout.txt', stderr=work / 'stderr.txt')
             samples.append(p)
             shutil.rmtree(work, ignore_errors=True)
-        if any(p.cgroup_peak_kb is None for p in samples):
-            raise SystemExit('Measuring a whole-process tool needs a writable memory cgroup.')
+        missing = any(p.cgroup_peak_kb is None for p in samples)
+        if missing and not settings.get('allow_missing_memory', False):
+            raise SystemExit('Measuring a whole-process tool needs a writable memory cgroup. '
+                             'Use --allow-missing-memory to retain timings with unavailable memory figures.')
         cache[key] = {'wall_s': statistics.median(p.wall_s for p in samples),
-                      'cgroup_peak_kb': int(statistics.median(p.cgroup_peak_kb for p in samples))}
+                      'cgroup_peak_kb': None if missing else int(statistics.median(p.cgroup_peak_kb for p in samples))}
     return cache[key]
 
 
@@ -214,6 +219,8 @@ def main():
     parser.add_argument('--host', help='Folder name for the host (default: derived from the CPU)')
     parser.add_argument('--timeout', type=float, default=600)
     parser.add_argument('--memory', default='12G', help='Per-run memory cap')
+    parser.add_argument('--allow-missing-memory', action='store_true',
+                        help='Allow whole-process timings without cgroups; memory figures remain unavailable')
     parser.add_argument('--cpu', type=int, default=(os.cpu_count() or 1) - 1, help='CPU to pin runs to')
     parser.add_argument('--min-seconds', type=float, default=1.0)
     parser.add_argument('--min-reps', type=int, default=5)
@@ -258,6 +265,7 @@ def main():
         'timeout': args.timeout, 'memory': parse_size(args.memory), 'cpu': args.cpu,
         'min_seconds': args.min_seconds, 'min_reps': args.min_reps, 'processes': args.processes,
         'single_above': args.single_above, 'keep': args.keep,
+        'allow_missing_memory': args.allow_missing_memory,
         'scratch': HERE / '.cache' / 'work', 'answers': HERE / '.cache' / 'answers' / results.parent.name,
     }
     settings['scratch'].mkdir(parents=True, exist_ok=True)
@@ -292,7 +300,9 @@ def main():
                 out.flush()
                 summary = f"{record['outcome']:>13}"
                 if record['outcome'] == 'ok':
-                    summary += f"  {record['time_s']:10.4f} s  {record['peak_incremental_kib'] / 1024:9.1f} MiB"
+                    peak = record['peak_incremental_kib']
+                    memory = f'{peak / 1024:9.1f} MiB' if peak is not None else 'memory unavailable'
+                    summary += f"  {record['time_s']:10.4f} s  {memory}"
                 print(f"{case['id']:<34} {tool.name:<24} {summary}", flush=True)
     return 0
 

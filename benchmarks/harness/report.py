@@ -80,11 +80,23 @@ def fmt_time(seconds):
 
 def fmt_mem(kib):
     if kib is None:
-        return ''
+        return 'n/a'
     if kib < 1024:
         return '< 1 MiB'
     mib = kib / 1024
     return f'{mib:.3g} MiB' if mib < 1024 else f'{mib / 1024:.3g} GiB'
+
+
+def memory_limit(records):
+    """Describe the requested limit without claiming an unavailable cgroup cap."""
+    cap = records[0].get('memory_cap', '12G')
+    enforced = {r['process']['memory_capped'] for r in records
+                if 'memory_capped' in r.get('process', {})}
+    if enforced == {True}:
+        return f'Memory cap: {cap}.'
+    if False in enforced:
+        return f'Requested memory cap: {cap}; not enforced where writable memory cgroups are unavailable.'
+    return f'Requested memory cap: {cap}; enforcement was not recorded.'
 
 
 def cell(r, memory=True):
@@ -125,7 +137,7 @@ def ratios(records, tools, floor_key, floor):
         if not base or base['outcome'] != 'ok' or base.get('agreement') != 'confirmed':
             continue
         a, b = r[floor_key], base[floor_key]
-        if max(a, b) < floor:
+        if a is None or b is None or max(a, b) < floor:
             continue
         groups[group][r['tool']].append(max(a, floor / 100) / max(b, floor / 100))
     return groups, solved, Counter({g: len(c) for g, c in cases.items()})
@@ -209,7 +221,10 @@ def plots(records, tools, folder):
                 continue
             sizes = [r['size'] for r in rows]
             left.plot(sizes, [max(r['time_s'], 1e-5) for r in rows], marker='o', label=LABEL[t])
-            right.plot(sizes, [max(r['peak_incremental_kib'] / 1024, 0.01) for r in rows], marker='o', label=LABEL[t])
+            memory_rows = [r for r in rows if r['peak_incremental_kib'] is not None]
+            if memory_rows:
+                right.plot([r['size'] for r in memory_rows],
+                           [max(r['peak_incremental_kib'] / 1024, 0.01) for r in memory_rows], marker='o', label=LABEL[t])
         for ax, ylabel in ((left, 'time (s)'), (right, 'incremental peak memory (MiB)')):
             ax.set_yscale('log')
             ax.set_xlabel('n')
@@ -253,8 +268,8 @@ def write_report(folder):
         '# Gröbner basis pilot results', '',
         f"Host: {env['cpu']}, {env['cpus']} vCPUs ({env.get('hypervisor') or 'bare metal'}), "
         f"{env['memory_kib'] / 1048576:.0f} GiB RAM, {env['os']}, Linux {env['kernel']}. "
-        'Every run is pinned to one CPU and single-threaded, capped at '
-        f"{records[0]['memory_cap']} of memory and {records[0]['timeout_s']:.0f} s.", '',
+        f"Every run is pinned to one CPU and single-threaded, with a {records[0]['timeout_s']:.0f} s time limit. "
+        + memory_limit(records), '',
         'Versions: ' + '; '.join(f"{LABEL[t]} {env['versions'][t]}" for t in tools) + '.', '',
         f"Records: {len(records)} ({', '.join(f'{v} {k}' for k, v in sorted(outcomes.items()))}).", '',
         '## Summary', '',
@@ -311,7 +326,8 @@ def streaming_report(records, env, folder):
         by_ladder[r['ladder']][r['size']][r['tool']] = r
     lines = ['# Streaming study', '',
              f"Host: {env['cpu']}, {env['cpus']} vCPUs, {env['memory_kib'] / 1048576:.0f} GiB RAM. "
-             f"Runs are pinned to one CPU, capped at {records[0]['memory_cap']} and {records[0]['timeout_s']:.0f} s. "
+             f"Runs are pinned to one CPU with a {records[0]['timeout_s']:.0f} s time limit. "
+             + memory_limit(records) + ' '
              f"Poly Mojo {env['versions'].get('polymojo', '')}.", '',
              'Each cell gives wall time and the incremental peak resident memory of the measured work: the '
              'high-water mark from just before the call to its end, minus the resident size before it. Both '

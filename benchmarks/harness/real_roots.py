@@ -568,13 +568,15 @@ def _width_table(mode, cases, by, tools):
 
 def report(records, env, folder):
     """Markdown report for the roots family: one table per mode, ladders as rows."""
+    from .report import memory_limit
     short = {'timeout': 'timeout', 'out-of-memory': 'OOM', 'error': 'error', 'skipped': '·',
              'unsupported': 'n/a', 'wrong': 'wrong'}
     by = {(r['case'], r['tool']): r for r in records}
     tools = [t for t in REPORT_TOOLS if any(r['tool'] == t for r in records)]
     lines = ['# Real roots', '',
              f"Host: {env['cpu']}, {env['cpus']} vCPUs, {env['memory_kib'] / 1048576:.0f} GiB RAM, {env['os']}. "
-             f"Runs are pinned to one CPU, capped at {records[0]['memory_cap']} and {records[0]['timeout_s']:.0f} s.", '',
+             f"Runs are pinned to one CPU with a {records[0]['timeout_s']:.0f} s time limit. "
+             + memory_limit(records), '',
              'Each answer is checked against an Arb reference: the number of distinct real roots, and every '
              'interval holding exactly one reference root (`wrong` otherwise). The `Poly Mojo / best` column divides '
              'Poly Mojo\'s time by the fastest other library on the case, each at its own achieved width.', '',

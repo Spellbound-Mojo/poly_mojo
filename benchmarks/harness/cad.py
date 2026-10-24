@@ -515,7 +515,10 @@ class Qepcad:
         return (self.home() / 'bin' / 'qepcad').exists() and (c['kind'] == 'sat') == (self.mode == 'sat')
 
     def version(self):
-        return 'QEPCAD B 1.74 (Tarski ' + os.environ.get('TARSKI_COMMIT', 'unknown') + ')'
+        banner = self.home() / 'source/main/PRINTBANNER.c'
+        match = re.search(r'static const char\* version = "([^"]+)"', banner.read_text()) if banner.is_file() else None
+        version = match[1] if match else 'unknown'
+        return f'QEPCAD B {version} (Tarski ' + os.environ.get('TARSKI_COMMIT', 'unknown') + ')'
 
     def script(self, c, trivial=False):
         names = c['variables']

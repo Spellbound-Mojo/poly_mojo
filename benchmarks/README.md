@@ -537,6 +537,34 @@ pinned container image.
 
 ## Running the suite
 
+The implemented suite covers arithmetic, gcds/resultants, series,
+factorization, real roots, CAD/satisfiability, streaming, and Gröbner bases.
+Prepare the library once, then run all eight families:
+
+```sh
+pixi run --locked build
+cd benchmarks
+pixi run --locked msolve-build
+pixi run --locked test
+pixi run --locked bench-full --results results/<host>/<run-name>
+```
+
+`bench-full` validates and holds a shared lock on `../build/`. It never invokes
+package precompilation. It compiles each required driver variant once before
+any timing, reuses cached executables across modes and families, and rejects
+compiler calls during measurement. The suite record includes the common
+library build ID, driver compiler commands, per-family completion, and limits.
+Each family retains its raw records and report; rerunning the same command
+resumes completed cases without rebuilding the library. `--prepare-only`
+prepares the driver cache without measuring cases.
+
+Set `QEPCAD_HOME` to a Tarski `qesource` directory and `Z3_PYTHON` to a Python
+interpreter with `z3-solver`. Piano-mover remains excluded from the active CAD
+bank. When the host does not permit memory cgroups, `--allow-missing-memory`
+allows whole-process timing comparisons with memory explicitly reported as
+unavailable; the suite records that the requested memory cap is not enforced.
+Time limits still apply. Separate family commands remain available:
+
 ```sh
 cd benchmarks
 pixi run poly-build      # build Poly Mojo with the repository workspace

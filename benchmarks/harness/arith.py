@@ -359,7 +359,7 @@ FAMILY_TOOLS = list(TOOLS)
 # ------------------------------------------------------------------ report
 
 def report(records, env, folder):
-    from .report import LABEL, cell, fmt_time, geomean
+    from .report import LABEL, cell, fmt_time, geomean, memory_limit
     labels = {'polymojo-arith': 'Poly Mojo', 'flint-arith': 'FLINT', 'sympy-arith': 'SymPy', 'singular-arith': 'Singular'}
     LABEL.update(labels)
     present = [t for t in labels if any(r['tool'] == t for r in records)]
@@ -370,7 +370,8 @@ def report(records, env, folder):
     competitors = [t for t in present if t != 'polymojo-arith']
     lines = ['# Arithmetic results', '',
              f"Host: {env['cpu']}, {env['cpus']} vCPUs, {env['memory_kib'] / 1048576:.0f} GiB RAM. "
-             f"Runs are pinned to one CPU, capped at {records[0]['memory_cap']} and {records[0]['timeout_s']:.0f} s.", '',
+             f"Runs are pinned to one CPU with a {records[0]['timeout_s']:.0f} s time limit. "
+             + memory_limit(records), '',
              'Versions: ' + '; '.join(f"{labels[t]} {env['versions'].get(t, '')}" for t in present) + '.', '',
              '## Summary', '',
              'Geometric mean of competitor time ÷ Poly Mojo time over cases both solved with a confirmed answer '

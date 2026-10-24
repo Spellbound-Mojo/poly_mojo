@@ -6,7 +6,7 @@ In-process tools (Poly Mojo, SymPy, Singular) time the call and measure its
 incremental peak themselves; msolve is timed as a whole process, and its
 baseline cost on a trivial system with the same variables is subtracted.
 """
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from fractions import Fraction
 import hashlib
 import json
@@ -418,8 +418,13 @@ def prebuild(tools, cases, jobs):
     if not work:
         return []
     print(f'Building {len(work)} Poly Mojo drivers with {jobs} jobs', flush=True)
+    results = [None] * len(work)
     with ThreadPoolExecutor(jobs) as pool:
-        results = list(pool.map(lambda item: (item[1], item[0].build(*item[1])), work))
-    for (nvars, modular), (path, seconds, rss) in results:
-        print(f'  built {path.name} in {seconds:.0f} s', flush=True)
+        pending = {pool.submit(tool.build, *key): (i, key) for i, (tool, key) in enumerate(work)}
+        for future in as_completed(pending):
+            i, key = pending[future]
+            result = future.result()
+            results[i] = (key, result)
+            path, seconds, rss = result
+            print(f'  built {path.name} in {seconds:.0f} s', flush=True)
     return [{'nvars': k[0], 'modular': k[1], 'seconds': r[1], 'maxrss_kb': r[2]} for k, r in results]

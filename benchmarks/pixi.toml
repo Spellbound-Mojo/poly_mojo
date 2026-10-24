@@ -17,6 +17,7 @@ poly-build = { cmd = "pixi run --manifest-path ../pixi.toml --locked build", des
 msolve-build = { cmd = "python harness/build_msolve.py", description = "Build the pinned msolve release from source" }
 generate = { cmd = "python -m harness.generate", description = "Write the case files" }
 bench = { cmd = "python -m harness.run", description = "Run benchmark cases and append raw records" }
+bench-full = { cmd = "python -m harness.full", description = "Run all families using one prebuilt library and cached drivers" }
 report = { cmd = "python -m harness.report", description = "Check answers and write the report" }
 test = { cmd = "python -m unittest discover -s harness -t . -p 'test_*.py'", description = "Check the harness itself" }
 
