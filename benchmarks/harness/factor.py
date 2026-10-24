@@ -494,7 +494,8 @@ def run_one(tool, case, settings):
         if getattr(tool, 'library', None) == 'sympy':
             # SymPy delegates to python-flint when it is importable; the twin is pure SymPy.
             env['SYMPY_GROUND_TYPES'] = 'gmpy'
-        process = measure.run(cmd, cwd=work, env=env, timeout_s=settings['timeout'],
+        allowance = 600 if getattr(tool, 'mode', '') == 'certified' else 0
+        process = measure.run(cmd, cwd=work, env=env, timeout_s=settings['timeout'] + allowance,
                               memory_bytes=settings['memory'], cpu=settings['cpu'],
                               stdout=work / 'stdout.txt', stderr=work / 'stderr.txt')
         if process.timed_out:
@@ -511,6 +512,8 @@ def run_one(tool, case, settings):
         if not settings['keep']:
             shutil.rmtree(work, ignore_errors=True)
     times = result['times_ns']
+    if min(times) / 1e9 > settings['timeout']:
+        return {'outcome': 'timeout'}
     answer = result['answer']
     record = {'outcome': 'ok', 'time_s': statistics.median(times) / 1e9, 'time_min_s': min(times) / 1e9,
               'reps': len(times), 'peak_incremental_kib': result['peak_kb'] - result['rss_before_kb'],
@@ -572,6 +575,8 @@ def run(args):
                         'size': case['size'], 'modulus': case['modulus'], 'nvars': case['nvars'],
                         'tool': tool.name, 'library': tool.system, 'version': tool.version(), 'timeout_s': args.timeout,
                         'started': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}
+                from .proofs import metadata
+                base.update(metadata(tool, case))
                 if not tool.supports(case):
                     record = {'outcome': 'unsupported'}
                 elif (tool.name, case['ladder']) in stopped:
@@ -619,7 +624,7 @@ def report(folder):
         ratios = []
         for t in others:
             r = records.get((c, t))
-            if pm and r and pm['outcome'] == 'ok' and r['outcome'] == 'ok':
+            if pm and r and pm['outcome'] == r['outcome'] == 'ok' and pm['answer_digest'] == r['answer_digest']:
                 ratios.append(f"{r['time_s'] / pm['time_s']:.3g}")
             else:
                 ratios.append('')
@@ -627,6 +632,10 @@ def report(folder):
         wrong = any(r and r['outcome'] == 'wrong' for r in row)
         agree = 'no' if wrong or len(digests) > 1 else ('yes' if digests else '')
         lines.append('| ' + ' | '.join([c] + [_fmt(r) for r in row] + ratios + [agree]) + ' |')
+    from .proofs import table as proof_table
+    lines += ['', '## Certificate overhead', '',
+              'The value-only factor call is the peer baseline. The certificate column times factor_checked; check only times exact.check of that same retained result. These ZZ/GF(p) factor certificates prove recomposition.', '',
+              *proof_table(list(records.values()), [('polymojo', 'polymojo-certified')])]
     text = '\n'.join(lines) + '\n'
     (folder / 'report.md').write_text(text)
     return text

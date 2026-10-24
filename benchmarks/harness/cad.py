@@ -433,7 +433,8 @@ class PolyMojo:
     def __init__(self, mode):
         self.mode = mode
         self.name = f'polymojo-{mode}'
-        self.algorithm = {'final': 'cad.decompose, compact Revision 15 with mandatory final verification',
+        self.algorithm = {'construct': 'compact Revision 15 construction; complete final verification timed separately',
+                          'final': 'cad.decompose, compact Revision 15 with mandatory final verification',
                           'lazard': 'cad.decompose(lazard=True), compact plain Lazard with mandatory final verification',
                           'mccallum': 'cad.decompose(lazard=False), checked legacy McCallum',
                           'stream': 'cad.decompose_to into cad.checker', 'solve': 'cad.solve'}[mode]
@@ -472,6 +473,8 @@ class PolyMojo:
         r = json.loads((work / 'result.json').read_text())
         out = {'times_ns': r['times_ns'], 'peak_kb': r['peak_kb'], 'rss_before_kb': r['rss_before_kb']}
         out['includes_mandatory_verification'] = self.mode in ('final', 'lazard', 'mccallum')
+        if self.mode == 'construct':
+            out['memory_note'] = 'Peak includes final verification; only the time components are separated.'
         if r.get('check_ns'):
             out['check_s'] = r['check_ns'] / 1e9
             if out['includes_mandatory_verification']:
@@ -489,7 +492,7 @@ class PolyMojo:
                 out['sat'] = lines[0] == 'sat'
                 if out['sat']:
                     out['point_ok'] = check_point(polys, c['masks'], lines[1].split(' '))
-            elif self.mode in ('final', 'lazard', 'mccallum'):
+            elif self.mode in ('construct', 'final', 'lazard', 'mccallum'):
                 checked, count, ok = check_cells(polys, work / 'answer.txt', settings['cell_limit'])
                 out |= {'cells_checked': checked, 'cells_ok': ok}
         except Exception:
@@ -617,7 +620,7 @@ class Z3:
         return out
 
 
-TOOLS = {t.name: t for t in [PolyMojo('final'), PolyMojo('lazard'), PolyMojo('mccallum'), PolyMojo('stream'), PolyMojo('solve'),
+TOOLS = {t.name: t for t in [PolyMojo('construct'), PolyMojo('final'), PolyMojo('lazard'), PolyMojo('mccallum'), PolyMojo('stream'), PolyMojo('solve'),
                              Qepcad('fullcad'), Qepcad('sat'), Z3()]}
 
 
@@ -630,7 +633,8 @@ def run_one(tool, c, settings, baselines):
         env = os.environ.copy()
         if isinstance(cmd, tuple):
             cmd, env = cmd
-        p = measure.run(cmd, cwd=work, env=env, timeout_s=settings['timeout'], memory_bytes=settings['memory'],
+        allowance = 600 if isinstance(tool, PolyMojo) and tool.mode != 'stream' else 0
+        p = measure.run(cmd, cwd=work, env=env, timeout_s=settings['timeout'] + allowance, memory_bytes=settings['memory'],
                         cpu=settings['cpu'], stdout=work / 'stdout.txt', stderr=work / 'stderr.txt')
         if p.timed_out:
             return {'outcome': 'timeout'}
@@ -640,7 +644,10 @@ def run_one(tool, c, settings, baselines):
             return {'outcome': 'error', 'error': ((work / 'stderr.txt').read_text(errors='replace') + (work / 'stdout.txt').read_text(errors='replace'))[-2000:]}
         r = tool.collect(c, work, settings)
         if tool.in_process:
-            r['time_s'] = min(r.pop('times_ns')) / 1e9
+            times = r.pop('times_ns')
+            if min(times) / 1e9 > settings['timeout']:
+                return {'outcome': 'timeout'}
+            r['time_s'] = statistics.median(times) / 1e9
             r['peak_incremental_kib'] = r.pop('peak_kb') - r.pop('rss_before_kb')
         else:
             r['time_s'] = max(p.wall_s - baselines(tool, c), 0.0)
@@ -713,6 +720,8 @@ def main_run(args):
                         'npolys': len(c['polys']), 'tool': tool.name, 'library': tool.system,
                         'algorithm': tool.algorithm, 'version': tool.version(), 'timeout_s': args.timeout,
                         'started': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}
+                from .proofs import metadata
+                base.update(metadata(tool, dict(c, family='cad')))
                 if (tool.name, c['ladder']) in stopped and c['ladder'] != 'bank':
                     record = {'outcome': 'skipped'}
                 else:
@@ -741,7 +750,7 @@ def main_report(args):
         records[(r['case'], r['tool'])] = r
     cases_ = sorted({k[0] for k in records})
     lines = ['# Cylindrical algebraic decomposition', '']
-    full_tools = ['polymojo-final', 'polymojo-lazard', 'polymojo-mccallum', 'polymojo-stream', 'qepcad-fullcad']
+    full_tools = ['polymojo-construct', 'polymojo-final', 'polymojo-lazard', 'polymojo-mccallum', 'polymojo-stream', 'qepcad-fullcad']
     sat_tools = ['polymojo-solve', 'z3', 'qepcad-sat']
 
     def cell(r):
@@ -752,20 +761,28 @@ def main_report(args):
         return f"{r['time_s']:.3g}"
 
     lines += ['## Full decomposition (seconds; cells / projection factors for Poly Mojo)', '',
-              'New decomposition call times include mandatory verification. Extra rechecks and absolute cell output are recorded separately. QEPCAD reports construction.', '',
+              'polymojo-construct measures construction separately from complete final verification, using benchmark instrumentation of the same compact backend and retries. It still retains final data that serve as evidence; it is not a proof-free public API. The PM/QEPCAD ratio uses this construction component. Public decomposition times include mandatory verification. Extra rechecks and absolute cell output are recorded separately. QEPCAD reports construction.', '',
               '| Case | ' + ' | '.join(full_tools) + ' | PM/QEPCAD | Lazard cells | McCallum cells | factors (Lazard) | QEPCAD cells / factors | sample points checked |',
               '|' + '---|' * (len(full_tools) + 7)]
     for cid in cases_:
         if not cid.startswith('full-'):
             continue
         row = [records.get((cid, t)) for t in full_tools]
-        final, lz, mc, _, q = row
+        final, accepted, lz, mc, _, q = row
         ratio = f"{final['time_s'] / q['time_s']:.2f}" if final and q and final['outcome'] == q['outcome'] == 'ok' and q['time_s'] > 0 else '—'
         qcells = (q.get('cells'), q.get('projection_factors')) if q and q['outcome'] == 'ok' else None
         lines.append(f"| {cid[5:]} | " + ' | '.join(cell(r) for r in row) + f" | {ratio} | {lz.get('cells', '—') if lz else '—'} | "
                      f"{mc.get('cells', '—') if mc else '—'} | {lz.get('projection_factors', '—') if lz else '—'} | {f'{qcells[0]} / {qcells[1]}' if qcells else '—'} | "
                      f"{lz.get('cells_checked', '—') if lz else '—'} |")
+    lines += ['', '## Construction and final verification', '',
+              '| Case | Construction | Final verification | Sum | Public accepted call |', '|---|---:|---:|---:|---:|']
+    for cid in cases_:
+        r = records.get((cid, 'polymojo-construct'))
+        if r and r['outcome'] == 'ok':
+            check = r['check_s']
+            lines.append(f"| {cid} | {r['time_s']:.3g} | {check:.3g} | {r['time_s'] + check:.3g} | {cell(records.get((cid, 'polymojo-final')))} |")
     lines += ['', '## Conjunctions (seconds; verdicts must agree)', '',
+              'cad.solve retains its covering evidence; this API has no proof-free switch. Its independent cad.check call is excluded from the solve time. These are certificate-producing API comparisons.', '',
               '| Case | ' + ' | '.join(sat_tools) + ' | PM/Z3 | verdicts | agree |', '|' + '---|' * (len(sat_tools) + 4)]
     for cid in cases_:
         if not cid.startswith('sat-'):
@@ -776,6 +793,12 @@ def main_report(args):
         ratio = f"{pm['time_s'] / z['time_s']:.2f}" if pm and z and pm['outcome'] == z['outcome'] == 'ok' and z['time_s'] > 0 else '—'
         lines.append(f"| {cid[4:]} | " + ' | '.join(cell(r) for r in row) + f" | {ratio} | "
                      f"{'/'.join('sat' if v else 'unsat' for v in verdicts)} | {'yes' if len(set(verdicts)) <= 1 else 'NO'} |")
+    lines += ['', '## Independent rechecks', '',
+              'These checks run after the producer timer stops. Decomposition public calls already include mandatory acceptance; these are additional rechecks, not that acceptance cost.', '',
+              '| Case | Mode | Producer | Extra check |', '|---|---|---:|---:|']
+    for r in records.values():
+        if r['tool'] != 'polymojo-construct' and r['outcome'] == 'ok' and 'check_s' in r:
+            lines.append(f"| {r['case']} | {r['tool']} | {r['time_s']:.3g} | {r['check_s']:.3g} |")
     (folder / 'report.md').write_text('\n'.join(lines) + '\n')
     print('\n'.join(lines))
 

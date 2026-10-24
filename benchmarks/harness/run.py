@@ -172,7 +172,8 @@ def run_case(tool, case, settings, baseline):
         record['baseline'] = baseline
     if 'check_ns' in result and result.get('check_ns'):
         record['check_s'] = result['check_ns'] / 1e9
-        record['check_peak_incremental_kib'] = result['check_peak_kb'] - result['rss_before_kb']
+        if 'check_peak_kb' in result:
+            record['check_peak_incremental_kib'] = result['check_peak_kb'] - result['rss_before_kb']
         record['check_ok'] = result['check_ok']
         if not result['check_ok']:
             record['outcome'] = 'wrong'
@@ -287,6 +288,8 @@ def main():
                         'algorithm': tool.algorithm, 'version': tool.version(),
                         'timeout_s': args.timeout, 'memory_cap': args.memory,
                         'started': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}
+                from .proofs import metadata
+                base.update(metadata(tool, case))
                 if not tool.supports(case):
                     record = {'outcome': 'unsupported'}
                 elif (tool.name, case['ladder']) in stopped:

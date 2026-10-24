@@ -293,7 +293,7 @@ class RootsTool:
         return requested_bits(case)
 
     def finish(self, case, result, count, intervals):
-        ok = check(case, count, intervals) and (intervals is None or width_ok(case, intervals, self.width_bits(case)))
+        ok = result.get('check_ok', True) and check(case, count, intervals) and (intervals is None or width_ok(case, intervals, self.width_bits(case)))
         result.update({'answer': [count], 'count': count, 'check_ok': ok})
         widths = interval_widths(intervals)
         if widths:
@@ -302,6 +302,7 @@ class RootsTool:
 
 
 class PolyMojoRoots(RootsTool):
+    check_allowance = 600.0
     name = 'polymojo-roots'
     system = 'Poly Mojo'
     algorithm = 'Descartes isolation and count'
@@ -578,6 +579,9 @@ def report(records, env, folder):
              f"Host: {env['cpu']}, {env['cpus']} vCPUs, {env['memory_kib'] / 1048576:.0f} GiB RAM, {env['os']}. "
              f"Runs are pinned to one CPU with a {records[0]['timeout_s']:.0f} s time limit. "
              + memory_limit(records), '',
+             'Poly Mojo root APIs always retain evidence. These are certificate-producing API timings, not proof-free timings. '
+             'The independent roots.check call and answer formatting are outside the computation time; check costs are listed separately. '
+             'A proof-free producer mode is unavailable.', '',
              'Each answer is checked against an Arb reference: the number of distinct real roots, and every '
              'interval holding exactly one reference root (`wrong` otherwise). The `Poly Mojo / best` column divides '
              'Poly Mojo\'s time by the fastest other library on the case, each at its own achieved width.', '',
@@ -588,6 +592,10 @@ def report(records, env, folder):
              'interval on the case, never looser than requested. `matched / peer` divides that time by the peer\'s. '
              'The width tables give each tool\'s widest and median interval as log2 of width over 2^-bits '
              '(0 = exactly the requested width, -10 = 2^10 times narrower), and the longest endpoint in bits.', '']
+    from .report import fmt_time
+    checks = [r for r in records if r['library'] == 'Poly Mojo' and r['outcome'] == 'ok' and 'check_s' in r]
+    lines += ['## Independent certificate checking', '', '| Case | Mode | Producer (retains evidence) | Check only |', '|---|---|---:|---:|']
+    lines += [f"| {r['case']} | {r['tool']} | {fmt_time(r['time_s'])} | {fmt_time(r['check_s'])} |" for r in checks]
     for mode in MODES:
         cases = sorted({r['case'] for r in records if r.get('case', '').endswith('.' + mode)},
                        key=lambda c: (c.split('-')[0], int(c.split('-')[1].split('.')[0])))

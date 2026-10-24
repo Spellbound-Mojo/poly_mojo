@@ -16,15 +16,15 @@ from pathlib import Path
 import statistics
 
 HERE = Path(__file__).resolve().parent.parent
-BASE = 'polymojo'
+BASE = 'polymojo-uncertified'
 RATIO_FLOOR_S = 0.01      # a ratio needs the slower tool to take at least this long
 MEMORY_FLOOR_KIB = 1024   # and, for memory, at least this much incremental peak
 
 TOOL_ORDER = ['polymojo', 'polymojo-certified', 'polymojo-uncertified', 'sympy-buchberger', 'sympy-f5b', 'sympy-buchberger-flint',
               'sympy-fglm', 'singular-std', 'singular-slimgb', 'singular-modstd', 'singular-stdfglm', 'msolve']
 LABEL = {
-    'polymojo': 'Poly Mojo', 'polymojo-certified': 'Poly Mojo (certified)',
-    'polymojo-uncertified': 'Poly Mojo (uncertified)',
+    'polymojo': 'Poly Mojo (internal certification)', 'polymojo-certified': 'Poly Mojo (certificate)',
+    'polymojo-uncertified': 'Poly Mojo (no certificate)',
     'sympy-buchberger': 'SymPy Buchberger', 'sympy-f5b': 'SymPy F5B',
     'sympy-buchberger-flint': 'SymPy Buchberger (flint types)', 'sympy-fglm': 'SymPy FGLM',
     'singular-std': 'Singular std', 'singular-slimgb': 'Singular slimgb',
@@ -145,7 +145,7 @@ def ratios(records, tools, floor_key, floor):
 
 def summary_table(records, tools, key, floor, title):
     groups, solved, totals = ratios(records, tools, key, floor)
-    competitors = [t for t in tools if t not in (BASE, 'polymojo-certified', 'polymojo-uncertified')]
+    competitors = [t for t in tools if not t.startswith('polymojo')]
     lines = [f'**{title}** (geometric mean of competitor ÷ Poly Mojo; above 1 means Poly Mojo used less; *n* = cases compared)', '',
              '| Field, order | ' + ' | '.join(LABEL[t] for t in competitors) + ' |',
              '|---|' + '---|' * len(competitors)]
@@ -187,21 +187,8 @@ def ladder_tables(records, tools):
 
 
 def certification(records):
-    index = {(r['case'], r['tool']): r for r in records}
-    lines = ['| Case | Comparable | Certified compute | Check | Certified peak ÷ comparable peak |',
-             '|---|---|---|---|---|']
-    count = 0
-    for r in records:
-        if r['tool'] != 'polymojo-certified' or r['outcome'] != 'ok':
-            continue
-        base = index.get((r['case'], BASE))
-        if not base or base['outcome'] != 'ok' or max(r['time_s'], base['time_s']) < RATIO_FLOOR_S:
-            continue
-        mem = (r['peak_incremental_kib'] / base['peak_incremental_kib']) if base['peak_incremental_kib'] >= MEMORY_FLOOR_KIB else None
-        lines.append(f"| {r['case']} | {fmt_time(base['time_s'])} | {fmt_time(r['time_s'])} | {fmt_time(r.get('check_s', 0))} | "
-                     f"{f'{mem:.3g}' if mem else '—'} |")
-        count += 1
-    return lines if count else ['No case took long enough for a meaningful certification comparison.']
+    from .proofs import table
+    return table(records, [('polymojo-uncertified', 'polymojo-certified')])
 
 
 def plots(records, tools, folder):
@@ -275,7 +262,7 @@ def write_report(folder):
         '## Summary', '',
         f'Ratios cover cases that both tools solved with a confirmed answer and on which the slower of the two took '
         f'at least {RATIO_FLOOR_S * 1000:.0f} ms (memory: at least {MEMORY_FLOOR_KIB // 1024} MiB). '
-        'Poly Mojo runs in comparable mode (no witnesses).', '',
+        'Peer ratios use Poly Mojo with witnesses=False and certify=False. The separate internal-certification mode retains the rational-basis acceptance work.', '',
         *time_lines, '', *memory_lines, '',
         '**Solved cases** (finished within the limits with an answer no other library contradicts):', '',
         *solved_table(solved, totals, tools), '',
@@ -290,7 +277,7 @@ def write_report(folder):
     if unverified:
         lines += ['', 'Answers computed by only one library (marked ? in the tables): ' + ', '.join(unverified) + '.']
     lines += ['', '## Certification overhead', '',
-              'Comparable mode computes without witnesses. Certified mode retains cofactor rows and runs '
+              'The no-certificate mode disables both retained witnesses and rational-basis certification. The certificate mode retains cofactor rows; its independent check is timed separately through '
               '`sparse.check_groebner`, which verifies both ideal containments and the Buchberger criterion.', '',
               *certification(records), '',
               '## Per-ladder results', '',

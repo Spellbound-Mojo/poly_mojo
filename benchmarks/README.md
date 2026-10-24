@@ -31,10 +31,11 @@ the algorithm from the price of the evidence.
   its answer is reduced to a canonical form and compared with the others before
   its time counts. A disagreement removes the case from the summary ratios
   until it is explained.
-- **Comparable work.** Poly Mojo runs each case twice: in *comparable mode*
-  (no retained witnesses, no checking, for example `witnesses=False` for
-  Gröbner bases) and in *certified mode* (default evidence plus the matching
-  `check`). Ratios against competitors use comparable mode.
+- **Comparable work.** Where the API supports it, Poly Mojo runs both without
+  retained certificates and with certificates. Certificate generation belongs
+  to the producer time; independent checking has its own time column. Peer
+  ratios use the no-certificate producer. A third Gröbner mode preserves
+  internal rational-basis certification without retaining witnesses.
 - **One thread.** All libraries run single-threaded on a pinned core. A
   separate multi-threaded track can follow later; it is never mixed into the
   single-thread tables.
@@ -50,6 +51,30 @@ the algorithm from the price of the evidence.
 - **Everything is published.** Losses, timeouts, out-of-memory results, and
   errors stay in the tables. The suite includes cases chosen to be hard for
   Poly Mojo's algorithms, not only cases that suit them.
+
+### Certificate timing
+
+| Family | Peer timing | Certificate measurement |
+|---|---|---|
+| Gröbner | `witnesses=False, certify=False` | Witness-producing call and `check_groebner` measured separately |
+| GCD, resultant, discriminant | Value-only API | Checked producer and `exact.check` of the same result measured separately; discriminant uses a checked resultant and exact division |
+| Factorization | `factor` | `factor_checked` and `exact.check` of that result measured separately; no second factorization is included in the check time |
+| Arithmetic, series | Value-only arithmetic | No proof certificate is produced |
+| CAD decomposition | Compact construction component, with final verification timed separately | Public accepted-call time also shown; compact final data still serve as evidence |
+| CAD conjunctions, real roots | Public certificate-producing API, explicitly labeled | Independent checking excluded from computation time and reported separately |
+
+CAD construction instrumentation follows the public backend's retry policy.
+It does not introduce a proof-free public API. CAD conjunctions and root APIs
+have no certificate-disable switch; their times must not be described as
+proof-free. Exact isolating intervals remain part of the mathematical output.
+The streaming family is an internal retention study, not a peer comparison.
+
+Raw records carry `proof_mode` and `proof_note`. Checks establish the documented
+claim of each certificate: for example, a resultant cofactor identity and a
+ZZ/GF(p) factorization's recomposition, rather than stronger claims. Independent
+answer agreement remains outside all producer timings. Slow independent
+checks may use an additional 600-second allowance without extending the
+producer's time limit.
 
 ## Libraries
 

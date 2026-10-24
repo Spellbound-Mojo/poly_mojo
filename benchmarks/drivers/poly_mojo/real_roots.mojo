@@ -14,6 +14,8 @@ timed region. Modes:
 | sturm | `dense.sturm_sequence`, then `roots.count_roots` on (-2^k, 2^k) | the count |
 
 The answer lists one root per line as `low high` rationals (the count first).
+All producers retain evidence. The first result's independent `roots.check`
+is measured separately as `check_ns`, outside computation and formatting.
 """
 from apn_mojo import Rational
 from polynomials import NumericOptions
@@ -58,30 +60,6 @@ def isolate(values: List[Rational]) raises -> type_of(dense.real_root_cover(valu
     return dense.real_root_cover(values, options=options(1), complete_only=True)
 
 
-def run_once(values: List[Rational], mode: String, want: Bool) raises -> String:
-    """Run one timed call and return its answer when `want` is set."""
-    var answer = String()
-    if mode.startswith("isolate"):
-        var bits = 1 if mode == "isolate" else Int(String(mode[byte=7:]))
-        var cover = dense.real_root_cover(values, options=options(bits), complete_only=True)
-        if want:
-            answer = cover_answer(roots.intervals(cover))
-    elif mode.startswith("refine"):
-        raise Error("refinement is timed by run_refine")
-    elif mode == "exact":
-        var result = dense.real_roots(values)
-        if want:
-            answer = String(len(result), "\n")
-            for r in result:
-                var b = algebraic.bounds(r)
-                answer.write(b[0], " ", b[1], "\n")
-    elif mode == "sturm" or mode == "count":
-        raise Error("counts are timed in main")
-    else:
-        raise Error("unknown mode " + mode)
-    return answer^
-
-
 def cover_answer(cells: List[Tuple[Rational, Rational, Int]]) raises -> String:
     var count = 0
     for c in cells:
@@ -111,6 +89,8 @@ def main() raises:
     var rss_before = status_kb("VmRSS")
     var peak = 0
     var limit = min_seconds * 1e9
+    var check_ns = 0
+    var check_ok = True
     if mode.startswith("refine"):
         var bits = Int(String(mode[byte=6:]))
         var cover = isolate(values)
@@ -118,54 +98,100 @@ def main() raises:
         reset_peak()
         while len(times) == 0 or len(times) < min_reps or Float64(total) < limit:
             var start = perf_counter_ns()
-            var refined = roots.refine(cover, options(bits), complete_only=True)
+            var result = roots.refine(cover, options(bits), complete_only=True)
             var lap = perf_counter_ns() - start
             if len(times) == 0:
                 peak = status_kb("VmHWM")
-                answer = cover_answer(roots.intervals(refined))
+                start = perf_counter_ns()
+                check_ok = roots.check(result)
+                check_ns = perf_counter_ns() - start
+                answer = cover_answer(roots.intervals(result))
             times.append(lap)
             total += lap
             if Float64(lap) >= limit:
                 break
-    elif mode == "sturm" or mode == "count":
+    elif mode == "count":
         var bound = Rational(1)
         for _ in range(bound_exponent):
             bound = bound * Rational(2)
         reset_peak()
         while len(times) == 0 or len(times) < min_reps or Float64(total) < limit:
             var start = perf_counter_ns()
-            var counted: Int
-            if mode == "count":
-                counted = dense.count_roots(values, -bound, bound).count()
-            else:
-                var plan = dense.sturm_sequence(values)
-                counted = roots.count_roots(plan, -bound, bound).count()
+            var result = dense.count_roots(values, -bound, bound)
             var lap = perf_counter_ns() - start
             if len(times) == 0:
                 peak = status_kb("VmHWM")
-                answer = String(counted, "\n")
+                start = perf_counter_ns()
+                check_ok = roots.check(result)
+                check_ns = perf_counter_ns() - start
+                answer = String(result.count(), "\n")
+            times.append(lap)
+            total += lap
+            if Float64(lap) >= limit:
+                break
+    elif mode == "sturm":
+        var bound = Rational(1)
+        for _ in range(bound_exponent):
+            bound = bound * Rational(2)
+        reset_peak()
+        while len(times) == 0 or len(times) < min_reps or Float64(total) < limit:
+            var start = perf_counter_ns()
+            var plan = dense.sturm_sequence(values)
+            var result = roots.count_roots(plan, -bound, bound)
+            var lap = perf_counter_ns() - start
+            if len(times) == 0:
+                peak = status_kb("VmHWM")
+                start = perf_counter_ns()
+                check_ok = roots.check(result)
+                check_ns = perf_counter_ns() - start
+                answer = String(result.count(), "\n")
+            times.append(lap)
+            total += lap
+            if Float64(lap) >= limit:
+                break
+    elif mode == "exact":
+        reset_peak()
+        while len(times) == 0 or len(times) < min_reps or Float64(total) < limit:
+            var start = perf_counter_ns()
+            var result = dense.real_roots(values)
+            var lap = perf_counter_ns() - start
+            if len(times) == 0:
+                peak = status_kb("VmHWM")
+                start = perf_counter_ns()
+                check_ok = roots.check(result)
+                check_ns = perf_counter_ns() - start
+                answer = String(len(result), "\n")
+                for r in result:
+                    var bounds = algebraic.bounds(r)
+                    answer.write(bounds[0], " ", bounds[1], "\n")
+            times.append(lap)
+            total += lap
+            if Float64(lap) >= limit:
+                break
+    elif mode.startswith("isolate"):
+        var bits = 1 if mode == "isolate" else Int(String(mode[byte=7:]))
+        reset_peak()
+        while len(times) == 0 or len(times) < min_reps or Float64(total) < limit:
+            var start = perf_counter_ns()
+            var result = dense.real_root_cover(values, options=options(bits), complete_only=True)
+            var lap = perf_counter_ns() - start
+            if len(times) == 0:
+                peak = status_kb("VmHWM")
+                start = perf_counter_ns()
+                check_ok = roots.check(result)
+                check_ns = perf_counter_ns() - start
+                answer = cover_answer(roots.intervals(result))
             times.append(lap)
             total += lap
             if Float64(lap) >= limit:
                 break
     else:
-        reset_peak()
-        while len(times) == 0 or len(times) < min_reps or Float64(total) < limit:
-            var start = perf_counter_ns()
-            var got = run_once(values, mode, len(times) == 0)
-            var lap = perf_counter_ns() - start
-            if len(times) == 0:
-                peak = status_kb("VmHWM")
-                answer = got^
-            times.append(lap)
-            total += lap
-            if Float64(lap) >= limit:
-                break
+        raise Error("unknown mode " + mode)
     with open(args[2], "w") as f:
         f.write(answer)
     var result = String('{"times_ns": [')
     for i in range(len(times)):
         result.write(", " if i else "", times[i])
-    result.write('], "rss_before_kb": ', rss_before, ', "peak_kb": ', peak, "}\n")
+    result.write('], "rss_before_kb": ', rss_before, ', "peak_kb": ', peak, ', "check_ns": ', check_ns, ', "check_ok": ', "true" if check_ok else "false", "}\n")
     with open(args[3], "w") as f:
         f.write(result)

@@ -7,6 +7,7 @@ distinct drivers before measurement, and records compiler commands separately.
 import argparse
 from contextlib import redirect_stderr, redirect_stdout
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -69,8 +70,12 @@ def main(argv=None):
         if compiling:
             if measuring:
                 raise RuntimeError('A driver was not prepared before benchmark timing.')
-            commands.append({'command': command, 'cwd': str(cwd),
-                             'started': datetime.datetime.now(datetime.timezone.utc).isoformat()})
+            entry = {'command': command, 'cwd': str(cwd),
+                     'started': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+            commands.append(entry)
+            # Preserve the audit even if a later driver fails to compile.
+            with (args.results / 'compiler-commands.jsonl').open('a') as audit_log:
+                audit_log.write(json.dumps(entry) + '\n')
 
     sys.addaudithook(audit)
     manifest_path = args.results / 'suite.json'
@@ -83,6 +88,7 @@ def main(argv=None):
     if manifest.get('measurements_started') and manifest['revision'] != revision:
         raise SystemExit('This results directory contains measurements from another revision.')
     manifest['revision'] = revision
+    manifest['families'] = phases
     group = measure.Cgroup.create(12 << 30)
     manifest['memory_limit_enforced'] = group is not None
     if group:
@@ -108,6 +114,12 @@ def main(argv=None):
                 path, seconds = pm.build(n)
                 print(f'  built {path.name} in {seconds:.0f} s', flush=True)
         real_roots.flint_binary()
+        binaries = {tool.binary(*key) for tool in generic for key in tool.builds(all_cases)}
+        binaries.add(factor.TOOLS['polymojo'].binary())
+        binaries.update(pm.binary(n) for n in {len(c['variables']) for c in cad.load()})
+        binaries.add(real_roots.flint_binary())
+        manifest['drivers'] = [{'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+                               for path in sorted(binaries)]
         manifest.setdefault('driver_compile_commands', []).extend(commands)
         manifest['package_compile_commands'] = 0
         assert tools.verify_poly_mojo(selected) == libraries

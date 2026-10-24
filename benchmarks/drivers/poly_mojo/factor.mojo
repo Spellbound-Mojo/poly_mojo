@@ -8,8 +8,8 @@ Kind `dense` reads one coefficient per line (degree 0 first) after a count
 line and calls `dense.factor` over ZZ, or over GF(modulus) when the modulus is
 nonzero. Kind `sparse` reads one canonical `sparse.dumps` record over ZZ and
 calls `sparse.factor`. Reading the input and writing the answer stay outside
-the timed region. Mode `certified` also times the product check
-(`factor_checked` and `exact.check`). The answer holds the scalar and, per factor, its
+the timed region. Mode `certified` times `factor_checked` instead of `factor`;
+`exact.check` of that same result is timed separately, without refactorization. The answer holds the scalar and, per factor, its
 multiplicity and its canonical `dumps` record.
 """
 from apn_mojo import Integer
@@ -94,10 +94,22 @@ def run_dense(args: List[String]) raises:
         reset_peak()
         while True:
             var start = perf_counter_ns()
-            var result = dense.factor(p)
-            timing.times.append(Int(perf_counter_ns() - start))
+            var result: type_of(dense.factor(p))
+            if certified:
+                var checked = dense.factor_checked(p)
+                timing.times.append(Int(perf_counter_ns() - start))
+                if len(timing.times) == 1:
+                    timing.peak = status_kb("VmHWM")
+                    start = perf_counter_ns()
+                    timing.check_ok = exact.check(checked)
+                    timing.check_ns = Int(perf_counter_ns() - start)
+                result = (exact.unit(checked), exact.factors(checked))
+            else:
+                result = dense.factor(p)
+                timing.times.append(Int(perf_counter_ns() - start))
+                if len(timing.times) == 1:
+                    timing.peak = status_kb("VmHWM")
             if len(timing.times) == 1:
-                timing.peak = status_kb("VmHWM")
                 count = len(result[1])
                 answer = String(result[0].value, "\n", len(result[1]), "\n")
                 for entry in result[1]:
@@ -105,20 +117,27 @@ def run_dense(args: List[String]) raises:
                     answer.write(entry[1], "\n", record.byte_length(), "\n", record)
             if timing.done(min_seconds, min_reps):
                 break
-        if certified:
-            var start = perf_counter_ns()
-            var checked = dense.factor_checked(p)
-            timing.check_ok = exact.check(checked)
-            timing.check_ns = Int(perf_counter_ns() - start)
     else:
         var p = dense.asarray(values)
         reset_peak()
         while True:
             var start = perf_counter_ns()
-            var result = dense.factor(p)
-            timing.times.append(Int(perf_counter_ns() - start))
+            var result: type_of(dense.factor(p))
+            if certified:
+                var checked = dense.factor_checked(p)
+                timing.times.append(Int(perf_counter_ns() - start))
+                if len(timing.times) == 1:
+                    timing.peak = status_kb("VmHWM")
+                    start = perf_counter_ns()
+                    timing.check_ok = exact.check(checked)
+                    timing.check_ns = Int(perf_counter_ns() - start)
+                result = (exact.unit(checked), exact.factors(checked))
+            else:
+                result = dense.factor(p)
+                timing.times.append(Int(perf_counter_ns() - start))
+                if len(timing.times) == 1:
+                    timing.peak = status_kb("VmHWM")
             if len(timing.times) == 1:
-                timing.peak = status_kb("VmHWM")
                 count = len(result[1])
                 answer = String(result[0], "\n", len(result[1]), "\n")
                 for entry in result[1]:
@@ -126,11 +145,6 @@ def run_dense(args: List[String]) raises:
                     answer.write(entry[1], "\n", record.byte_length(), "\n", record)
             if timing.done(min_seconds, min_reps):
                 break
-        if certified:
-            var start = perf_counter_ns()
-            var checked = dense.factor_checked(p)
-            timing.check_ok = exact.check(checked)
-            timing.check_ns = Int(perf_counter_ns() - start)
     with open(args[3], "w") as f:
         f.write(answer)
     write_result(args[4], timing, count)
@@ -148,10 +162,22 @@ def run_sparse[n: Int](args: List[String]) raises:
     reset_peak()
     while True:
         var start = perf_counter_ns()
-        var result = sparse.factor(p)
-        timing.times.append(Int(perf_counter_ns() - start))
+        var result: type_of(sparse.factor(p))
+        if certified:
+            var checked = sparse.factor_checked(p)
+            timing.times.append(Int(perf_counter_ns() - start))
+            if len(timing.times) == 1:
+                timing.peak = status_kb("VmHWM")
+                start = perf_counter_ns()
+                timing.check_ok = exact.check(checked)
+                timing.check_ns = Int(perf_counter_ns() - start)
+            result = (exact.unit(checked), exact.factors(checked))
+        else:
+            result = sparse.factor(p)
+            timing.times.append(Int(perf_counter_ns() - start))
+            if len(timing.times) == 1:
+                timing.peak = status_kb("VmHWM")
         if len(timing.times) == 1:
-            timing.peak = status_kb("VmHWM")
             count = len(result[1])
             answer = String(result[0], "\n", len(result[1]), "\n")
             for entry in result[1]:
@@ -159,11 +185,6 @@ def run_sparse[n: Int](args: List[String]) raises:
                 answer.write(entry[1], "\n", record.byte_length(), "\n", record)
         if timing.done(min_seconds, min_reps):
             break
-    if certified:
-        var start = perf_counter_ns()
-        var checked = sparse.factor_checked(p)
-        timing.check_ok = exact.check(checked)
-        timing.check_ns = Int(perf_counter_ns() - start)
     with open(args[3], "w") as f:
         f.write(answer)
     write_result(args[4], timing, count)

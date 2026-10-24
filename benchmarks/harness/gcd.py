@@ -281,10 +281,14 @@ class PolyMojoGcd(GcdTool):
     system = 'Poly Mojo'
     driver = HERE / 'drivers' / 'poly_mojo' / 'gcd.mojo'
 
-    def __init__(self, method='auto'):
+    def __init__(self, method='auto', certified=False):
         self.method = method
+        self.certified = certified
+        self.check_allowance = 600.0 if certified else 0.0
         self.name = 'polymojo' if method == 'auto' else f'polymojo-{method}'
-        self.algorithm = {'auto': 'default dispatch', 'modular': 'sparse modular (certified)'}[method]
+        if certified:
+            self.name += '-certified'
+        self.algorithm = {'auto': 'default dispatch', 'modular': 'sparse modular (exact reconstruction)'}[method]
 
     def supports(self, c):
         if c['family'] != FAMILY:
@@ -332,7 +336,7 @@ class PolyMojoGcd(GcdTool):
             polys = [polys[0], polys[0], discriminant_divisor(c)]
         (work / 'input.txt').write_text(write_records(polys, nvars, field))
         cmd = [str(self.binary(nvars, field is not None)), 'input.txt', 'answer.txt', 'result.json', c['operation'],
-               self.method, '0', str(field or 0), str(settings['min_seconds']), str(settings['min_reps'])]
+               self.method + ('-certified' if self.certified else ''), '0', str(field or 0), str(settings['min_seconds']), str(settings['min_reps'])]
         return cmd, os.environ.copy()
 
     def collect(self, c, work):
@@ -446,22 +450,25 @@ class SingularGcd(GcdTool):
 
 
 TOOLS = {t.name: t for t in [
-    PolyMojoGcd(), PolyMojoGcd('modular'), PythonGcd('flint'), PythonGcd('sympy'), PythonGcd('sympy', 'flint'),
+    PolyMojoGcd(), PolyMojoGcd('modular'), PolyMojoGcd(certified=True), PolyMojoGcd('modular', certified=True),
+    PythonGcd('flint'), PythonGcd('sympy'), PythonGcd('sympy', 'flint'),
     SingularGcd(),
 ]}
-FAMILY_TOOLS = ['polymojo', 'polymojo-modular', 'flint', 'singular', 'sympy']
+FAMILY_TOOLS = ['polymojo', 'polymojo-modular', 'polymojo-certified', 'polymojo-modular-certified', 'flint', 'singular', 'sympy']
 
 
 # ---------------------------------------------------------------- report
 
-LABEL = {'polymojo': 'Poly Mojo', 'polymojo-modular': 'Poly Mojo (modular)', 'flint': 'FLINT',
+LABEL = {'polymojo': 'Poly Mojo (no certificate)', 'polymojo-modular': 'Poly Mojo modular (no certificate)',
+         'polymojo-certified': 'Poly Mojo (certificate)', 'polymojo-modular-certified': 'Poly Mojo modular (certificate)', 'flint': 'FLINT',
          'singular': 'Singular', 'sympy': 'SymPy', 'sympy-flint': 'SymPy (flint types)'}
 
 
 def report(records, env, folder):
     """Per-ladder tables of time and memory, and geometric-mean ratios against Poly Mojo."""
     from collections import defaultdict
-    from .report import cell, geomean, RATIO_FLOOR_S
+    from .report import cell, geomean, RATIO_FLOOR_S, memory_limit
+    from .proofs import table as proof_table
     present = {r['tool'] for r in records}
     order = [t for t in LABEL if t in present]
     by_ladder = defaultdict(dict)
@@ -469,12 +476,14 @@ def report(records, env, folder):
         by_ladder[r['ladder']].setdefault((r['size'], r['case']), {})[r['tool']] = r
     lines = ['# Gcd, resultant, and discriminant results', '',
              f"Host: {env['cpu']}, {env['cpus']} vCPUs. One pinned CPU per run, "
-             f"{records[0]['memory_cap']} and {records[0]['timeout_s']:.0f} s per run.", '',
+             f"{records[0]['timeout_s']:.0f} s per run. " + memory_limit(records), '',
              'Versions: ' + '; '.join(f'{LABEL[t]} {TOOLS[t].version()}' for t in order) + '.', '',
              'Cells give the median time and incremental peak memory; ✗ marks an answer that disagrees with a '
              'confirmed one, ? an answer no other library produced. Ratios are competitor time ÷ Poly Mojo time '
              f'(above 1: Poly Mojo faster) over cases both solved with a confirmed answer and at least '
              f'{RATIO_FLOOR_S * 1000:.0f} ms for the slower tool.', '',
+             'Peer ratios use the value-only API, without retained certificates. GCD certificates establish maximality; '
+             'resultant certificates establish the cofactor identity. Discriminants use a checked resultant followed by exact division.', '',
              '## Summary', '', '| Ladder | ' + ' | '.join(LABEL[t] for t in order if t != 'polymojo') + ' |',
              '|---|' + '---|' * (len(order) - 1)]
     for ladder in sorted(by_ladder):
@@ -491,6 +500,7 @@ def report(records, env, folder):
             g = geomean(values)
             cells.append(f'{g:.3g} ({len(values)})' if g else '')
         lines.append(f'| {ladder} | ' + ' | '.join(cells) + ' |')
+    lines += ['', '## Certificate overhead', '', *proof_table(records, [('polymojo', 'polymojo-certified'), ('polymojo-modular', 'polymojo-modular-certified')])]
     for ladder in sorted(by_ladder):
         lines += ['', f'## {ladder}', '', '| Size | ' + ' | '.join(LABEL[t] for t in order) + ' |',
                   '|---|' + '---|' * len(order)]

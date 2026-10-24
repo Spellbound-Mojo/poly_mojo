@@ -6,6 +6,8 @@ Build one binary per variable count and coefficient domain with
 Arguments: input, answer, result, operation, method, axis, modulus,
 min_seconds, min_reps. The input holds a polynomial count and then, for each
 polynomial, a byte length followed by its canonical `sparse.dumps` record.
+Append `-certified` to METHOD to time the checked producer instead; `check_ns`
+then measures only `exact.check` of its first retained result.
 
 Operations, all through the public `poly.sparse` API:
 - `gcd`: `sparse.gcd(f, h, method=method)` of the first two records.
@@ -16,7 +18,7 @@ Operations, all through the public `poly.sparse` API:
 Reading the input and writing the answer stay outside the timed region.
 """
 from apn_mojo import Integer
-from poly import sparse
+from poly import sparse, exact
 from polynomials import ModInt
 from poly._interop import _Shape
 from std.sys import argv, get_defined_int
@@ -80,9 +82,41 @@ def compute(polys: List[Poly], operation: String, method: String, axis: Int) rai
     raise Error("unknown operation " + operation)
 
 
+def checked_call(polys: List[Poly], operation: String, method: String, axis: Int, check: Bool) raises -> Tuple[Poly, Int, Int, Int, Bool]:
+    """Time production and checking separately; output conversion is untimed."""
+    var start = perf_counter_ns()
+    if operation == "gcd":
+        var proof = sparse.gcd_checked(polys[0], polys[1], method=method)
+        var elapsed = perf_counter_ns() - start
+        var peak = status_kb("VmHWM")
+        start = perf_counter_ns()
+        var ok = exact.check(proof) if check else True
+        var check_ns = perf_counter_ns() - start if check else 0
+        return (rebind_var[Poly](exact.value(proof)), elapsed, peak, check_ns, ok)
+    var proof = sparse.resultant_checked(polys[0], rebind_var[Poly](sparse.derivative(polys[0], axis=axis)), axis=axis) if operation == "discriminant" else sparse.resultant_checked(polys[0], polys[1], axis=axis)
+    var elapsed = perf_counter_ns() - start
+    var value = rebind_var[Poly](exact.value(proof))
+    if operation == "discriminant":
+        start = perf_counter_ns()
+        var divided = sparse.divide_exact(value, polys[2])
+        elapsed += perf_counter_ns() - start
+        if not divided:
+            raise Error("the resultant is not divisible by the leading coefficient")
+        value = rebind_var[Poly](divided.take())
+    var peak = status_kb("VmHWM")
+    start = perf_counter_ns()
+    var ok = exact.check(proof) if check else True
+    var check_ns = perf_counter_ns() - start if check else 0
+    return (value^, elapsed, peak, check_ns, ok)
+
+
 def run[T: Copyable & Deinitable](args: List[String]) raises:
     var operation = args[4]
     var method = args[5]
+    var certified = method.endswith("-certified")
+    if certified:
+        var plain_method = String(method.removesuffix("-certified"))
+        method = plain_method^
     var axis = Int(args[6])
     var modulus = UInt64(Int(args[7]))
     var min_seconds = atof(args[8])
@@ -95,9 +129,22 @@ def run[T: Copyable & Deinitable](args: List[String]) raises:
     var rss_before = status_kb("VmRSS")
     reset_peak()
     var start = perf_counter_ns()
-    var answer_poly = compute(polys, operation, method, axis)
-    var elapsed = perf_counter_ns() - start
-    var peak = status_kb("VmHWM")
+    var answer_poly: Poly
+    var elapsed: Int
+    var peak: Int
+    var check_ns = 0
+    var check_ok = True
+    if certified:
+        var measured = checked_call(polys, operation, method, axis, True)
+        answer_poly = measured[0].copy()
+        elapsed = measured[1]
+        peak = measured[2]
+        check_ns = measured[3]
+        check_ok = measured[4]
+    else:
+        answer_poly = compute(polys, operation, method, axis)
+        elapsed = perf_counter_ns() - start
+        peak = status_kb("VmHWM")
     var times: List[Int] = [elapsed]
     var total = elapsed
     var record = sparse.dumps(answer_poly)
@@ -106,8 +153,15 @@ def run[T: Copyable & Deinitable](args: List[String]) raises:
     if Float64(elapsed) < limit:
         while len(times) < min_reps or Float64(total) < limit:
             start = perf_counter_ns()
-            var again = compute(polys, operation, method, axis)
-            var lap = perf_counter_ns() - start
+            var again: Poly
+            var lap: Int
+            if certified:
+                var measured = checked_call(polys, operation, method, axis, False)
+                again = measured[0].copy()
+                lap = measured[1]
+            else:
+                again = compute(polys, operation, method, axis)
+                lap = perf_counter_ns() - start
             times.append(lap)
             total += lap
             if sparse.dumps(again) != record:
@@ -119,7 +173,8 @@ def run[T: Copyable & Deinitable](args: List[String]) raises:
     var result = String('{"times_ns": [')
     for i in range(len(times)):
         result.write(", " if i else "", times[i])
-    result.write('], "rss_before_kb": ', rss_before, ', "peak_kb": ', peak, "}\n")
+    result.write('], "rss_before_kb": ', rss_before, ', "peak_kb": ', peak,
+                 ', "check_ns": ', check_ns, ', "check_ok": ', "true" if check_ok else "false", "}\n")
     with open(args[3], "w") as f:
         f.write(result)
 

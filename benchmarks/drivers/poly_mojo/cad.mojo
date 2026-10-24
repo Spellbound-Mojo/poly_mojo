@@ -10,6 +10,7 @@ comma separated, or `-` for a full decomposition.
 
 | Mode | Timed call | Check timed separately |
 |---|---|---|
+| construct | compact backend construction, retaining final data | complete final acceptance (not an extra recheck) |
 | final | `cad.decompose` (includes mandatory acceptance) | extra `cad.check`; `cells_ns` times `cad.cells` |
 | lazard | `cad.decompose(lazard=True)` (includes acceptance) | extra `cad.check` |
 | mccallum | `cad.decompose(lazard=False)` | `cad.check` |
@@ -23,18 +24,65 @@ The answer file lists, for a decomposition, one line per terminal cell with
 its dimension, signs and exact sample coordinates; for `solve`, the verdict
 and the exact sample point. A coordinate is `Q:<rational>` or
 `A:<c0>,<c1>,...:<low>:<high>`, the root of sum c_i t^i in [low, high].
-Writing the answer stays outside the timed region. For decomposition modes,
+Writing the answer stays outside the timed region. For public decomposition modes,
 check_ns is an extra recheck and must not be added to times_ns as a mandatory
 certification cost; the public call already includes that verification.
+The construct instrumentation instead records construction and acceptance in
+separate timers, while following the same retry policy.
 """
 from apn_mojo import Rational
 from poly import algebraic, cad, sparse, io
 from poly.algebraic import Real
 from polynomials import Budget
+from polynomials import SparsePoly, QQ, PolyErrorKind, CADFinalCertificate
+from polynomials.cad_final import _CADFinalData
+from polynomials._cad_tree_final import _FinalCAD, _construct_final_cad, _check_final_cad
+from poly._interop import _Shape
+from std.memory import ArcPointer
 from std.sys import argv, get_defined_int
 from std.time import perf_counter_ns
 
 comptime NVARS = get_defined_int["NVARS", 2]()
+
+
+def construction(polys: List[sparse.Array[_Shape[NVARS], 1]], mut build_ns: Int, mut verify_ns: Int) raises -> cad.Decomposition[_Shape[NVARS]]:
+    """Benchmark the compact backend's construction and acceptance separately.
+
+    Final data still serve as evidence. This is not a proof-free public API.
+    Retry order matches the public default: interval, exact, plain Lazard.
+    """
+    var start = perf_counter_ns()
+    var budget = Budget()
+    var inputs = List[SparsePoly[QQ]]()
+    for p in polys:
+        inputs.append(p._core[].reorder(p._core[].order, budget))
+    var variables = List[Int64]()
+    for i in range(NVARS):
+        variables.append(Int64(i))
+    build_ns += perf_counter_ns() - start
+    for attempt in range(3):
+        var candidate = Optional[_FinalCAD]()
+        start = perf_counter_ns()
+        try:
+            candidate = _construct_final_cad(inputs, variables, List[Int](), budget, brown=attempt != 2, interval=attempt == 0)
+        except e:
+            if e.kind != PolyErrorKind.DOMAIN:
+                raise e^
+        build_ns += perf_counter_ns() - start
+        if not candidate:
+            continue
+        var tree = candidate.take()
+        tree.retries = attempt
+        start = perf_counter_ns()
+        var valid = _check_final_cad(inputs, variables, List[Int](), tree, budget)
+        verify_ns += perf_counter_ns() - start
+        if valid:
+            start = perf_counter_ns()
+            var proof = CADFinalCertificate(ArcPointer(_CADFinalData(tree^, None, None, False)))
+            var result = cad.Decomposition[_Shape[NVARS]](ArcPointer(cad._DecompositionData(inputs^, proof^, None, List[Tuple[Int, Real]]())))
+            build_ns += perf_counter_ns() - start
+            return result^
+    raise Error("construction rejected by final verification")
 
 
 def status_kb(field: String) raises -> Int:
@@ -126,26 +174,33 @@ def main() raises:
         peak = status_kb("VmHWM")
         check_ok = cad.check(result)
         answer.write(io.dumps(result))
-    elif mode == "final" or mode == "lazard" or mode == "mccallum" or mode == "consumers":
+    elif mode == "construct" or mode == "final" or mode == "lazard" or mode == "mccallum" or mode == "consumers":
         var lazard = Optional[Bool]() if mode == "final" or mode == "consumers" else Optional(mode == "lazard")
         var start = perf_counter_ns()
-        var result = cad.decompose(polys, lazard=lazard)
-        var elapsed = perf_counter_ns() - start
+        var elapsed = 0
+        var result = construction(polys, elapsed, check_ns) if mode == "construct" else cad.decompose(polys, lazard=lazard)
+        if mode != "construct":
+            elapsed = perf_counter_ns() - start
         peak = status_kb("VmHWM")
         times.append(elapsed)
         total += elapsed
         if min_seconds < 0 or Float64(elapsed) < limit:
             while len(times) < min_reps or Float64(total) < limit:
                 start = perf_counter_ns()
-                var again = cad.decompose(polys, lazard=lazard)
-                var lap = perf_counter_ns() - start
+                var lap = 0
+                var extra_verify = 0
+                var again = construction(polys, lap, extra_verify) if mode == "construct" else cad.decompose(polys, lazard=lazard)
+                if mode != "construct":
+                    lap = perf_counter_ns() - start
                 times.append(lap)
                 total += lap
                 if again.evidence().cell_count(metadata_budget) != result.evidence().cell_count(metadata_budget):
                     raise Error("repeated decomposition differs")
-        start = perf_counter_ns()
-        check_ok = cad.check(result)
-        check_ns = perf_counter_ns() - start
+        check_ok = True
+        if mode != "construct":
+            start = perf_counter_ns()
+            check_ok = cad.check(result)
+            check_ns = perf_counter_ns() - start
         var counts = result.evidence().factor_counts(metadata_budget)
         var factors = String("[")
         for level in range(len(counts)):
