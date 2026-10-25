@@ -2165,20 +2165,17 @@ def _clock() -> Int:
 
 
 def _exact_cost(units: Int, terms: Int, columns: Int) -> Int:
-    """The exact check's cost model, in hundredths of a nanosecond on the
-    calibration machine: from its budget units, the row terms it loaded and
-    the columns after the pair's leading one (fitted over cyclic-7/8,
-    katsura-9/10, eco-10/11 and noon-8 to about fifteen percent, with the
-    ADX row kernels; refit with experiments/cert_reconstruct/calibrate_routes.py)."""
+    """Estimate the exact check's cost from its budget units, loaded row terms,
+    and columns after the pair's leading one. The fixed weights share a scale
+    with `_modular_cost`; route selection does not depend on wall-clock time."""
     return 53 * units + 1258 * terms + 166 * columns
 
 
 def _modular_cost(lane_units: Int, crt_units: Int, slots: Int) -> Int:
-    """The modular route's cost model, in the units of `_exact_cost`: from the
-    budget units of its lane sweeps and of its proofs, and the quotient slots
-    its attempts combine. Fitted as `_exact_cost`, refitted after the limb
-    reconstruction of the proofs, to about twenty percent, and scaled up by a
-    fifth so that close calls go to the exact check."""
+    """Estimate the modular route's cost in the units of `_exact_cost`, from
+    the budget units of its lane sweeps and proofs and the quotient slots its
+    attempts combine. The weights include a margin favoring the exact check
+    when the estimated costs are close."""
     return 27 * lane_units + 106 * crt_units + 16760 * slots
 
 

@@ -197,6 +197,9 @@ for voice, executable examples, mathematical notation, and site checks.
 
 The published documentation is for library users. Keep development plans,
 handoff notes, logs, benchmark reports, and API test snapshots out of `docs/`.
-Store temporary records under the ignored `.cache/` directory and retained
-benchmark evidence under `benchmarks/results/`. Contributor instructions live
-in this guide, `scripts/DOCUMENTATION.md`, and `tests/`.
+Store temporary records under the ignored `.cache/` directory. Use independent
+benchmark suites such as [polybench](https://github.com/tueda/polybench) in a
+separate checkout, and retain benchmark inputs, provenance, and results there.
+Report ordinary operation time, operation time with certificate construction,
+and certificate verification time separately. Contributor instructions live in
+this guide, `scripts/DOCUMENTATION.md`, and `tests/`.
