@@ -1,6 +1,6 @@
 [workspace]
 name = "polynomials"
-version = "1.0.0"
+version = "1.0.1"
 description = "Exact and validated polynomial algebra in Mojo, with independently checkable certificates"
 authors = ["Anatoly Vitold Stankyavichyus <anatolyvitold@outlook.com>"]
 license = "Apache-2.0"
