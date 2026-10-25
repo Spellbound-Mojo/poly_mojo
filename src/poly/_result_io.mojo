@@ -15,7 +15,7 @@ from . import _common, _value_io, _algebraic_value
 from ._common import _CoreKind, _allocation, _grow, _charge_size
 from ._archive_meta import _Archive
 from ._io_meta import _Record
-from ._algebraic_io import _Reader, _Writer, _bad
+from ._algebraic_io import _Reader, _Writer, _bad, _unsigned
 from . import exact, roots, cad, _cad_algebraic, _cad_fixed, _complex_roots, _algebraic_numeric, _rational_field, _rational_certificates, _determinant, algebraic
 
 
@@ -61,6 +61,22 @@ def _depth(depth: Int, mut budget: Budget) raises PolyError:
     budget.charge(1)
     if depth > 256:
         raise _bad("certificate nesting exceeds 256 levels")
+
+
+def _write_modular_words[S: PolynomialTextSink](values: List[UInt64], mut writer: _Writer, mut sink: S, mut budget: Budget) raises PolyError:
+    writer.line(String(len(values)), sink, budget)
+    for value in values:
+        writer.line(String(value), sink, budget)
+
+
+def _read_modular_words[S: PolynomialTextSource](mut reader: _Reader[S], mut budget: Budget) raises PolyError -> List[UInt64]:
+    var count = reader.count(budget)
+    var values = List[UInt64]()
+    for _ in range(count):
+        var value = reader.number((UInt64(1) << 30) - 1, budget)
+        _grow(values, budget)
+        values.append(value)
+    return values^
 
 
 @fieldwise_init
@@ -313,6 +329,23 @@ def _write_node[T: Copyable & Deinitable, C: CoefficientRing, D: NumericDomain, 
             _write_node[Int, C, D, E](v.contents_node.value(), writer, sink, budget, depth + 1)
     elif T == core.CoprimalityCertificate[C]:
         ref v = rebind[core.CoprimalityCertificate[C]](value)
+        if v.modular:
+            # A versioned variant marker cannot be mistaken for an old node count.
+            writer.line("MODULAR-1", sink, budget)
+            ref m = v.modular.value()
+            writer.line(String(m.prime), sink, budget)
+            writer.line(String(len(m.variables)), sink, budget)
+            for variable in m.variables:
+                writer.line(String(variable), sink, budget)
+            _write_modular_words(m.slopes, writer, sink, budget)
+            _write_modular_words(m.offsets, writer, sink, budget)
+            _write_modular_words(m.u, writer, sink, budget)
+            _write_modular_words(m.v, writer, sink, budget)
+            writer.line(String(len(m.integer_indices)), sink, budget)
+            for i in range(len(m.integer_indices)):
+                writer.line(String(m.integer_indices[i]), sink, budget)
+                _write_node[core.ZZ, C, D, E](m.integer_weights[i], writer, sink, budget, depth + 1)
+            return
         writer.line(String(len(v.nodes)), sink, budget)
         for field93 in v.nodes:
             _write_node[core.CoprimalityNode[C], C, D, E](field93, writer, sink, budget, depth + 1)
@@ -1320,7 +1353,33 @@ def _read_node[T: Copyable & Deinitable, C: CoefficientRing, D: NumericDomain, E
             field85 = field86
         return rebind_var[T](core.CoprimalityNode[C](field75, field76^, field77^, field78^, field79^, field82^, field85^))
     elif T == core.CoprimalityCertificate[C]:
-        var field90 = reader.count(budget)
+        var header = reader.line(budget)
+        if header == "MODULAR-1":
+            var prime = reader.number((UInt64(1) << 30) - 1, budget)
+            var count = reader.count(budget)
+            var variables = List[Int64]()
+            for _ in range(count):
+                var variable = reader.identifier(budget)
+                _grow(variables, budget)
+                variables.append(variable)
+            var slopes = _read_modular_words(reader, budget)
+            var offsets = _read_modular_words(reader, budget)
+            var u = _read_modular_words(reader, budget)
+            var v = _read_modular_words(reader, budget)
+            count = reader.count(budget)
+            var indices = List[Int]()
+            var weights = List[core.ZZ]()
+            for _ in range(count):
+                var index = reader.count(budget)
+                var weight = _read_node[core.ZZ, C, D, E](reader, budget, depth + 1)
+                _grow(indices, budget)
+                _grow(weights, budget)
+                indices.append(index)
+                weights.append(weight^)
+            var proof = core.ModularCoprimalityCertificate(prime, variables^, slopes^, offsets^, u^, v^, indices^, weights^)
+            return rebind_var[T](core.CoprimalityCertificate[C](List[core.CoprimalityNode[C]](), -1, proof^))
+        # Existing version-one arenas retain their byte-for-byte field layout.
+        var field90 = Int(_unsigned(header, UInt64(Int.MAX), budget))
         var field89 = List[core.CoprimalityNode[C]]()
         for _ in range(field90):
             var field91 = _read_node[core.CoprimalityNode[C], C, D, E](reader, budget, depth + 1)

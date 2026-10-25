@@ -160,6 +160,32 @@ certificate. Claim: $f'$ and $h'$ are coprime (Theorem G-8). The natural
 choice of $s$ is the resultant $\operatorname{res}_{x_1}(f', h')$ with its
 cofactors (Theorem E-3).
 
+**Certificate G-C3M (modular affine projection).** For nonzero integer
+polynomials $F,H$, choose an admitted prime $p$ and substitute
+$x_i=a_it+b_i$ modulo $p$. Check that both images retain their original
+total degrees, and verify a univariate identity
+$U\overline F+V\overline H=1$ in $\mathbb F_p[t]$. Also verify an exact
+integer linear combination of selected coefficients of $F,H$ equal to 1.
+These checks establish coprimality over $\mathbb Z$.
+
+*Proof.* If $F=DA$, total degree is additive. Substitution and reduction
+cannot increase degree, so preserving the degree of $F$ forces the images
+of both $D$ and $A$ to preserve their degrees. A nonconstant common divisor
+would therefore remain a positive-degree common divisor of both images,
+contradicting the verified identity. The integer coefficient identity
+excludes shared integer factors, which could become units modulo $p$.
+For rational inputs, clear denominators exactly first; integer scalar
+factors are units over $\mathbb Q$, so the scalar identity is unnecessary.
+$\square$
+
+The producer tries a bounded set of lines over three fixed primes below
+$2^{30}$. Images with lost degree or a nonconstant GCD are inconclusive;
+they never establish noncoprimality. Total degrees above 256, unsuccessful
+searches, and unsupported coefficient domains use G-C3. Checking G-C3M
+uses projection and multiplication, without repeating polynomial GCD or
+constructing a resultant. This is an exact certificate, not a probabilistic
+acceptance test.
+
 **Proposition G-9 (gcd from G-C1 and G-C3).** If $f = g f'$, $h = g h'$,
 and $f'$, $h'$ are coprime, then $g$ is a gcd of $f$ and $h$.
 

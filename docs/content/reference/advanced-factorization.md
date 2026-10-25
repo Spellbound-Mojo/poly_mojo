@@ -49,10 +49,11 @@ and leading coefficients fix sample scaling;
 degree drops discard unlucky samples. Exact trial division verifies
 reconstruction. Polynomial content groups only occurring exponents and invokes
 the same sparse gcd on fewer variables. Neither multivariate content nor modular
-support discovery invokes PRS. Univariate gcds and the coprimality certificate
-producer retain their established algorithms.
+support discovery invokes PRS. Coprimality certification first tries a compact
+modular affine projection over ZZ and QQ, with the exact resultant proof as a
+fallback.
 
-The returned `GcdResult` reuses the existing divisibility and content-witness
+The returned `GcdResult` carries divisibility and independently checked
 coprimality certificates. Both nonzero results include maximality evidence; the zero/zero
 case has zero gcd and zero cofactors. This is an explicit sparse algorithm
 entry point, independent of the existing `gcd` dispatch policy.

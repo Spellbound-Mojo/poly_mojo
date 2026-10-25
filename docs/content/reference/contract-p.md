@@ -53,8 +53,9 @@ Use `is_contiguous()` to inspect storage without changing it.
   alone do not prove
   irreducibility; a resultant identity does not establish its determinant;
   common-divisor and cancellation identities do not alone prove maximality.
-  The coprimality arena uses backward references and explicit
-  coefficient-content folds. Checkers do not rerun their producers.
+  Coprimality certificates use checked modular affine projections or an arena
+  with backward references and explicit coefficient-content folds.
+  Checkers do not rerun their producers.
 - The codec uses the kernel's canonical format: little-endian term/pair counts,
   signed 64-bit variable indices, unsigned 32-bit exponents, and length-prefixed canonical
   rational coefficients. It enforces `MAX_KERNEL_BYTES`, rejects malformed

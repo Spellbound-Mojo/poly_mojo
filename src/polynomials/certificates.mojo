@@ -307,9 +307,11 @@ struct CoprimalityNode[C: CoefficientRing](Copyable, Movable, Writable):
     """An earlier node proving the two final contents coprime."""
 
 
-@fieldwise_init
+from ._modular_coprimality import ModularCoprimalityCertificate, _check_modular
+
+
 struct CoprimalityCertificate[C: CoefficientRing](Copyable, Movable, Writable):
-    """A finite arena of coprimality nodes in dependency order.
+    """A modular projection witness or a finite arena of coprimality nodes.
 
     Parameters:
         C: The coefficient ring.
@@ -317,7 +319,21 @@ struct CoprimalityCertificate[C: CoefficientRing](Copyable, Movable, Writable):
     var nodes: List[CoprimalityNode[Self.C]]
     """Nodes whose references must point strictly backwards."""
     var root: Int
-    """The node proving coprimality of the supplied input pair."""
+    """The root node, or -1 for a modular witness with an empty arena."""
+    var modular: Optional[ModularCoprimalityCertificate]
+    """The optional degree-preserving modular coprimality witness."""
+
+    def __init__(out self, var nodes: List[CoprimalityNode[Self.C]], root: Int, var modular: Optional[ModularCoprimalityCertificate] = None):
+        """Retain one proof variant; independent checking enforces its shape.
+
+        Args:
+            nodes: The dependency-ordered legacy arena, empty for modular evidence.
+            root: The arena root or -1 for modular evidence.
+            modular: An optional modular witness; absent for a legacy arena.
+        """
+        self.nodes = nodes^
+        self.root = root
+        self.modular = modular^
 
 
 @fieldwise_init
@@ -505,7 +521,7 @@ def _check_content[C: CoefficientRing](p: SparsePoly[C], variable: Int64, steps:
 
 
 def check_coprimality[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], certificate: CoprimalityCertificate[C], mut budget: Budget) raises PolyError -> Bool:
-    """Check content folds and elimination identities without rerunning gcd (G-C3).
+    """Check modular witnesses or content/elimination identities without rerunning gcd.
 
     Parameters:
         C: ZZ or a coefficient field.
@@ -523,6 +539,10 @@ def check_coprimality[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], ce
         PolyError: DOMAIN for invalid representations, LIMIT or CAPACITY on work limits.
     """
     budget.charge(1)
+    if certificate.modular:
+        if certificate.root != -1 or len(certificate.nodes):
+            return False
+        return _check_modular(f, h, certificate.modular.value(), budget)
     if certificate.root < 0 or certificate.root >= len(certificate.nodes):
         return False
     # The arena format requires every reference, including unreachable ones,

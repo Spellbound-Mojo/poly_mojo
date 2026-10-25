@@ -2,7 +2,8 @@
 from apn_mojo import Integer, div_rem_trunc
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _sum
 from .coefficients import CoefficientRing, CoefficientField, ZZ, _work
-from ._coefficient_ops import _exact
+from ._coefficient_ops import _exact, _integer_bezout
+from ._modular_coprimality import _try_modular
 from .sparse import SparsePoly
 from .dense import DensePoly
 from .monomial import MonomialOrder
@@ -83,39 +84,6 @@ def extended_gcd[C: CoefficientField](f: DensePoly[C], h: DensePoly[C], mut budg
         b = _exact_poly(h.to_sparse(order, budget), d, budget)
     return GcdResult[C](d^, (a^, b^), (triple[1].to_sparse(order, budget), triple[2].to_sparse(order, budget)), None)
 
-
-def _integer_bezout(a: ZZ, b: ZZ, mut budget: Budget) raises PolyError -> Tuple[ZZ, ZZ, ZZ]:
-    _charge_size(_sum(a.size(), b.size()), budget)
-    var f = a.copy()
-    var h = b.copy()
-    var u0 = ZZ(Integer(1))
-    var v0 = ZZ(Integer(0))
-    var u1 = ZZ(Integer(0))
-    var v1 = ZZ(Integer(1))
-    while not h.is_zero():
-        budget.charge(1)
-        _work(f.size(), h.size(), True, budget)
-        var q: ZZ
-        var r: ZZ
-        try:
-            var qr = div_rem_trunc(f.value, h.value)
-            q = ZZ(qr[0].copy())
-            r = ZZ(qr[1].copy())
-        except e:
-            raise PolyError(PolyErrorKind.CAPACITY, String(e))
-        var u = u0.sub(q.mul(u1, budget), budget)
-        var v = v0.sub(q.mul(v1, budget), budget)
-        f = h^
-        h = r^
-        u0 = u1^
-        v0 = v1^
-        u1 = u^
-        v1 = v^
-    if f.value.sign() < 0:
-        f = f.neg(budget)
-        u0 = u0.neg(budget)
-        v0 = v0.neg(budget)
-    return (f^, u0^, v0^)
 
 
 def _append[C: CoefficientRing](mut nodes: List[CoprimalityNode[C]], var node: CoprimalityNode[C], mut budget: Budget) raises PolyError -> Int:
@@ -209,11 +177,16 @@ def coprimality_certificate[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[
         budget: The shared work allowance.
 
     Returns:
-        A deterministic G-C3 proof arena, or None when the inputs share a nonunit factor.
+        A modular projection witness or a deterministic G-C3 proof arena,
+        or None when the inputs share a nonunit factor.
 
     Raises:
         PolyError: DOMAIN for incompatible inputs, LIMIT or CAPACITY on work limits.
     """
+    f._same(h, budget)
+    var modular = _try_modular(f, h, budget)
+    if modular:
+        return CoprimalityCertificate[C](List[CoprimalityNode[C]](), -1, modular^)
     var nodes = List[CoprimalityNode[C]]()
     var root = _prove(f, h, nodes, budget)
     if not root:

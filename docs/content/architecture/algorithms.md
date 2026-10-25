@@ -24,7 +24,10 @@ samples remain compatible. Failed support assumptions trigger renewed discovery.
 
 Gcd evidence separates divisibility from maximality. Cofactors establish the
 former; Bézout identities or coprimality certificates establish the latter.
-The coprimality arena uses backward references and explicit content-gcd folds.
+Integer and rational coprimality proofs first try a degree-preserving modular
+affine projection with a univariate Bézout identity. Integer inputs also carry
+an exact coefficient identity excluding scalar factors. The fallback
+coprimality arena uses backward references and explicit content-gcd folds.
 The checker validates each referenced input pair rather than trusting a node
 merely because another pair already used it.
 

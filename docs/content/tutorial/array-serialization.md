@@ -62,6 +62,11 @@ evaluations. The archive includes original operands, options, and proof fields.
 Loading reconstructs those fields and runs the independent checker before
 returning; it does not recompute the answer with the producing algorithm.
 
+Integer and rational GCD results can retain compact modular coprimality
+certificates. Their archive payload uses the `MODULAR-1` variant marker.
+Older resultant-based coprimality archives remain readable; package versions
+predating this variant reject its marker.
+
 <!-- example: docs/examples/array_checked_serialization.mojo -->
 
 A rejected proof raises `ENCODING`. Work or field limits still raise `LIMIT`

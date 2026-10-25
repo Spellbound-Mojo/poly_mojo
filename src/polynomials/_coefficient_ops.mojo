@@ -1,6 +1,6 @@
 """Internal exact quotients and UFD normalization for P2 algorithms."""
 from apn_mojo import Integer, div_rem_trunc, gcd as integer_gcd
-from .errors import Budget, PolyError, PolyErrorKind, _charge_size
+from .errors import Budget, PolyError, PolyErrorKind, _charge_size, _sum
 from .coefficients import CoefficientRing, CoefficientField, ZZ, _work
 
 
@@ -60,3 +60,37 @@ def _unit[C: CoefficientRing](a: C, mut budget: Budget) raises PolyError -> C:
         return a.inverse(budget)
     else:
         raise PolyError(PolyErrorKind.UNSUPPORTED, "normalization requires ZZ or a coefficient field")
+
+
+def _integer_bezout(a: ZZ, b: ZZ, mut budget: Budget) raises PolyError -> Tuple[ZZ, ZZ, ZZ]:
+    _charge_size(_sum(a.size(), b.size()), budget)
+    var f = a.copy()
+    var h = b.copy()
+    var u0 = ZZ(Integer(1))
+    var v0 = ZZ(Integer(0))
+    var u1 = ZZ(Integer(0))
+    var v1 = ZZ(Integer(1))
+    while not h.is_zero():
+        budget.charge(1)
+        _work(f.size(), h.size(), True, budget)
+        var q: ZZ
+        var r: ZZ
+        try:
+            var qr = div_rem_trunc(f.value, h.value)
+            q = ZZ(qr[0].copy())
+            r = ZZ(qr[1].copy())
+        except e:
+            raise PolyError(PolyErrorKind.CAPACITY, String(e))
+        var u = u0.sub(q.mul(u1, budget), budget)
+        var v = v0.sub(q.mul(v1, budget), budget)
+        f = h^
+        h = r^
+        u0 = u1^
+        v0 = v1^
+        u1 = u^
+        v1 = v^
+    if f.value.sign() < 0:
+        f = f.neg(budget)
+        u0 = u0.neg(budget)
+        v0 = v0.neg(budget)
+    return (f^, u0^, v0^)

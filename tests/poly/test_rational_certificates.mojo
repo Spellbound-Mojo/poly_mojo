@@ -20,7 +20,7 @@ def main() raises:
     # x and y are coprime although no polynomial Bezout identity equals one.
     var xy = rational.from_terms([((1, 0), 1)], [((0, 1), 1)])
     assert_true(rational.check(xy))
-    assert_true(len(xy.coprimality_evidence().nodes) > 1)
+    assert_true(Bool(xy.coprimality_evidence().modular))
     var cancelled = rational.from_terms([((2, 1), 2)], [((1, 2), 4)])
     assert_true(rational.check(cancelled))
     assert_equal(rational.numerator(cancelled).to_list(), [((1, 0), Rational(1, 2))])

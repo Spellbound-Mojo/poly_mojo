@@ -29,8 +29,7 @@ def main() raises:
     wrong_node._data[].coprimality.root = -1
     assert_false(rational.check(wrong_node))
     var cycle = rational.from_terms([((1, 0), 1)], [((0, 1), 1)])
-    var root = cycle._data[].coprimality.root
-    cycle._data[].coprimality.nodes[root].contents_node = root
+    cycle._data[].coprimality.root = 0
     assert_false(rational.check(cycle))
 
     # Recomposition alone accepts 1/(x^4+4), but its factor is reducible:

@@ -26,19 +26,23 @@ def properties[C: CoefficientRing](ctx: C.Context, mut c: Checker) raises:
         c.check(Bool(got.coprimality) and check_coprimality(got.cofactors[0], got.cofactors[1], got.coprimality.value(), work), "generated maximality proof")
         var proof = got.coprimality.take()
         var corrupt = proof.copy()
-        corrupt.nodes[corrupt.root].u = corrupt.nodes[corrupt.root].u.add(one, work)
-        c.check(not check_coprimality(a, b, corrupt, work), "corrupt elimination multiplier")
+        if corrupt.modular:
+            corrupt.modular.value().prime = 4
+        else:
+            corrupt.nodes[corrupt.root].u = corrupt.nodes[corrupt.root].u.add(one, work)
+        c.check(not check_coprimality(a, b, corrupt, work), "corrupt coprimality witness")
         corrupt = proof.copy()
         corrupt.root = len(corrupt.nodes)
         c.check(not check_coprimality(a, b, corrupt, work), "out-of-range root")
-        corrupt.root = -1
+        corrupt.root = -2
         c.check(not check_coprimality(a, b, corrupt, work), "negative root")
-        corrupt = proof.copy()
-        corrupt.nodes[corrupt.root].contents_node = corrupt.root
-        c.check(not check_coprimality(a, b, corrupt, work), "cyclic proof reference")
-        corrupt = proof.copy()
-        corrupt.nodes[corrupt.root].left_content_steps = List[ContentGcdStep[C]]()
-        c.check(not check_coprimality(a, b, corrupt, work), "missing content witnesses")
+        if not proof.modular:
+            corrupt = proof.copy()
+            corrupt.nodes[corrupt.root].contents_node = corrupt.root
+            c.check(not check_coprimality(a, b, corrupt, work), "cyclic proof reference")
+            corrupt = proof.copy()
+            corrupt.nodes[corrupt.root].left_content_steps = List[ContentGcdStep[C]]()
+            c.check(not check_coprimality(a, b, corrupt, work), "missing content witnesses")
         got.gcd = zero.copy()
         c.check(not check_common_divisor(f, h, got, work), "corrupt common divisor")
         c.check(not coprimality_certificate(f, h, work), "common factor has no coprimality proof")

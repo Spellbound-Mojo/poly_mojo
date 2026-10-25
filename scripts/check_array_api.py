@@ -15,6 +15,7 @@ from test_executable import prepare, CompilationFailed
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 EXPECTED = {
+    "test_modular_gcd_archive.mojo": "modular gcd archive checks passed\n",
     "test_chunked_dense.mojo": "chunked dense checks passed\n",
     "test_dense_ingestion.mojo": "dense ingestion checks passed\n",
     "test_boundary_performance.mojo": "array boundary performance checks passed\n",

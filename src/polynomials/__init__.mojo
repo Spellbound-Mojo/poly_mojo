@@ -44,6 +44,7 @@ from .certificates import SturmSequence, RootCountCertificate, check_root_count
 from .descartes import DescartesLeaf, DescartesCertificate, DescartesRootResult, check_descartes, descartes_intervals, AlgebraicDescartesCertificate, check_algebraic_descartes, DescartesCountCertificate, descartes_count, check_descartes_count
 from .certificates import SquarefreeDecomposition, Factorization, check_squarefree_product, check_factorization
 from .certificates import DivisionResult, ListDivision, GcdResult, ResultantResult, ContentGcdStep, CoprimalityNode, CoprimalityCertificate, CancellationCertificate, check_division, check_list_division, check_common_divisor, check_bezout, check_coprimality, check_resultant_identity, check_cancellation
+from ._modular_coprimality import ModularCoprimalityCertificate
 from .algebraic_arithmetic import AlgebraicArithmeticCertificate, check_algebraic_arithmetic
 from .algebraic_evaluation import AlgebraicEvaluationCertificate, algebraic_evaluate, check_algebraic_evaluation
 from .algebraic_roots import AlgebraicRootsCertificate, AlgebraicRootFilter, algebraic_roots, check_algebraic_roots
