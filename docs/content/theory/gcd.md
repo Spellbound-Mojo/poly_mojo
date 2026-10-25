@@ -119,6 +119,18 @@ $\mathbb Z$. $\square$
 Sparse modular methods (Zippel's algorithm) are faster on sparse inputs
 and are a later optimization; they do not change the certificates.
 
+Before recursive integer contents, the implementation tests whether the GCD
+is only an integer times a monomial. It removes each input's minimum exponent
+in every variable inside the modular images, without copying its terms. For
+each variable, a specialization must preserve both reduced input degrees;
+a constant univariate GCD then bounds the common divisor's degree in that
+variable by zero. If all variables have this bound, the answer is exactly the
+GCD of the integer coefficient contents times the common monomial. A variable
+absent from either reduced input already has a zero bound. Degree loss or an
+extra image factor is inconclusive and leaves the existing algorithms available.
+The preliminary test limits dense image degree ranges to 4096; large monomial
+shifts do not count toward that limit.
+
 ## Certificates
 
 **Certificate G-C1 (common divisor, with cofactors).** Data: $g$, $f'$,

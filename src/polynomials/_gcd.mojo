@@ -18,7 +18,7 @@ from ._sparse_gcd import _sparse_gcd
 from ._heuristic_gcd import _heuristic, _small_for_heuristic
 from ._brown_gcd import _brown_gcd
 from ._sparse_brown import _sparse_brown_gcd
-from ._multivariate_gcd import _deflation, _deflates, _scaled, _image_coprime, _degrees
+from ._multivariate_gcd import _deflation, _deflates, _scaled, _try_monomial_gcd, _degrees
 from .primes import prime, _residue, _merge_residue, _symmetric
 
 
@@ -190,7 +190,10 @@ def _gcd_value[C: CoefficientRing](f: SparsePoly[C], h: SparsePoly[C], mut budge
             var tops_h = List[Int](length=len(variables), fill=0)
             _degrees(rebind[SparsePoly[ZZ]](f), variables, tops_f, budget)
             _degrees(rebind[SparsePoly[ZZ]](h), variables, tops_h, budget)
-            if _image_coprime(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variable, variables, tops_f, tops_h, budget):
+            var trivial = _try_monomial_gcd(rebind[SparsePoly[ZZ]](f), rebind[SparsePoly[ZZ]](h), variables, tops_f, tops_h, budget)
+            if trivial[0]:
+                return rebind_var[SparsePoly[C]](trivial[0].take())
+            if trivial[1]:
                 # The gcd is that of the contents in `variable`. A content that
                 # divides an integer is the integer content, and its gcd with
                 # the other content is the gcd of the two integer contents.
