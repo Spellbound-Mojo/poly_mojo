@@ -156,7 +156,7 @@ class TestSelectionTests(unittest.TestCase):
                 patch.object(suite, 'prepare', return_value=fake_executable()) as compiled, \
                 patch.object(suite, 'source_inputs', return_value={}), \
                 patch.object(suite, '_run', side_effect=execute) as run, \
-                patch.object(sys, 'argv', ['suite.py', '--jobs', '1', '--report', str(Path(folder) / 'report.json'), *extra]), \
+                patch.object(sys, 'argv', ['suite.py', '--batches', '1', '--jobs', '1', '--report', str(Path(folder) / 'report.json'), *extra]), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(suite.main(), 0)
         self.assertEqual(compiled.call_count, 1)
@@ -167,6 +167,7 @@ class TestSelectionTests(unittest.TestCase):
         selected, built = self.run_selection(['--library-only'])
         self.assertEqual(selected, ['library'])
         self.assertFalse(built.kwargs['kernel'])
+        self.assertEqual(built.kwargs['compiler_threads'], 1)
 
     def test_explicit_optimization_and_compiler_threads(self):
         selected, built = self.run_selection(
@@ -176,7 +177,7 @@ class TestSelectionTests(unittest.TestCase):
 
     def test_release_mode_keeps_kernel_coverage(self):
         selected, built = self.run_selection([])
-        self.assertEqual(selected, ['library', 'kernel'])
+        self.assertCountEqual(selected, ['library', 'kernel'])
         self.assertTrue(built.kwargs['kernel'])
 
     def test_path_filter_selects_execution_without_changing_suite(self):
@@ -207,6 +208,81 @@ class TestSelectionTests(unittest.TestCase):
                             returncode=code, stdout='', stderr=diagnostic, seconds=0)):
                     self.assertEqual(check_rejections.check(path, snapshot, 1)['passed'], passed)
 
+
+
+class BatchTests(unittest.TestCase):
+    def test_balanced_batches_cover_each_configuration_once(self):
+        fixtures = [(str(i), ROOT / f'tests/test_{i}.mojo', None, ()) for i in range(9)]
+        fixtures += [(str(i) + ' variant', path, None, ('-D', 'VARIANT=1'))
+                     for i, (_, path, _, _) in enumerate(fixtures[:3])]
+        groups = suite.batches(list(reversed(fixtures)), 4)
+        self.assertEqual(groups, suite.batches(fixtures, 4))
+        plain = [group for flags, group in groups if not flags]
+        self.assertEqual([len(group) for group in plain], [3, 2, 2, 2])
+        self.assertEqual([job[0] for job in plain[0]], ['0', '4', '8'])
+        self.assertCountEqual([job for _, group in groups for job in group], fixtures)
+        for flags, group in groups:
+            self.assertTrue(group)
+            self.assertTrue(all(job[3] == flags for job in group))
+        self.assertEqual(suite.batches([], 4), [])
+        with self.assertRaisesRegex(ValueError, 'must be positive'):
+            suite.batches(fixtures, 0)
+
+    def run_batches(self, *, fail_compile=False, fail_runtime=False):
+        fixtures = [(str(i), ROOT / f'tests/test_{i}.mojo', None, ()) for i in range(8)]
+        snapshot = build_state.LibraryBuild(Path('build'), dict(build_id='one-build', compiler='test', artifacts={}))
+        events = []
+
+        def prepare(paths, *_args, **_kwargs):
+            events.append(('build', [path.stem for path in paths]))
+            if fail_compile and paths[0] == fixtures[1][1]:
+                raise suite.CompilationFailed({'compile': {'returncode': -9, 'stderr': ''}})
+            return fake_executable()
+
+        def execute(job, *_):
+            events.append(('run', job[0]))
+            return dict(name=job[0], passed=not (fail_runtime and job[0] == '0'), detail='', seconds=0)
+
+        with tempfile.TemporaryDirectory() as folder:
+            report = Path(folder) / 'report.json'
+            with patch.object(suite, 'prepared_build', return_value=contextlib.nullcontext(snapshot)), \
+                    patch.object(suite, 'jobs', return_value=fixtures), \
+                    patch.object(suite, 'prepare', side_effect=prepare), \
+                    patch.object(suite, 'source_inputs', return_value={}), \
+                    patch.object(suite, '_run', side_effect=execute), \
+                    patch.object(sys, 'argv', ['suite.py', '--jobs', '1', '--report', str(report)]), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                status = suite.main()
+            return status, events, json.loads(report.read_text())
+
+    def test_each_batch_finishes_before_the_next_build(self):
+        status, events, report = self.run_batches()
+        expected = []
+        for i in range(4):
+            expected += [('build', [f'test_{i}', f'test_{i + 4}']), ('run', str(i)), ('run', str(i + 4))]
+        self.assertEqual(events, expected)
+        self.assertEqual(status, 0)
+        self.assertTrue(report['complete'] and report['passed'])
+        self.assertEqual(len(report['records']), 8)
+        self.assertEqual(len(report['executables']), 4)
+
+    def test_later_compile_failure_keeps_finished_batch_results(self):
+        status, events, report = self.run_batches(fail_compile=True)
+        self.assertEqual(status, 1)
+        self.assertEqual(len(events), 4)
+        self.assertEqual([r['name'] for r in report['records']], ['0', '4'])
+        self.assertTrue(report['complete'])
+        self.assertFalse(report['passed'])
+        self.assertEqual(report['total'], 8)
+        self.assertEqual(report['compile_error']['compile']['returncode'], -9)
+
+    def test_runtime_failure_does_not_hide_remaining_batches(self):
+        status, _, report = self.run_batches(fail_runtime=True)
+        self.assertEqual(status, 1)
+        self.assertTrue(report['complete'])
+        self.assertFalse(report['passed'])
+        self.assertEqual(len(report['records']), 8)
+        self.assertEqual(len(report['executables']), 4)
 
 
 class TaskGraphTests(unittest.TestCase):
@@ -336,8 +412,34 @@ class SharedBuildTests(unittest.TestCase):
         self.assertEqual(len(json.loads((self.root / 'docs-results/report.json').read_text())['records']), 4)
         self.assertEqual(len(json.loads((self.root / 'api/report.json').read_text())['records']), 4)
         runtime_compiles = [cmd for cmd in self.commands if cmd[:2] == ['mojo', 'build']]
-        self.assertEqual(len(runtime_compiles), 5)  # One runtime suite; O0/O3 for each matrix.
+        self.assertEqual(len(runtime_compiles), 6)  # Two small runtime batches; O0/O3 for each matrix.
         self.assertFalse(any(cmd[:2] == ['mojo', 'run'] for cmd in self.commands))
+
+    def test_four_cached_batches_and_filtered_rerun_share_one_library(self):
+        self.build()
+        tests = self.root / 'tests/poly'
+        tests.mkdir(parents=True)
+        for i in range(8):
+            (tests / f'test_{i}.mojo').write_text('def main() raises:\n    pass\n')
+        report = self.root / 'suite.json'
+        command = ['suite.py', '--library-only', '--jobs', '1', '--report', str(report)]
+        self.commands.clear()
+        with patch.object(sys, 'argv', command):
+            self.assertEqual(suite.main(), 0)
+        full = json.loads(report.read_text())
+        self.assertEqual(len(full['executables']), 4)
+        self.assertEqual(len(full['records']), 8)
+        self.assertEqual(sum(cmd[:2] == ['mojo', 'build'] for cmd in self.commands), 4)
+        self.assertFalse(any(cmd[:2] == ['mojo', 'precompile'] for cmd in self.commands))
+        self.commands.clear()
+        with patch.object(sys, 'argv', [*command, 'test_3']):
+            self.assertEqual(suite.main(), 0)
+        filtered = json.loads(report.read_text())
+        self.assertEqual(len(filtered['records']), 1)
+        self.assertTrue(filtered['executables'][0]['reused'])
+        self.assertEqual(filtered['executables'][0]['binary'], full['executables'][3]['binary'])
+        self.assertEqual(len(filtered['executables'][0]['inputs']['programs']), 2)
+        self.assertFalse(any(cmd[:2] in (['mojo', 'build'], ['mojo', 'precompile']) for cmd in self.commands))
 
     def test_missing_build_is_not_rebuilt(self):
         with self.assertRaisesRegex(SystemExit, 'build.*once before testing'):
@@ -463,7 +565,9 @@ class SharedBuildTests(unittest.TestCase):
     def test_fast_results_are_saved_before_slow_tests_finish(self):
         self.build()
         release = threading.Event()
-        fixtures = [(name, self.root / 'tests' / name, None, ()) for name in ('slow', 'fast')]
+        # Keep the slow test first even after the runner sorts paths into batches.
+        fixtures = [(name, self.root / 'tests' / f'{index}_{name}', None, ())
+                    for index, name in enumerate(('slow', 'fast'))]
         original_report = suite._report
         observed = []
 
@@ -485,7 +589,7 @@ class SharedBuildTests(unittest.TestCase):
                 patch.object(suite, 'source_inputs', return_value={}), \
                 patch.object(suite, '_run', side_effect=execute), \
                 patch.object(suite, '_report', side_effect=report), \
-                patch.object(sys, 'argv', ['suite.py', '--jobs', '2', '--report', str(self.root / 'progress.json')]):
+                patch.object(sys, 'argv', ['suite.py', '--batches', '1', '--jobs', '2', '--report', str(self.root / 'progress.json')]):
             self.assertEqual(suite.main(), 0)
         self.assertEqual(observed[0]['records'][0]['name'], 'fast')
         self.assertFalse(observed[0]['complete'])

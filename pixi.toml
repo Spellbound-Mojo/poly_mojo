@@ -15,7 +15,7 @@ docstrings = { cmd = "python scripts/check_docstrings.py", description = "Every 
 corpus-check = { cmd = "python tests/reference/check_corpus.py", description = "Check the reference corpus independently of its generator and of the package" }
 kernel-vectors-check = { cmd = "python tests/reference/kernel/gen_poly_ops.py | cmp - tests/reference/kernel/poly_ops.txt", description = "The kernel vectors match their generator" }
 test-tooling = { cmd = "python -m unittest discover -s tests -p 'test_*tooling.py'", description = "Check dependency isolation and test selection without fetching dependencies" }
-test-library = { cmd = "python scripts/suite.py --library-only --report .cache/tests/library.json", depends-on = ["layering", "corpus-check", "kernel-vectors-check", "docstrings", "test-tooling"], description = "Compile one library runtime executable and run its tests" }
+test-library = { cmd = "python scripts/suite.py --library-only --report .cache/tests/library.json", depends-on = ["layering", "corpus-check", "kernel-vectors-check", "docstrings", "test-tooling"], description = "Build and run library runtime tests in four sequential batches" }
 test-rejections = { cmd = "python scripts/check_rejections.py", description = "Compile invalid programs separately and check their diagnostics" }
 test-api = { cmd = "python scripts/check_array_api.py", description = "Run focused API checks against the shared library build" }
 docs-test = { cmd = "python scripts/verify_docs_examples.py", description = "Run documentation examples against the shared library build" }
