@@ -1055,7 +1055,7 @@ def _start(mut search: _Search, fixed: List[RealAlgebraic], mut budget: Budget) 
         var lifting: Optional[SparsePoly[QQ]] = None
         if not value.rational:
             lifting = _embed_dense(value.polynomial, search.variables[k], budget)
-        search._push(value, lifting^, budget)
+        search._push(value, lifting, budget)
 
 
 def _prefix_sign(f: SparsePoly[QQ], point: List[Tuple[Int64, RealAlgebraic]], mut budget: Budget) raises PolyError -> Int:
@@ -1391,7 +1391,7 @@ struct _Checker(Movable):
                         lifting = self.machine._roots(item.lower.value().polynomial, budget).lifting.copy()
                     else:
                         lifting = _embed_dense(item.sample.polynomial, self.machine.variables[level], budget)
-                self.machine._push(item.sample, lifting^, budget)
+                self.machine._push(item.sample, lifting, budget)
                 if not self.check_node(child, budget):
                     return False
                 var required = self._characterization(child, budget)

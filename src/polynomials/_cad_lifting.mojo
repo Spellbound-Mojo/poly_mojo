@@ -42,7 +42,7 @@ def _floor(q: QQ, mut budget: Budget) raises PolyError -> QQ:
         var n = q.value.numerator()
         var d = q.value.denominator()
         var f = n // d
-        return QQ(Rational(f^))
+        return QQ(Rational(f))
     except e:
         raise PolyError(PolyErrorKind.CAPACITY, String(e))
 

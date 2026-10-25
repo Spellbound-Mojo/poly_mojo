@@ -86,13 +86,54 @@ class DependencyTests(unittest.TestCase):
             kernel = output / 'kernel'
             kernel.mkdir()
             spec = TEST_ONLY
-            with patch.object(deps.subprocess, 'run') as run, contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(deps.subprocess, 'run') as run, \
+                    patch.object(deps, 'compiler_identity', return_value='Mojo test toolchain'), \
+                    contextlib.redirect_stdout(io.StringIO()):
                 deps.precompile('kernel', spec, Path('/sources/kernel'), kernel, ('-I', str(output)))
             for compiled, source in zip(run.call_args_list, spec['packages'], strict=True):
                 command = compiled.args[0]
                 self.assertEqual(command[2:6], ['-I', str(kernel), '-I', str(output)])
                 self.assertEqual(command[-1], str(kernel / f'{Path(source).name}.mojoc'))
             self.assertEqual((kernel / 'kernel.commit').read_text(), spec['commit'] + '\n')
+
+    def test_dependency_rebuilds_after_compiler_upgrade_and_then_reuses(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder)
+            spec = dict(commit='pinned-source', packages=['src/dependency'])
+            (output / 'dependency.commit').write_text(spec['commit'] + '\n')
+            (output / 'dependency.mojoc').write_bytes(b'legacy cached package')
+
+            def compile_package(command, **kwargs):
+                Path(command[-1]).write_bytes(b'compiled package')
+
+            with patch.object(deps, 'compiler_identity', return_value='Mojo 1.1.0') as identity, \
+                    patch.object(deps.subprocess, 'run', side_effect=compile_package) as compile_, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                # A legacy cache without compiler provenance must be rebuilt.
+                deps.precompile('dependency', spec, Path('/source'), output)
+                self.assertEqual(compile_.call_count, 1)
+                deps.precompile('dependency', spec, Path('/source'), output)
+                self.assertEqual(compile_.call_count, 1)
+                identity.return_value = 'Mojo 1.2.0'
+                deps.precompile('dependency', spec, Path('/source'), output)
+                self.assertEqual(compile_.call_count, 2)
+                deps.precompile('dependency', spec, Path('/source'), output)
+                self.assertEqual(compile_.call_count, 2)
+
+    def test_failed_dependency_upgrade_invalidates_cache(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder)
+            spec = dict(commit='pinned-source', packages=['src/dependency'])
+            (output / 'dependency.commit').write_text(spec['commit'] + '\n')
+            (output / 'dependency.compiler').write_text('Mojo 1.1.0\n')
+            (output / 'dependency.mojoc').write_bytes(b'old package')
+            with patch.object(deps, 'compiler_identity', return_value='Mojo 1.2.0'), \
+                    patch.object(deps.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'mojo')), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    deps.precompile('dependency', spec, Path('/source'), output)
+            self.assertFalse((output / 'dependency.commit').exists())
+            self.assertFalse((output / 'dependency.compiler').exists())
 
 
 def fake_executable():

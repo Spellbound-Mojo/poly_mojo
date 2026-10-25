@@ -21,7 +21,7 @@ test-api = { cmd = "python scripts/check_array_api.py", description = "Run focus
 docs-test = { cmd = "python scripts/verify_docs_examples.py", description = "Run documentation examples against the shared library build" }
 
 [dependencies]
-mojo = "==1.1.0"
+mojo = "==1.2.0"
 python = ">=3.11"
 # apn_mojo is built from its pinned commit by `pixi run deps`.
 

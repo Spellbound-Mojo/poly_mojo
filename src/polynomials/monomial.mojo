@@ -1,5 +1,5 @@
 """Canonical sparse monomials and explicit deterministic orders."""
-from std.hashlib import Hasher
+from std.hash import Hasher
 from .errors import Budget, PolyError, PolyErrorKind, _sum, _allocation
 
 struct Monomial(Copyable, Movable, Equatable, Hashable, Writable):

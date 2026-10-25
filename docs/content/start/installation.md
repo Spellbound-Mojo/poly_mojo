@@ -1,6 +1,6 @@
 # Installation and first run
 
-Poly Mojo targets **Mojo 1.1** on Linux (x86-64 and ARM64) and on macOS with
+Poly Mojo targets **Mojo 1.2.0** on Linux (x86-64 and ARM64) and on macOS with
 Apple silicon. Install the `poly_mojo` package from the Modular community
 channel, or build the library from a checkout.
 
@@ -23,7 +23,7 @@ pixi add poly_mojo
 ```
 
 The package provides the `poly` and `polynomials` modules and brings in
-apn_mojo and a matching Mojo 1.1 compiler. Programs import the modules
+apn_mojo 1.0.2 and a matching Mojo 1.2 compiler. Programs import the modules
 directly; no include path is needed.
 
 ## Run a first example

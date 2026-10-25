@@ -17,7 +17,7 @@ domains. Numerical algorithms let you choose precision explicitly, and `astype`
 converts coefficients to a chosen floating-point or ball type. Optional work
 limits bound calculations.
 
-![Mojo 1.1](https://img.shields.io/badge/Mojo-1.1-orange)
+![Mojo 1.2](https://img.shields.io/badge/Mojo-1.2-orange)
 ![License](https://img.shields.io/badge/license-Apache%202.0-green)
 
 **Documentation:** https://spellbound-mojo.github.io/poly_mojo/
@@ -75,7 +75,7 @@ division orders are available through the same array interface.
 
 ## Install
 
-Poly Mojo targets Mojo 1.1 on Linux (x86-64 and ARM64) and on macOS with Apple
+Poly Mojo targets Mojo 1.2.0 on Linux (x86-64 and ARM64) and on macOS with Apple
 silicon. The `poly_mojo` package is not yet published in the Modular community
 channel; until it is, build from a checkout as described below.
 
@@ -102,7 +102,7 @@ pixi run --locked build
 pixi run --locked mojo run -I build docs/examples/tutorial_first.mojo
 ```
 
-The build fetches and precompiles the pinned apn_mojo dependency, and all three
+The build fetches and precompiles the pinned apn_mojo 1.0.2 dependency, and all three
 compiled packages are ready to import from `build/`. See
 [installation](docs/content/start/installation.md) for details.
 

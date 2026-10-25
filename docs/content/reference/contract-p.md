@@ -1,6 +1,6 @@
 # Source compatibility and certificates
 
-Poly Mojo targets Mojo 1.1.0. Its compatibility contract covers public source
+Poly Mojo targets Mojo 1.2.0. Its compatibility contract covers public source
 declarations and the mathematical meaning of their results. It does not promise
 a stable native ABI or a universal certificate wire format.
 

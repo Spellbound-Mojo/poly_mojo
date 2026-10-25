@@ -179,17 +179,17 @@ def _write_node[T: Copyable & Deinitable, C: CoefficientRing, D: NumericDomain, 
         var monomial = sparse._monomial(value, budget)
         _write_node[core.Monomial, C, D, E](monomial, writer, sink, budget, depth + 1)
     elif T == Int:
-        writer.line(String(rebind[Int](value)), sink, budget)
+        writer.line(String(rebind_var[Int](value.copy())), sink, budget)
     elif T == Int64:
-        writer.line(String(rebind[Int64](value)), sink, budget)
+        writer.line(String(rebind_var[Int64](value.copy())), sink, budget)
     elif T == UInt64:
-        writer.line(String(rebind[UInt64](value)), sink, budget)
+        writer.line(String(rebind_var[UInt64](value.copy())), sink, budget)
     elif T == UInt32:
-        writer.line(String(rebind[UInt32](value)), sink, budget)
+        writer.line(String(rebind_var[UInt32](value.copy())), sink, budget)
     elif T == UInt8:
-        writer.line(String(rebind[UInt8](value)), sink, budget)
+        writer.line(String(rebind_var[UInt8](value.copy())), sink, budget)
     elif T == Bool:
-        writer.line(String(Int(rebind[Bool](value))), sink, budget)
+        writer.line(String(Int(rebind_var[Bool](value.copy()))), sink, budget)
     elif T == core.NoContext:
         budget.charge(1)
     elif T == core.Modulus:

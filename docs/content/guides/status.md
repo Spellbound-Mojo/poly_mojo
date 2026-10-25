@@ -1,7 +1,7 @@
 # Support and limitations
 
 Poly Mojo implements exact symbolic algebra, arbitrary-precision numerical
-operations, and independently checkable certificates. It targets Mojo 1.1 on
+operations, and independently checkable certificates. It targets Mojo 1.2.0 on
 Linux (x86-64 and ARM64) and macOS with Apple silicon; the
 [installation guide](../start/installation.md) covers the package and a checkout.
 

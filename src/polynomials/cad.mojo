@@ -89,7 +89,7 @@ def _cad(inputs: List[SparsePoly[QQ]], variables: List[Int64], fixed: List[RealA
             var witnesses = List[CADSignWitness]()
             var vanishing = List[Int]()
             swap(vanishing, sections[parent])
-            _signs_leveled(inputs, point[0], evaluations, signs, witnesses, cache, levels, budget, lazy^, vanishing^)
+            _signs_leveled(inputs, point[0], evaluations, signs, witnesses, cache, levels, budget, lazy, vanishing)
             cells[parent].evaluations = evaluations^
             cells[parent].signs = signs^
             cells[parent].witnesses = witnesses^

@@ -27,12 +27,12 @@ import ast
 from pathlib import Path
 import subprocess
 
-from build_state import build_lock, validate
+from build_state import build_lock, compiler_identity, validate
 from packages import test_dependencies
 
 ROOT = Path(__file__).resolve().parent.parent
 DEPS = {
-    'apn_mojo': dict(url='https://github.com/Spellbound-Mojo/apn_mojo.git', commit='760120ee85e1954e9ff521d0e27d6de585a3d2eb', packages=['src/apn_mojo']),
+    'apn_mojo': dict(url='https://github.com/Spellbound-Mojo/apn_mojo.git', commit='71d54e0f3c6bb1139f51db12885a6cd6a8cc2886', packages=['src/apn_mojo']),
 }
 DEPS.update(test_dependencies())
 
@@ -72,16 +72,24 @@ def pins_of(folder):
 
 
 def precompile(name, spec, folder, output, extra=()):
-    """Precompile the dependency's packages, unless the build directory has this commit's."""
+    """Reuse packages only when both their source commit and compiler match."""
     stamp = output / f'{name}.commit'
+    compiler_stamp = output / f'{name}.compiler'
+    compiler = compiler_identity()
     targets = [output / f'{Path(p).name}.mojoc' for p in spec['packages']]
-    if stamp.is_file() and stamp.read_text().strip() == spec['commit'] and all(t.is_file() for t in targets):
+    if (stamp.is_file() and stamp.read_text().strip() == spec['commit']
+            and compiler_stamp.is_file() and compiler_stamp.read_text().strip() == compiler
+            and all(t.is_file() for t in targets)):
         return
+    # A failed or interrupted rebuild must not leave a reusable cache stamp.
+    stamp.unlink(missing_ok=True)
+    compiler_stamp.unlink(missing_ok=True)
     for package, target in zip(spec['packages'], targets):
         cmd = ['mojo', 'precompile', '-I', str(output), *extra, str(folder / package), '-o', str(target)]
         print(' '.join(cmd), flush=True)
         subprocess.run(cmd, cwd=ROOT, check=True)
     stamp.write_text(spec['commit'] + '\n')
+    compiler_stamp.write_text(compiler + '\n')
 
 
 def prepare(output, *, with_tests=False, tests_only=False):
