@@ -75,8 +75,8 @@ division orders are available through the same array interface.
 
 ## Install
 
-Poly Mojo 1.0.1 targets Mojo 1.2.0 on Linux (x86-64 and ARM64) and on macOS with
-Apple silicon. Install version 1.0.1 from the Modular community channel. If that
+Poly Mojo 1.0.2 targets Mojo 1.2.0 on Linux (x86-64 and ARM64) and on macOS with
+Apple silicon. Install version 1.0.2 from the Modular community channel. If that
 version is not yet available in the channel, build from a checkout as described
 below.
 
@@ -90,7 +90,7 @@ channels = ["https://conda.modular.com/max", "https://repo.prefix.dev/modular-co
 Then add the package, which provides the `poly` and `polynomials` modules:
 
 ```sh
-pixi add "poly_mojo==1.0.1"
+pixi add "poly_mojo==1.0.2"
 ```
 
 ### Build from a checkout

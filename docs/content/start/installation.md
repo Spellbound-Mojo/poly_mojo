@@ -1,13 +1,13 @@
 # Installation and first run
 
-Poly Mojo 1.0.1 targets **Mojo 1.2.0** on Linux (x86-64 and ARM64) and on macOS with
+Poly Mojo 1.0.2 targets **Mojo 1.2.0** on Linux (x86-64 and ARM64) and on macOS with
 Apple silicon. Install the `poly_mojo` package from the Modular community
 channel, or build the library from a checkout.
 
 ## Install the package
 
-These instructions require `poly_mojo` 1.0.1, which uses Mojo 1.2.0 and
-apn_mojo 1.0.2. If version 1.0.1 is not yet available in the channel, build from
+These instructions require `poly_mojo` 1.0.2, which uses Mojo 1.2.0 and
+apn_mojo 1.0.2. If version 1.0.2 is not yet available in the channel, build from
 a checkout as described below. The older 1.0.0 package targets Mojo 1.1.0.
 
 Add the channels to your project's `pixi.toml`:
@@ -20,7 +20,7 @@ channels = ["https://conda.modular.com/max", "https://repo.prefix.dev/modular-co
 Then add the package:
 
 ```sh
-pixi add "poly_mojo==1.0.1"
+pixi add "poly_mojo==1.0.2"
 ```
 
 The package provides the `poly` and `polynomials` modules and brings in
