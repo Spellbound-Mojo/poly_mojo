@@ -108,7 +108,7 @@ def _residues(p: SparsePoly[ZZ], field: _Field, mut budget: Budget) raises PolyE
     return out^
 
 
-def _minimum_degrees(p: SparsePoly[ZZ], variables: List[Int64], tops: List[Int], mut budget: Budget) raises PolyError -> List[Int]:
+def _minimum_degrees[C: CoefficientRing](p: SparsePoly[C], variables: List[Int64], tops: List[Int], mut budget: Budget) raises PolyError -> List[Int]:
     """The exponents of p's monomial content, including zero for absent axes."""
     _allocation[Int](len(variables), budget)
     var out = tops.copy()

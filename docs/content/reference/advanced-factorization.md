@@ -5,7 +5,8 @@ Coefficient-array users can select this sparse GCD algorithm with
 `sparse.gcd(a, b, method="modular")`, or retain its evidence through
 `sparse.gcd_checked`. See [exact array choices](../tutorial/array-checked.md#exact-queries-and-algorithm-choices).
 
-`factor_multivariate` and `factor_multivariate_integer` separate recursive
+`factor_multivariate` and `factor_multivariate_integer` first extract common
+variable powers and retain their multiplicities, then separate recursive
 polynomial content, remove repeated factors, and use a monic transformation
 followed by deterministic evaluation and exact multivariate Hensel lifting.
 Repeated specializations are rejected. Three distinct deterministic good

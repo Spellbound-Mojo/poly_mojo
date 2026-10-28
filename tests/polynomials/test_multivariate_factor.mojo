@@ -7,9 +7,49 @@ from support.check import Checker
 from support.corpus import parse_polynomial, as_zz
 
 
+def coordinate_factors(mut c: Checker, mut work: Budget) raises:
+    for kind in [MonomialOrder.KERNEL, MonomialOrder.LEX, MonomialOrder.GRLEX, MonomialOrder.GREVLEX]:
+        var order = MonomialOrder()
+        if kind != MonomialOrder.KERNEL:
+            order = MonomialOrder(kind, [Int64(7), Int64(2), Int64(11)], work)
+        var x = parse_polynomial("x2", order, work)
+        var y = parse_polynomial("x7", order, work)
+        var g = parse_polynomial("x2*x7^3 + x2 + 1", order, work)
+        var monomial = parse_polynomial("x2^3*x7^5", order, work)
+        var f = monomial.mul(g.pow(2, work), work).scale(QQ(Rational(-6)), work)
+        var rational = f.scale(QQ(Rational(1, 5)), work)
+        var got = factor_multivariate(rational, work)
+        var matched = 0
+        for entry in got.factors:
+            c.check(entry[0].order == order, "coordinate extraction preserves factor order")
+            if (entry[0] == x and entry[1] == 3) or (entry[0] == y and entry[1] == 5) or (entry[0] == g and entry[1] == 2):
+                matched += 1
+        c.check(matched == 3 and len(got.factors) == 3 and got.unit.value == Rational(-6, 5), "rational coordinate and repeated residual multiplicities")
+        c.check(check_multivariate_factorization(rational, got, work), "coordinate rational factors reconstruct")
+        var integer = as_zz(f, work)
+        var integral = factor_multivariate_integer(integer, work)
+        matched = 0
+        for entry in integral.factors:
+            c.check(entry[0].order == order, "integer coordinate extraction preserves factor order")
+            if (entry[0] == as_zz(x, work) and entry[1] == 3) or (entry[0] == as_zz(y, work) and entry[1] == 5) or (entry[0] == as_zz(g, work) and entry[1] == 2):
+                matched += 1
+        c.check(matched == 3 and len(integral.factors) == 3 and integral.unit.value == Integer(-6), "coordinate multiplicities survive the perfect-power shortcut")
+        c.check(check_multivariate_factorization(integer, integral, work), "coordinate integer factors reconstruct")
+    # Dividing by x2^3 reverses the KERNEL order of these terms. The
+    # residual's last coefficient, rather than the input's, sets its unit.
+    var kernel = MonomialOrder()
+    var g = parse_polynomial("x2 + 2*x7", kernel, work)
+    var f = parse_polynomial("x2^3", kernel, work).mul(g.pow(2, work), work).scale(QQ(Rational(-3, 5)), work)
+    var got = factor_multivariate(f, work)
+    var normalized = parse_polynomial("1/2*x2 + x7", kernel, work)
+    c.check(got.unit.value == Rational(-12, 5) and len(got.factors) == 2 and got.factors[1][0] == normalized and got.factors[1][1] == 2, "KERNEL monomial division restores term order before normalization")
+    c.check(check_multivariate_factorization(f, got, work), "KERNEL coordinate factor product reconstructs")
+
+
 def main() raises:
     var work = Budget()
     var c = Checker("multivariate factorization")
+    coordinate_factors(c, work)
     var order = MonomialOrder()
     var left = parse_polynomial("x0*x1 + 1", order, work)
     var right = parse_polynomial("x1^2 + x0 + 1", order, work)

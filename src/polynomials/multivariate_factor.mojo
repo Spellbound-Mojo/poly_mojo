@@ -2,13 +2,14 @@
 from .errors import Budget, PolyError, PolyErrorKind, _allocation, _charge_size, _sum
 from .coefficients import CoefficientRing, QQ, ZZ, ModInt
 from .exact_complex import QQi
-from .sparse import SparsePoly
-from .monomial import MonomialOrder
+from .sparse import SparsePoly, Term
+from .monomial import Monomial, MonomialOrder
 from .division import divide_exact
 from .certificates import _equal
 from ._gcd import _primitive_zz
 from ._images import _rational_image, _integer_image
 from ._multivariate_factor import _atoms, _normalize
+from ._multivariate_gcd import _minimum_degrees
 from ._coefficient_ops import _copy as _copy_coefficient
 from ._power_roots import _imul, _ipow, _power_hint, _power_root, _primitive_ordered
 
@@ -87,6 +88,37 @@ def _unit[C: CoefficientRing](f: SparsePoly[C], mut budget: Budget) raises PolyE
     return f.terms[0].coefficient.copy()
 
 
+def _extract_monomial[C: CoefficientRing](mut f: SparsePoly[C], mut factors: List[Tuple[SparsePoly[C], Int]], mut budget: Budget) raises PolyError:
+    """Remove coordinate factors before squarefree reduction and Hensel lifting."""
+    if f.is_zero():
+        return
+    var variables = f.variables(budget)
+    _allocation[Int](len(variables), budget)
+    var tops = List[Int](length=len(variables), fill=Int(UInt32.MAX))
+    var minimum = _minimum_degrees(f, variables, tops, budget)
+    _allocation[Tuple[Int64, UInt32]](len(variables), budget)
+    var pairs = List[Tuple[Int64, UInt32]](capacity=len(variables))
+    for i in range(len(variables)):
+        budget.charge(1)
+        if minimum[i]:
+            pairs.append((variables[i], UInt32(minimum[i])))
+    if len(pairs) == 0:
+        return
+    var common = Monomial(pairs^, budget)
+    _allocation[Tuple[SparsePoly[C], Int]](len(common.pairs), budget)
+    for pair in common.pairs:
+        budget.charge(1)
+        factors.append((SparsePoly[C].variable(pair[0], f.order, f.ring, budget), Int(pair[1])))
+    for ref term in f.terms:
+        budget.charge(1)
+        term.monomial = term.monomial.div(common, budget)
+    # KERNEL orders pair lists, so removing a variable can change term order.
+    if f.order.kind == MonomialOrder.KERNEL:
+        var terms = List[Term[C]]()
+        swap(terms, f.terms)
+        f = SparsePoly[C].from_terms(terms^, f.order, f.ring, budget)
+
+
 def factor_multivariate(f: SparsePoly[QQ], mut budget: Budget) raises PolyError -> MultivariateFactorization[QQ]:
     """Factor a rational multivariate polynomial by monic transformation and lifting.
 
@@ -103,8 +135,9 @@ def factor_multivariate(f: SparsePoly[QQ], mut budget: Budget) raises PolyError 
     f.check_invariants(budget)
     var factors = List[Tuple[SparsePoly[QQ], Int]]()
     var remaining = f._copy(budget)
+    _extract_monomial(remaining, factors, budget)
     if not f.is_zero():
-        var atoms = _atoms(f.reorder(MonomialOrder(), budget), budget)
+        var atoms = _atoms(remaining.reorder(MonomialOrder(), budget), budget)
         for atom in atoms:
             budget.charge(1)
             var normalized = _normalize(atom.reorder(f.order, budget), budget)
@@ -146,31 +179,32 @@ def factor_multivariate_integer(f: SparsePoly[ZZ], mut budget: Budget) raises Po
         PolyError: DOMAIN for malformed input, LIMIT or CAPACITY on work limits.
     """
     f.check_invariants(budget)
+    var remaining = f._copy(budget)
+    var factors = List[Tuple[SparsePoly[ZZ], Int]]()
+    _extract_monomial(remaining, factors, budget)
     # A perfect power h^e factors as h with multiplicities times e; the
     # squarefree gcd and every division by a repeated factor are skipped.
     if not f.is_zero():
-        var variables = f.variables(budget)
+        var variables = remaining.variables(budget)
         if len(variables) >= 2:
-            var primitive = _primitive_ordered(f, budget)
+            var primitive = _primitive_ordered(remaining, budget)
             var e = _power_hint(primitive, variables[len(variables) - 1], budget)
             if e >= 2:
                 var root = _power_root(primitive, e, budget)
                 if root:
                     var inner = factor_multivariate_integer(root.value(), budget)
-                    var scale = _quotient_zz(f.terms[0].coefficient, primitive.terms[0].coefficient, budget)
+                    var scale = _quotient_zz(remaining.terms[0].coefficient, primitive.terms[0].coefficient, budget)
                     var unit = ZZ(_imul(scale.value, _ipow(inner.unit.value, e, budget), budget))
-                    var powered = List[Tuple[SparsePoly[ZZ], Int]]()
+                    _allocation[Tuple[SparsePoly[ZZ], Int]](len(inner.factors), budget)
                     for entry in inner.factors:
                         budget.charge(1)
-                        powered.append((entry[0]._copy(budget), entry[1] * e))
-                    _sort(powered, budget)
-                    return MultivariateFactorization[ZZ](unit^, powered^)
+                        factors.append((entry[0]._copy(budget), entry[1] * e))
+                    _sort(factors, budget)
+                    return MultivariateFactorization[ZZ](unit^, factors^)
     # Multiplicities are counted by exact division over ZZ directly; the
     # rational route divided twice, once with Rational arithmetic.
-    var remaining = f._copy(budget)
-    var factors = List[Tuple[SparsePoly[ZZ], Int]]()
     if not f.is_zero():
-        var rational = _rational_image(f, budget)
+        var rational = _rational_image(remaining, budget)
         var atoms = _atoms(rational.reorder(MonomialOrder(), budget), budget)
         _allocation[Tuple[SparsePoly[ZZ], Int]](len(atoms), budget)
         for atom in atoms:
